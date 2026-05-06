@@ -1,0 +1,8 @@
+.codex-tools/
+.github/
+.porthub/
+coverage/
+node_modules/
+npm-debug.log*
+tests/
+
