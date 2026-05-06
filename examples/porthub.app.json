@@ -1,0 +1,9 @@
+{
+  "id": "example",
+  "name": "Example App",
+  "command": "npm.cmd run dev",
+  "cwd": ".",
+  "protocol": "http",
+  "healthUrl": "/"
+}
+
