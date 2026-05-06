@@ -1,6 +1,6 @@
 .codex-tools/
 .github/
-.porthub/
+.relaybase/
 coverage/
 node_modules/
 npm-debug.log*

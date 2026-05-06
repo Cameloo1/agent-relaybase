@@ -22,7 +22,7 @@ export class Registry {
       const raw = await fs.readFile(this.filePath, "utf8");
       const parsed = JSON.parse(raw) as RegistryFile;
       if (parsed.version !== 1 || !Array.isArray(parsed.apps)) {
-        throw new Error("Unsupported PortHub registry format.");
+        throw new Error("Unsupported Relaybase registry format.");
       }
 
       this.#apps = new Map(parsed.apps.map((app) => [app.id, app]));

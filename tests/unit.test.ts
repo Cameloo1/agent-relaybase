@@ -16,7 +16,7 @@ test("validates app ids", () => {
 });
 
 test("normalizes manifests with relative cwd and env", () => {
-  const manifestPath = path.join(os.tmpdir(), "porthub-manifest", "porthub.app.json");
+  const manifestPath = path.join(os.tmpdir(), "relaybase-manifest", "relaybase.app.json");
   const app = normalizeManifest({
     id: "notes",
     name: "Notes",
@@ -29,13 +29,13 @@ test("normalizes manifests with relative cwd and env", () => {
   }, { manifestPath, now: new Date("2026-05-06T00:00:00.000Z") });
 
   assert.equal(app.id, "notes");
-  assert.equal(app.cwd, path.join(os.tmpdir(), "porthub-manifest", "app"));
+  assert.equal(app.cwd, path.join(os.tmpdir(), "relaybase-manifest", "app"));
   assert.equal(app.env.NODE_ENV, "development");
   assert.equal(app.upstreamPort, 18001);
 });
 
 test("persists registry records", async () => {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "porthub-registry-"));
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-registry-"));
   const registry = new Registry(stateDir);
   await registry.load();
   await registry.upsertManifest({
@@ -55,7 +55,7 @@ test("resolves agent header before host header", () => {
   const route = resolveRoute({
     url: "/",
     headers: {
-      "x-port-hub-app": "api",
+      "x-relaybase-app": "api",
       host: "human.localhost:7777"
     }
   });

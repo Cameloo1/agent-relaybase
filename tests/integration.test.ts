@@ -6,18 +6,18 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { createPortHubServer } from "../src/server.ts";
+import { createRelaybaseServer } from "../src/server.ts";
 import { canBindPort } from "../src/ports.ts";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 test("proxies HTTP by agent header and host header", async () => {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "porthub-http-"));
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-http-"));
   const upstream = await createHttpUpstream((request) => JSON.stringify({
     url: request.url,
-    routedApp: request.headers["x-port-hub-routed-app"]
+    routedApp: request.headers["x-relaybase-routed-app"]
   }));
-  const hub = await createPortHubServer({ port: 0, stateDir });
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
 
   try {
     await hub.runtime.registry.upsertManifest({
@@ -32,7 +32,7 @@ test("proxies HTTP by agent header and host header", async () => {
     const address = hub.address();
 
     const headerResponse = await httpRequest(address.port, "/from-header", {
-      "x-port-hub-app": "notes",
+      "x-relaybase-app": "notes",
       host: "localhost"
     });
     assert.equal(headerResponse.statusCode, 200);
@@ -50,23 +50,23 @@ test("proxies HTTP by agent header and host header", async () => {
 });
 
 test("keeps reserved hub routes on the dashboard/API", async () => {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "porthub-dashboard-"));
-  const hub = await createPortHubServer({ port: 0, stateDir });
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-dashboard-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
 
   try {
     await hub.listen();
     const response = await httpRequest(hub.address().port, "/__hub", { host: "unknown.localhost" });
     assert.equal(response.statusCode, 200);
-    assert.match(response.body, /PortHub/);
+    assert.match(response.body, /Relaybase/);
   } finally {
     await hub.close();
   }
 });
 
 test("proxies upgrade sockets for WebSocket-style dev servers", async () => {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "porthub-ws-"));
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-ws-"));
   const upstream = await createUpgradeUpstream();
-  const hub = await createPortHubServer({ port: 0, stateDir });
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
 
   try {
     await hub.runtime.registry.upsertManifest({
@@ -99,8 +99,8 @@ test("proxies upgrade sockets for WebSocket-style dev servers", async () => {
 });
 
 test("manages process lifecycle and injects hub env", async () => {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "porthub-process-"));
-  const hub = await createPortHubServer({ port: 0, stateDir, portRangeStart: 18100, portRangeEnd: 18120 });
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-process-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18100, portRangeEnd: 18120 });
 
   try {
     await hub.listen();
@@ -120,7 +120,7 @@ test("manages process lifecycle and injects hub env", async () => {
     assert.ok(runtime.assignedPort);
 
     const response = await httpRequest(hub.address().port, "/env", {
-      "x-port-hub-app": "managed",
+      "x-relaybase-app": "managed",
       host: "localhost"
     });
     const body = JSON.parse(response.body);
@@ -135,9 +135,9 @@ test("manages process lifecycle and injects hub env", async () => {
 });
 
 test("reports conflict when fixed managed port is occupied", async () => {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "porthub-conflict-"));
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-conflict-"));
   const occupied = await createHttpUpstream(() => "occupied");
-  const hub = await createPortHubServer({ port: 0, stateDir });
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
 
   try {
     await hub.listen();
@@ -159,9 +159,9 @@ test("reports conflict when fixed managed port is occupied", async () => {
 });
 
 test("routes basic TCP tunnel handshakes", async () => {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "porthub-tcp-"));
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-tcp-"));
   const upstream = await createTcpEchoServer();
-  const hub = await createPortHubServer({ port: 0, stateDir });
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
 
   try {
     await hub.runtime.registry.upsertManifest({
@@ -174,7 +174,7 @@ test("routes basic TCP tunnel handshakes", async () => {
     });
     await hub.listen();
 
-    const response = await tcpEcho(hub.address().port, "PORTHUB-TCP echo\n\nhello");
+    const response = await tcpEcho(hub.address().port, "RELAYBASE-TCP echo\n\nhello");
     assert.equal(response, "hello");
   } finally {
     await hub.close();

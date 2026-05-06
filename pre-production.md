@@ -1,9 +1,9 @@
 # Pre-Production Readiness Tracker
 
 Review timestamp: 2026-05-06 11:44:41 -05:00  
+Last updated: 2026-05-06 11:51:55 -05:00  
 Baseline commit reviewed: `19bfbaf`  
 Baseline verification: `npm.cmd test` passed 12/12 tests on 2026-05-06 11:44:41 -05:00  
-Filename note: this file intentionally uses `pre-produciton.md` to match the requested filename.
 
 ## Production Goal
 
@@ -44,14 +44,14 @@ Primary references checked during this review:
 | 2026-05-06 11:42:18 -05:00 | GitHub baseline | Done | Initial commit `19bfbaf` pushed to `main`. |
 | 2026-05-06 11:44:41 -05:00 | Local routing daemon | Done | `src/server.ts` creates one local hub listener and routes hub/app traffic. |
 | 2026-05-06 11:44:41 -05:00 | Localhost default | Done | `src/state.ts` defaults to `127.0.0.1` and port `7777`. |
-| 2026-05-06 11:44:41 -05:00 | Header routing | Done | `src/router.ts` resolves `X-Port-Hub-App` before host routing. |
+| 2026-05-06 11:44:41 -05:00 | Header routing | Done | `src/router.ts` resolves `X-Relaybase-App` before host routing. |
 | 2026-05-06 11:44:41 -05:00 | Human host routing | Done | `src/router.ts` maps `<app>.localhost` to app ids. |
 | 2026-05-06 11:44:41 -05:00 | Reserved hub surface | Done | `/__hub` and `/__hub/api/*` are reserved before app routing. |
 | 2026-05-06 11:44:41 -05:00 | HTTP proxy | Done | `src/proxy.ts` proxies HTTP requests to app upstream ports. |
 | 2026-05-06 11:44:41 -05:00 | WebSocket-style upgrades | Done | `src/server.ts` and `src/proxy.ts` route upgrade sockets; tests cover a basic 101 upgrade. |
-| 2026-05-06 11:44:41 -05:00 | Basic TCP tunnel | Done | `src/tcpTunnel.ts` supports `PORTHUB-TCP <app-id>` handshakes. |
+| 2026-05-06 11:44:41 -05:00 | Basic TCP tunnel | Done | `src/tcpTunnel.ts` supports `RELAYBASE-TCP <app-id>` handshakes. |
 | 2026-05-06 11:44:41 -05:00 | App manifest validation | Done | `src/validation.ts` validates id, command, cwd, protocol, env, health URL, and fixed upstream port. |
-| 2026-05-06 11:44:41 -05:00 | Registry persistence | Done | `src/registry.ts` persists `registry.json` in the PortHub state directory. |
+| 2026-05-06 11:44:41 -05:00 | Registry persistence | Done | `src/registry.ts` persists `registry.json` in the Relaybase state directory. |
 | 2026-05-06 11:44:41 -05:00 | Managed process lifecycle | Done | `src/processManager.ts` supports start, stop, restart, logs, health, and assigned ports. |
 | 2026-05-06 11:44:41 -05:00 | CLI | Done | `src/cli.ts` supports serve, register, start, stop, restart, status, and logs. |
 | 2026-05-06 11:44:41 -05:00 | Dashboard | Done | `src/dashboard.ts` renders registered apps and start/stop controls. |
@@ -93,7 +93,7 @@ Primary references checked during this review:
 | Logged | Status | Task | Acceptance Criteria |
 | --- | --- | --- | --- |
 | 2026-05-06 11:44:41 -05:00 | Todo | Replace `command` string with `command` plus `args`. | No production path invokes `spawn` with `shell: true` by default; shell mode requires explicit unsafe opt-in. |
-| 2026-05-06 11:44:41 -05:00 | Todo | Add manifest schema versioning. | `porthub.app.json` includes `schemaVersion`; migrations and validation errors are deterministic. |
+| 2026-05-06 11:44:41 -05:00 | Todo | Add manifest schema versioning. | `relaybase.app.json` includes `schemaVersion`; migrations and validation errors are deterministic. |
 | 2026-05-06 11:44:41 -05:00 | Todo | Add process supervision. | Managed apps support restart policy, max restart rate, graceful timeout, kill tree behavior, and crash reason reporting. |
 | 2026-05-06 11:44:41 -05:00 | Todo | Add environment and secret policy. | Secrets are redacted from logs/API responses; env injection is explicit and auditable. |
 | 2026-05-06 11:44:41 -05:00 | Todo | Add app sandbox boundaries. | Apps cannot claim arbitrary filesystem roots or privileged ports without explicit trust. |
@@ -154,7 +154,7 @@ Primary references checked during this review:
 | 2026-05-06 11:44:41 -05:00 | Todo | Add lockfile and dependency policy. | `package-lock.json` is committed; dependency update policy and audit workflow exist. |
 | 2026-05-06 11:44:41 -05:00 | Todo | Add cross-platform CI matrix. | Tests run on Windows, macOS, and Linux with supported Node versions. |
 | 2026-05-06 11:44:41 -05:00 | Todo | Add lint, typecheck, and formatting gates. | CI fails on type errors, lint violations, formatting drift, and tests. |
-| 2026-05-06 11:44:41 -05:00 | Todo | Add package smoke tests. | Packed artifact installs in a temp project and `porthub --help`, `serve`, and basic routing smoke tests pass. |
+| 2026-05-06 11:44:41 -05:00 | Todo | Add package smoke tests. | Packed artifact installs in a temp project and `relaybase --help`, `serve`, and basic routing smoke tests pass. |
 | 2026-05-06 11:44:41 -05:00 | Todo | Add signed release workflow. | Releases produce checksums, provenance/attestation, changelog, and version tags. |
 
 ### Phase 8 - Security Review and Release Criteria

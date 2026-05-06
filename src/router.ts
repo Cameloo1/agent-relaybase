@@ -2,7 +2,7 @@ import type { RequestLike, RouteResolution } from "./types.ts";
 import { isValidAppId } from "./validation.ts";
 
 export const HUB_PREFIX = "/__hub";
-export const AGENT_APP_HEADER = "x-port-hub-app";
+export const AGENT_APP_HEADER = "x-relaybase-app";
 
 export function resolveRoute(request: RequestLike): RouteResolution {
   const pathname = getPathname(request.url);
@@ -10,7 +10,7 @@ export function resolveRoute(request: RequestLike): RouteResolution {
     return { kind: "hub" };
   }
 
-  const headerApp = headerValue(request.headers[AGENT_APP_HEADER] ?? request.headers["x-porthub-app"]);
+  const headerApp = headerValue(request.headers[AGENT_APP_HEADER] ?? request.headers["x-relaybase-app"]);
   if (headerApp) {
     const appId = headerApp.trim().toLowerCase();
     if (!isValidAppId(appId)) {
@@ -28,7 +28,7 @@ export function resolveRoute(request: RequestLike): RouteResolution {
     }
   }
 
-  return { kind: "unknown", statusCode: 404, message: "No PortHub app route matched this request." };
+  return { kind: "unknown", statusCode: 404, message: "No Relaybase app route matched this request." };
 }
 
 export function appIdFromHost(hostHeader: string): string | undefined {

@@ -11,7 +11,7 @@ import { sendHtml, sendJson } from "./responses.ts";
 import { maybeHandleTcpTunnel } from "./tcpTunnel.ts";
 import type { ServerOptions } from "./types.ts";
 
-export interface PortHubRuntime {
+export interface RelaybaseRuntime {
   host: string;
   port: number;
   stateDir: string;
@@ -20,8 +20,8 @@ export interface PortHubRuntime {
   processes: ProcessManager;
 }
 
-export interface PortHubServer {
-  runtime: PortHubRuntime;
+export interface RelaybaseServer {
+  runtime: RelaybaseRuntime;
   httpServer: http.Server;
   netServer: net.Server;
   listen(): Promise<void>;
@@ -29,14 +29,14 @@ export interface PortHubServer {
   address(): { host: string; port: number };
 }
 
-export async function createPortHubServer(options: ServerOptions = {}): Promise<PortHubServer> {
+export async function createRelaybaseServer(options: ServerOptions = {}): Promise<RelaybaseServer> {
   const host = options.host ?? DEFAULT_HOST;
-  const port = options.port ?? Number(process.env.PORTHUB_PORT ?? DEFAULT_PORT);
+  const port = options.port ?? Number(process.env.RELAYBASE_PORT ?? DEFAULT_PORT);
   const stateDir = options.stateDir ?? getDefaultStateDir();
   const registry = new Registry(stateDir);
   await registry.load();
   const token = await getOrCreateSessionToken(stateDir);
-  const runtime: PortHubRuntime = {
+  const runtime: RelaybaseRuntime = {
     host,
     port,
     stateDir,
@@ -71,7 +71,7 @@ export async function createPortHubServer(options: ServerOptions = {}): Promise<
           httpServer.emit("connection", socket);
         }
       }).catch((error) => {
-        socket.end(`PortHub connection failed: ${error instanceof Error ? error.message : String(error)}\n`);
+        socket.end(`Relaybase connection failed: ${error instanceof Error ? error.message : String(error)}\n`);
       });
     });
   });
@@ -97,7 +97,7 @@ export async function createPortHubServer(options: ServerOptions = {}): Promise<
   };
 }
 
-async function handleHttp(runtime: PortHubRuntime, request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+async function handleHttp(runtime: RelaybaseRuntime, request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
   const route = resolveRoute({ url: request.url, headers: request.headers });
 
   if (route.kind === "hub") {
@@ -112,13 +112,13 @@ async function handleHttp(runtime: PortHubRuntime, request: http.IncomingMessage
 
   const app = await runtime.registry.get(route.appId);
   if (!app) {
-    sendJson(response, 404, { error: `Unknown PortHub app: ${route.appId}`, source: route.source });
+    sendJson(response, 404, { error: `Unknown Relaybase app: ${route.appId}`, source: route.source });
     return;
   }
 
   const target = await runtime.processes.getProxyTarget(app);
   if (!target) {
-    sendJson(response, 502, { error: `PortHub app is not reachable: ${route.appId}`, app });
+    sendJson(response, 502, { error: `Relaybase app is not reachable: ${route.appId}`, app });
     return;
   }
 
@@ -131,7 +131,7 @@ async function handleHttp(runtime: PortHubRuntime, request: http.IncomingMessage
   });
 }
 
-async function handleHub(runtime: PortHubRuntime, request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+async function handleHub(runtime: RelaybaseRuntime, request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
   const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
 
   if (pathname === "/__hub" || pathname === "/__hub/") {
@@ -144,14 +144,14 @@ async function handleHub(runtime: PortHubRuntime, request: http.IncomingMessage,
     return;
   }
 
-  sendJson(response, 404, { error: "Unknown PortHub route" });
+  sendJson(response, 404, { error: "Unknown Relaybase route" });
 }
 
-async function handleUpgrade(runtime: PortHubRuntime, request: http.IncomingMessage, socket: net.Socket, head: Buffer): Promise<void> {
+async function handleUpgrade(runtime: RelaybaseRuntime, request: http.IncomingMessage, socket: net.Socket, head: Buffer): Promise<void> {
   const route = resolveRoute({ url: request.url, headers: request.headers });
 
   if (route.kind === "hub") {
-    writeSocketHttpError(socket, 400, "PortHub dashboard does not accept WebSocket upgrades.");
+    writeSocketHttpError(socket, 400, "Relaybase dashboard does not accept WebSocket upgrades.");
     return;
   }
 
@@ -162,13 +162,13 @@ async function handleUpgrade(runtime: PortHubRuntime, request: http.IncomingMess
 
   const app = await runtime.registry.get(route.appId);
   if (!app) {
-    writeSocketHttpError(socket, 404, `Unknown PortHub app: ${route.appId}`);
+    writeSocketHttpError(socket, 404, `Unknown Relaybase app: ${route.appId}`);
     return;
   }
 
   const target = await runtime.processes.getProxyTarget(app);
   if (!target) {
-    writeSocketHttpError(socket, 502, `PortHub app is not reachable: ${route.appId}`);
+    writeSocketHttpError(socket, 502, `Relaybase app is not reachable: ${route.appId}`);
     return;
   }
 
@@ -186,7 +186,7 @@ function listen(server: net.Server, host: string, port: number): Promise<void> {
     const onError = (error: NodeJS.ErrnoException) => {
       server.off("listening", onListening);
       if (error.code === "EADDRINUSE") {
-        reject(new Error(`PortHub cannot start because ${host}:${port} is already in use.`));
+        reject(new Error(`Relaybase cannot start because ${host}:${port} is already in use.`));
       } else {
         reject(error);
       }

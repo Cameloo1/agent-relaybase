@@ -12,9 +12,9 @@ const server = http.createServer((request, response) => {
 
   response.writeHead(200, { "content-type": "application/json" });
   response.end(JSON.stringify({
-    app: process.env.PORT_HUB_APP_ID,
+    app: process.env.RELAYBASE_APP_ID,
     port: process.env.PORT,
-    baseUrl: process.env.PORT_HUB_BASE_URL,
+    baseUrl: process.env.RELAYBASE_BASE_URL,
     url: request.url
   }));
 });

@@ -24,7 +24,7 @@ export function proxyHttpRequest(options: {
   const headers = filterHeaders(request.headers);
   headers["x-forwarded-host"] = request.headers.host ?? "";
   headers["x-forwarded-proto"] = "http";
-  headers["x-port-hub-routed-app"] = app.id;
+  headers["x-relaybase-routed-app"] = app.id;
 
   const upstream = http.request({
     host: targetHost,
@@ -43,7 +43,7 @@ export function proxyHttpRequest(options: {
     }
 
     response.end(JSON.stringify({
-      error: "PortHub proxy failed",
+      error: "Relaybase proxy failed",
       app: app.id,
       detail: error.message
     }, null, 2));

@@ -1,5 +1,5 @@
 import http from "node:http";
-import { createPortHubServer } from "./server.ts";
+import { createRelaybaseServer } from "./server.ts";
 import { Registry, readManifestFile } from "./registry.ts";
 import { DEFAULT_HOST, DEFAULT_PORT, getDefaultStateDir, getOrCreateSessionToken } from "./state.ts";
 
@@ -48,11 +48,11 @@ async function main(): Promise<void> {
 }
 
 async function serve(options: CliOptions): Promise<void> {
-  const server = await createPortHubServer(options);
+  const server = await createRelaybaseServer(options);
   await server.listen();
   const address = server.address();
 
-  console.log(`PortHub listening on http://${address.host}:${address.port}/__hub`);
+  console.log(`Relaybase listening on http://${address.host}:${address.port}/__hub`);
   console.log(`State: ${server.runtime.stateDir}`);
 
   process.once("SIGINT", () => {
@@ -65,7 +65,7 @@ async function serve(options: CliOptions): Promise<void> {
 
 async function register(manifestPath: string | undefined, options: CliOptions): Promise<void> {
   if (!manifestPath) {
-    throw new Error("Usage: porthub register <manifest>");
+    throw new Error("Usage: relaybase register <manifest>");
   }
 
   const registry = new Registry(options.stateDir);
@@ -82,7 +82,7 @@ async function status(options: CliOptions): Promise<void> {
     await registry.load();
     const apps = await registry.list();
     if (!apps.length) {
-      console.log("No apps registered. PortHub server is not running.");
+      console.log("No apps registered. Relaybase server is not running.");
       return;
     }
 
@@ -92,7 +92,7 @@ async function status(options: CliOptions): Promise<void> {
       status: "offline",
       port: app.upstreamPort ?? ""
     })));
-    console.log("PortHub server is not running.");
+    console.log("Relaybase server is not running.");
     return;
   }
 
@@ -109,7 +109,7 @@ async function status(options: CliOptions): Promise<void> {
 async function mutateApp(action: string, id: string, options: CliOptions): Promise<void> {
   const response = await apiRequest(options, "POST", `/__hub/api/apps/${encodeURIComponent(id)}/${action}`, undefined, await getOrCreateSessionToken(options.stateDir));
   if (!response.ok) {
-    throw new Error(response.body || `PortHub ${action} failed.`);
+    throw new Error(response.body || `Relaybase ${action} failed.`);
   }
 
   const body = JSON.parse(response.body) as { runtime: { status: string; health: string; assignedPort?: number; lastError?: string } };
@@ -131,8 +131,8 @@ async function logs(id: string, options: CliOptions): Promise<void> {
 
 function parseOptions(args: string[]): CliOptions {
   const options: CliOptions = {
-    host: process.env.PORTHUB_HOST ?? DEFAULT_HOST,
-    port: Number(process.env.PORTHUB_PORT ?? DEFAULT_PORT),
+    host: process.env.RELAYBASE_HOST ?? DEFAULT_HOST,
+    port: Number(process.env.RELAYBASE_PORT ?? DEFAULT_PORT),
     stateDir: getDefaultStateDir()
   };
 
@@ -170,7 +170,7 @@ function apiRequest(options: CliOptions, method: string, path: string, body?: un
       timeout: 2000,
       headers: {
         ...(payload ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } : {}),
-        ...(token ? { "x-port-hub-token": token } : {})
+        ...(token ? { "x-relaybase-token": token } : {})
       }
     }, (response) => {
       const chunks: Buffer[] = [];
@@ -183,7 +183,7 @@ function apiRequest(options: CliOptions, method: string, path: string, body?: un
 
     request.once("timeout", () => {
       request.destroy();
-      resolve({ ok: false, statusCode: 0, body: "PortHub server is not reachable." });
+      resolve({ ok: false, statusCode: 0, body: "Relaybase server is not reachable." });
     });
     request.once("error", (error) => {
       resolve({ ok: false, statusCode: 0, body: error.message });
@@ -198,11 +198,11 @@ function apiRequest(options: CliOptions, method: string, path: string, body?: un
 }
 
 function printHelp(): void {
-  console.log(`PortHub
+  console.log(`Relaybase
 
 Commands:
   serve                         Start the localhost hub
-  register <manifest>           Register a porthub.app.json file
+  register <manifest>           Register a relaybase.app.json file
   start <app>                   Start a managed app through the running hub
   stop <app>                    Stop a managed app
   restart <app>                 Restart a managed app
@@ -212,7 +212,7 @@ Commands:
 Options:
   --port <number>                Hub port, default 7777
   --host <host>                  Hub host, default 127.0.0.1
-  --state-dir <path>             PortHub state directory
+  --state-dir <path>             Relaybase state directory
 `);
 }
 

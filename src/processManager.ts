@@ -68,8 +68,8 @@ export class ProcessManager {
         ...app.env,
         PORT: String(assignedPort),
         HOST: this.hubHost,
-        PORT_HUB_APP_ID: app.id,
-        PORT_HUB_BASE_URL: `http://${app.id}.localhost:${this.hubPort}`
+        RELAYBASE_APP_ID: app.id,
+        RELAYBASE_BASE_URL: `http://${app.id}.localhost:${this.hubPort}`
       },
       shell: true,
       windowsHide: true
@@ -78,7 +78,7 @@ export class ProcessManager {
     entry.child = child;
     entry.pid = child.pid;
     entry.startedAt = new Date().toISOString();
-    entry.logs.push(`[porthub] starting ${app.id} on ${this.hubHost}:${assignedPort}`);
+    entry.logs.push(`[relaybase] starting ${app.id} on ${this.hubHost}:${assignedPort}`);
 
     child.stdout.on("data", (chunk) => this.#appendLog(app.id, chunk.toString()));
     child.stderr.on("data", (chunk) => this.#appendLog(app.id, chunk.toString()));
@@ -86,7 +86,7 @@ export class ProcessManager {
       entry.status = "errored";
       entry.health = "unhealthy";
       entry.lastError = error.message;
-      this.#appendLog(app.id, `[porthub] process error: ${error.message}`);
+      this.#appendLog(app.id, `[relaybase] process error: ${error.message}`);
     });
     child.once("exit", (code, signal) => {
       if (entry.status !== "stopped") {
@@ -96,7 +96,7 @@ export class ProcessManager {
       entry.health = "unhealthy";
       entry.stoppedAt = new Date().toISOString();
       entry.lastError = code === 0 ? undefined : `Process exited with code ${code ?? "null"} signal ${signal ?? "null"}.`;
-      this.#appendLog(app.id, `[porthub] exited code=${code ?? "null"} signal=${signal ?? "null"}`);
+      this.#appendLog(app.id, `[relaybase] exited code=${code ?? "null"} signal=${signal ?? "null"}`);
     });
 
     const healthy = await waitForHealthy(app, assignedPort, this.hubHost, 8000);
@@ -130,7 +130,7 @@ export class ProcessManager {
     entry.status = "stopped";
     entry.health = "unhealthy";
     entry.stoppedAt = new Date().toISOString();
-    this.#appendLog(id, "[porthub] stopping");
+    this.#appendLog(id, "[relaybase] stopping");
 
     if (process.platform === "win32" && entry.child.pid) {
       spawnSync("taskkill", ["/pid", String(entry.child.pid), "/t", "/f"], { windowsHide: true });
