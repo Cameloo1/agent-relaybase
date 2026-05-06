@@ -1,14 +1,14 @@
 {
-  "name": "porthub",
+  "name": "relaybase",
   "version": "0.1.0",
   "description": "Local-first routing hub for AI-agent-built apps and crowded dev ports.",
   "type": "module",
   "bin": {
-    "porthub": "./bin/porthub.cjs"
+    "relaybase": "./bin/relaybase.cjs"
   },
   "scripts": {
     "serve": "node --experimental-strip-types src/cli.ts serve",
-    "porthub": "node --experimental-strip-types src/cli.ts",
+    "relaybase": "node --experimental-strip-types src/cli.ts",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "smoke": "node --experimental-strip-types src/cli.ts status"
   },

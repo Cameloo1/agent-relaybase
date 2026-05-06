@@ -9,15 +9,15 @@ export const DEFAULT_PORT_RANGE_START = 17000;
 export const DEFAULT_PORT_RANGE_END = 17999;
 
 export function getDefaultStateDir(): string {
-  if (process.env.PORTHUB_STATE_DIR) {
-    return path.resolve(process.env.PORTHUB_STATE_DIR);
+  if (process.env.RELAYBASE_STATE_DIR) {
+    return path.resolve(process.env.RELAYBASE_STATE_DIR);
   }
 
   if (process.platform === "win32" && process.env.LOCALAPPDATA) {
-    return path.join(process.env.LOCALAPPDATA, "PortHub");
+    return path.join(process.env.LOCALAPPDATA, "Relaybase");
   }
 
-  return path.join(os.homedir(), ".porthub");
+  return path.join(os.homedir(), ".relaybase");
 }
 
 export async function ensureStateDir(stateDir: string): Promise<void> {

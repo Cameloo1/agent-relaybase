@@ -1,23 +1,23 @@
 import net from "node:net";
-import type { PortHubRuntime } from "./server.ts";
+import type { RelaybaseRuntime } from "./server.ts";
 
 const MAX_HANDSHAKE_BYTES = 4096;
 
-export async function maybeHandleTcpTunnel(runtime: PortHubRuntime, socket: net.Socket, firstChunk: Buffer): Promise<boolean> {
-  if (!firstChunk.toString("utf8", 0, Math.min(firstChunk.length, 32)).startsWith("PORTHUB-TCP ")) {
+export async function maybeHandleTcpTunnel(runtime: RelaybaseRuntime, socket: net.Socket, firstChunk: Buffer): Promise<boolean> {
+  if (!firstChunk.toString("utf8", 0, Math.min(firstChunk.length, 32)).startsWith("RELAYBASE-TCP ")) {
     return false;
   }
 
   let buffer = firstChunk;
   while (!buffer.includes("\n\n") && !buffer.includes("\r\n\r\n")) {
     if (buffer.length > MAX_HANDSHAKE_BYTES) {
-      socket.end("PortHub TCP handshake too large.\n");
+      socket.end("Relaybase TCP handshake too large.\n");
       return true;
     }
 
     const next = await readOnce(socket);
     if (!next) {
-      socket.end("PortHub TCP handshake ended early.\n");
+      socket.end("Relaybase TCP handshake ended early.\n");
       return true;
     }
 
@@ -31,19 +31,19 @@ export async function maybeHandleTcpTunnel(runtime: PortHubRuntime, socket: net.
   const [, appId] = preface.split(/\s+/, 2);
 
   if (!appId) {
-    socket.end("PortHub TCP handshake missing app id.\n");
+    socket.end("Relaybase TCP handshake missing app id.\n");
     return true;
   }
 
   const app = await runtime.registry.get(appId);
   if (!app) {
-    socket.end(`Unknown PortHub app: ${appId}\n`);
+    socket.end(`Unknown Relaybase app: ${appId}\n`);
     return true;
   }
 
   const target = await runtime.processes.getProxyTarget(app);
   if (!target) {
-    socket.end(`PortHub app is not reachable: ${appId}\n`);
+    socket.end(`Relaybase app is not reachable: ${appId}\n`);
     return true;
   }
 
@@ -57,7 +57,7 @@ export async function maybeHandleTcpTunnel(runtime: PortHubRuntime, socket: net.
     upstream.pipe(socket);
   });
   upstream.once("error", (error) => {
-    socket.end(`PortHub TCP proxy failed: ${error.message}\n`);
+    socket.end(`Relaybase TCP proxy failed: ${error.message}\n`);
   });
 
   return true;

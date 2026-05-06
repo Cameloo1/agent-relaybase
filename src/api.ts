@@ -1,9 +1,9 @@
 import type http from "node:http";
 import { readManifestFile } from "./registry.ts";
 import { notFound, sendJson } from "./responses.ts";
-import type { PortHubRuntime } from "./server.ts";
+import type { RelaybaseRuntime } from "./server.ts";
 
-export async function handleApiRequest(runtime: PortHubRuntime, request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+export async function handleApiRequest(runtime: RelaybaseRuntime, request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
   const url = new URL(request.url ?? "/", "http://localhost");
   const parts = url.pathname.split("/").filter(Boolean);
 
@@ -54,13 +54,13 @@ export async function handleApiRequest(runtime: PortHubRuntime, request: http.In
 
     notFound(response);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown PortHub API error.";
+    const message = error instanceof Error ? error.message : "Unknown Relaybase API error.";
     sendJson(response, message === "Unauthorized" ? 401 : 400, { error: message });
   }
 }
 
-function requireToken(runtime: PortHubRuntime, request: http.IncomingMessage): void {
-  const token = request.headers["x-port-hub-token"] ?? request.headers.authorization?.replace(/^Bearer\s+/i, "");
+function requireToken(runtime: RelaybaseRuntime, request: http.IncomingMessage): void {
+  const token = request.headers["x-relaybase-token"] ?? request.headers.authorization?.replace(/^Bearer\s+/i, "");
   const actual = Array.isArray(token) ? token[0] : token;
   if (actual !== runtime.token) {
     throw new Error("Unauthorized");

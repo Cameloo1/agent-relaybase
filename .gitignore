@@ -1,5 +1,5 @@
 .codex-tools/
-.porthub/
+.relaybase/
 coverage/
 dist/
 node_modules/

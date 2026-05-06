@@ -8,7 +8,7 @@ export function dashboardHtml(options: { token: string; apps: AppStatusView[] })
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PortHub</title>
+  <title>Relaybase</title>
   <style>
     :root {
       color-scheme: dark;
@@ -122,7 +122,7 @@ export function dashboardHtml(options: { token: string; apps: AppStatusView[] })
 </head>
 <body>
   <header>
-    <h1>PortHub</h1>
+    <h1>Relaybase</h1>
     <span class="muted">127.0.0.1</span>
   </header>
   <main>
@@ -133,8 +133,8 @@ export function dashboardHtml(options: { token: string; apps: AppStatusView[] })
     <div id="root"></div>
   </main>
   <script>
-    window.__PORTHUB__ = ${initialState};
-    const state = window.__PORTHUB__;
+    window.__RELAYBASE__ = ${initialState};
+    const state = window.__RELAYBASE__;
     const root = document.querySelector("#root");
     const count = document.querySelector("#count");
 
@@ -175,7 +175,7 @@ export function dashboardHtml(options: { token: string; apps: AppStatusView[] })
     async function mutate(action, id) {
       await fetch("/__hub/api/apps/" + id + "/" + action, {
         method: "POST",
-        headers: { "X-Port-Hub-Token": state.token }
+        headers: { "X-Relaybase-Token": state.token }
       });
       await refresh();
     }
