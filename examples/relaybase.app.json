@@ -1,9 +1,27 @@
 {
+  "schemaVersion": 1,
   "id": "example",
   "name": "Example App",
   "command": "npm.cmd run dev",
   "cwd": ".",
   "protocol": "http",
-  "healthUrl": "/"
+  "healthUrl": "/",
+  "mcp": {
+    "enabled": true,
+    "children": [
+      {
+        "id": "tools",
+        "transport": "stdio",
+        "command": "node",
+        "args": ["./mcp-server.js"],
+        "cwd": ".",
+        "expose": {
+          "tools": ["search", "summarize"],
+          "resources": ["docs://index"],
+          "prompts": ["debug"]
+        }
+      }
+    ]
+  }
 }
 

@@ -23,6 +23,9 @@ async function main(): Promise<void> {
     case "serve":
       await serve(options);
       return;
+    case "mcp":
+      await mcp(options);
+      return;
     case "register":
       await register(args[0], options);
       return;
@@ -53,7 +56,20 @@ async function serve(options: CliOptions): Promise<void> {
   const address = server.address();
 
   console.log(`Relaybase listening on http://${address.host}:${address.port}/__hub`);
+  console.log(`MCP: http://${address.host}:${address.port}/mcp`);
   console.log(`State: ${server.runtime.stateDir}`);
+
+  process.once("SIGINT", () => {
+    void server.close().then(() => process.exit(0));
+  });
+  process.once("SIGTERM", () => {
+    void server.close().then(() => process.exit(0));
+  });
+}
+
+async function mcp(options: CliOptions): Promise<void> {
+  const server = await createRelaybaseServer(options);
+  await server.runtime.mcp.connectStdio();
 
   process.once("SIGINT", () => {
     void server.close().then(() => process.exit(0));
@@ -202,6 +218,7 @@ function printHelp(): void {
 
 Commands:
   serve                         Start the localhost hub
+  mcp                           Run Relaybase as a stdio MCP server
   register <manifest>           Register a relaybase.app.json file
   start <app>                   Start a managed app through the running hub
   stop <app>                    Stop a managed app
