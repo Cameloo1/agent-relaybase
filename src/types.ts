@@ -6,7 +6,33 @@ export type HealthStatus = "unknown" | "healthy" | "unhealthy";
 
 export type RouteSource = "header" | "host";
 
+export type ChildMcpTransport = "stdio" | "streamable-http" | "sse";
+
+export interface McpExposePolicy {
+  tools: string[];
+  resources: string[];
+  prompts: string[];
+}
+
+export interface ChildMcpConfig {
+  id: string;
+  transport: ChildMcpTransport;
+  command?: string;
+  args: string[];
+  cwd?: string;
+  env: Record<string, string>;
+  url?: string;
+  legacySseUrl?: string;
+  expose: McpExposePolicy;
+}
+
+export interface AppMcpConfig {
+  enabled: boolean;
+  children: ChildMcpConfig[];
+}
+
 export interface AppManifestInput {
+  schemaVersion?: unknown;
   id?: unknown;
   name?: unknown;
   command?: unknown;
@@ -15,9 +41,11 @@ export interface AppManifestInput {
   healthUrl?: unknown;
   env?: unknown;
   upstreamPort?: unknown;
+  mcp?: unknown;
 }
 
 export interface AppRecord {
+  schemaVersion?: 1;
   id: string;
   name: string;
   command: string;
@@ -26,6 +54,7 @@ export interface AppRecord {
   healthUrl?: string;
   env: Record<string, string>;
   upstreamPort?: number;
+  mcp?: AppMcpConfig;
   manifestPath?: string;
   createdAt: string;
   updatedAt: string;
@@ -46,6 +75,8 @@ export interface RuntimeView {
   lastError?: string;
   logLines: number;
   externalPortOpen?: boolean;
+  mcpChildren?: ChildMcpRuntimeView[];
+  mcpDrain?: ChildMcpDrainResult[];
 }
 
 export interface AppStatusView extends AppRecord {
@@ -68,5 +99,30 @@ export interface ServerOptions {
   stateDir?: string;
   portRangeStart?: number;
   portRangeEnd?: number;
+}
+
+export type ChildMcpRuntimeStatus = "stopped" | "starting" | "connected" | "draining" | "errored" | "restarting";
+
+export interface ChildMcpRuntimeView {
+  id: string;
+  transport: ChildMcpTransport;
+  status: ChildMcpRuntimeStatus;
+  exposedTools: string[];
+  exposedResources: string[];
+  exposedPrompts: string[];
+  inFlight: number;
+  restartAttempts: number;
+  lastStartedAt?: string;
+  lastStoppedAt?: string;
+  lastError?: string;
+  nextRestartAt?: string;
+}
+
+export interface ChildMcpDrainResult {
+  id: string;
+  inFlightAtDrainStart: number;
+  pendingAfterTimeout: number;
+  timedOut: boolean;
+  stopped: boolean;
 }
 

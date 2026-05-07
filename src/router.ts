@@ -3,10 +3,11 @@ import { isValidAppId } from "./validation.ts";
 
 export const HUB_PREFIX = "/__hub";
 export const AGENT_APP_HEADER = "x-relaybase-app";
+const HUB_RESERVED_PATHS = new Set(["/mcp", "/sse", "/.well-known/mcp.json"]);
 
 export function resolveRoute(request: RequestLike): RouteResolution {
   const pathname = getPathname(request.url);
-  if (pathname === HUB_PREFIX || pathname.startsWith(`${HUB_PREFIX}/`)) {
+  if (pathname === HUB_PREFIX || pathname.startsWith(`${HUB_PREFIX}/`) || HUB_RESERVED_PATHS.has(pathname)) {
     return { kind: "hub" };
   }
 

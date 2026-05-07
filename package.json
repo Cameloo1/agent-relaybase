@@ -1,7 +1,7 @@
 {
-  "name": "relaybase",
+  "name": "@cameloo/relaybase",
   "version": "0.1.0",
-  "description": "Local-first routing hub for AI-agent-built apps and crowded dev ports.",
+  "description": "Local-first MCP router and lifecycle hub for AI-agent-built apps.",
   "type": "module",
   "bin": {
     "relaybase": "./bin/relaybase.cjs"
@@ -20,8 +20,14 @@
     "proxy",
     "routing",
     "localhost",
+    "mcp",
+    "model-context-protocol",
     "ai-agents",
     "developer-tools"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.76"
+  }
 }

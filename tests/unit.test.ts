@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { namespaceChildName, relaybaseChildResourceUri } from "../src/childMcp.ts";
 import { Registry } from "../src/registry.ts";
 import { appIdFromHost, resolveRoute } from "../src/router.ts";
 import { normalizeManifest, validateAppId } from "../src/validation.ts";
@@ -32,6 +33,70 @@ test("normalizes manifests with relative cwd and env", () => {
   assert.equal(app.cwd, path.join(os.tmpdir(), "relaybase-manifest", "app"));
   assert.equal(app.env.NODE_ENV, "development");
   assert.equal(app.upstreamPort, 18001);
+});
+
+test("normalizes MCP child blocks with exact allowlists", () => {
+  const manifestPath = path.join(os.tmpdir(), "relaybase-mcp-manifest", "relaybase.app.json");
+  const app = normalizeManifest({
+    schemaVersion: 1,
+    id: "notes",
+    name: "Notes",
+    command: "npm.cmd run dev",
+    cwd: "app",
+    protocol: "http",
+    mcp: {
+      enabled: true,
+      children: [
+        {
+          id: "tools",
+          transport: "stdio",
+          command: "node",
+          args: ["./mcp-server.js"],
+          cwd: ".",
+          expose: {
+            tools: ["search", "search"],
+            resources: ["docs://index"],
+            prompts: ["debug"]
+          }
+        }
+      ]
+    }
+  }, { manifestPath, now: new Date("2026-05-06T00:00:00.000Z") });
+
+  assert.equal(app.schemaVersion, 1);
+  assert.equal(app.mcp?.enabled, true);
+  assert.equal(app.mcp?.children[0].cwd, path.join(os.tmpdir(), "relaybase-mcp-manifest", "app"));
+  assert.deepEqual(app.mcp?.children[0].expose.tools, ["search"]);
+});
+
+test("rejects wildcard MCP child exposure", () => {
+  assert.throws(() => normalizeManifest({
+    id: "notes",
+    name: "Notes",
+    command: "npm.cmd run dev",
+    cwd: ".",
+    protocol: "http",
+    mcp: {
+      enabled: true,
+      children: [
+        {
+          id: "tools",
+          transport: "stdio",
+          command: "node",
+          expose: {
+            tools: ["*"],
+            resources: [],
+            prompts: []
+          }
+        }
+      ]
+    }
+  }), /wildcard/);
+});
+
+test("generates child MCP namespaces and Relaybase resource URIs", () => {
+  assert.equal(namespaceChildName("notes", "search"), "notes.search");
+  assert.equal(relaybaseChildResourceUri("notes", "docs://index"), "relaybase://app/notes/mcp/docs://index");
 });
 
 test("persists registry records", async () => {
