@@ -4,6 +4,7 @@ import { handleApiRequest } from "./api.ts";
 import { dashboardHtml } from "./dashboard.ts";
 import { ProcessManager } from "./processManager.ts";
 import { Registry } from "./registry.ts";
+import { RelaybaseMcpService } from "./relaybaseMcp.ts";
 import { proxyHttpRequest, proxyUpgrade, writeSocketHttpError } from "./proxy.ts";
 import { resolveRoute } from "./router.ts";
 import { DEFAULT_HOST, DEFAULT_PORT, DEFAULT_PORT_RANGE_END, DEFAULT_PORT_RANGE_START, getDefaultStateDir, getOrCreateSessionToken } from "./state.ts";
@@ -18,6 +19,7 @@ export interface RelaybaseRuntime {
   token: string;
   registry: Registry;
   processes: ProcessManager;
+  mcp: RelaybaseMcpService;
 }
 
 export interface RelaybaseServer {
@@ -36,7 +38,7 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
   const registry = new Registry(stateDir);
   await registry.load();
   const token = await getOrCreateSessionToken(stateDir);
-  const runtime: RelaybaseRuntime = {
+  const runtime = {
     host,
     port,
     stateDir,
@@ -48,7 +50,8 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
       portRangeStart: options.portRangeStart ?? DEFAULT_PORT_RANGE_START,
       portRangeEnd: options.portRangeEnd ?? DEFAULT_PORT_RANGE_END
     })
-  };
+  } as RelaybaseRuntime;
+  runtime.mcp = new RelaybaseMcpService(runtime);
 
   const sockets = new Set<net.Socket>();
   const httpServer = http.createServer((request, response) => {
@@ -85,7 +88,7 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
     httpServer,
     netServer,
     listen: () => listen(netServer, host, port),
-    close: () => close(netServer, httpServer, sockets),
+    close: () => close(runtime, netServer, httpServer, sockets),
     address: () => {
       const address = netServer.address();
       if (typeof address === "object" && address) {
@@ -136,6 +139,21 @@ async function handleHub(runtime: RelaybaseRuntime, request: http.IncomingMessag
 
   if (pathname === "/__hub" || pathname === "/__hub/") {
     sendHtml(response, 200, dashboardHtml({ token: runtime.token, apps: await runtime.processes.listStatuses() }));
+    return;
+  }
+
+  if (pathname === "/mcp") {
+    await runtime.mcp.handleStreamableHttp(request, response);
+    return;
+  }
+
+  if (pathname === "/sse") {
+    await runtime.mcp.handleSse(request, response);
+    return;
+  }
+
+  if (pathname === "/.well-known/mcp.json") {
+    sendJson(response, 200, runtime.mcp.discoveryDocument());
     return;
   }
 
@@ -202,7 +220,9 @@ function listen(server: net.Server, host: string, port: number): Promise<void> {
   });
 }
 
-function close(netServer: net.Server, httpServer: http.Server, sockets: Set<net.Socket>): Promise<void> {
+async function close(runtime: RelaybaseRuntime, netServer: net.Server, httpServer: http.Server, sockets: Set<net.Socket>): Promise<void> {
+  await runtime.mcp.close();
+
   return new Promise((resolve) => {
     for (const socket of sockets) {
       socket.destroy();
