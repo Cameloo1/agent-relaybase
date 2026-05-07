@@ -1,9 +1,10 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Registry } from "./registry.ts";
 import { DEFAULT_HOST, DEFAULT_PORT, DEFAULT_PORT_RANGE_END, DEFAULT_PORT_RANGE_START } from "./state.ts";
+import { ChildMcpSupervisor } from "./childMcp.ts";
 import { checkAppHealth, waitForHealthy } from "./health.ts";
 import { findAvailablePort, isPortOpen } from "./ports.ts";
-import type { AppRecord, AppStatusView, RuntimeStatus, RuntimeView } from "./types.ts";
+import type { AppRecord, AppStatusView, ChildMcpDrainResult, RuntimeStatus, RuntimeView } from "./types.ts";
 
 interface RuntimeEntry {
   status: RuntimeStatus;
@@ -15,6 +16,7 @@ interface RuntimeEntry {
   stoppedAt?: string;
   lastError?: string;
   logs: string[];
+  mcpDrain?: ChildMcpDrainResult[];
 }
 
 export interface ProcessManagerOptions {
@@ -30,6 +32,7 @@ export class ProcessManager {
   readonly hubPort: number;
   readonly portRangeStart: number;
   readonly portRangeEnd: number;
+  readonly mcp: ChildMcpSupervisor;
   #runtime = new Map<string, RuntimeEntry>();
 
   constructor(registry: Registry, options: ProcessManagerOptions = {}) {
@@ -38,6 +41,7 @@ export class ProcessManager {
     this.hubPort = options.hubPort ?? DEFAULT_PORT;
     this.portRangeStart = options.portRangeStart ?? DEFAULT_PORT_RANGE_START;
     this.portRangeEnd = options.portRangeEnd ?? DEFAULT_PORT_RANGE_END;
+    this.mcp = new ChildMcpSupervisor();
   }
 
   async start(id: string): Promise<RuntimeView> {
@@ -48,14 +52,14 @@ export class ProcessManager {
 
     const existing = this.#runtime.get(id);
     if (existing?.child && existing.child.exitCode === null && existing.assignedPort) {
-      return this.#view(existing);
+      return this.#view(existing, id);
     }
 
     const assignedPort = await this.#assignPort(app);
     if (assignedPort === undefined) {
       const conflict = this.#entry("conflict", "unhealthy", undefined, "Requested upstream port is already in use.");
       this.#runtime.set(id, conflict);
-      return this.#view(conflict);
+      return this.#view(conflict, id);
     }
 
     const entry = this.#entry("starting", "unknown", assignedPort);
@@ -79,6 +83,7 @@ export class ProcessManager {
     entry.pid = child.pid;
     entry.startedAt = new Date().toISOString();
     entry.logs.push(`[relaybase] starting ${app.id} on ${this.hubHost}:${assignedPort}`);
+    await this.mcp.startApp(app);
 
     child.stdout.on("data", (chunk) => this.#appendLog(app.id, chunk.toString()));
     child.stderr.on("data", (chunk) => this.#appendLog(app.id, chunk.toString()));
@@ -113,7 +118,7 @@ export class ProcessManager {
       entry.lastError = "App did not become healthy before the startup timeout.";
     }
 
-    return this.#view(entry);
+    return this.#view(entry, id);
   }
 
   async stop(id: string): Promise<RuntimeView> {
@@ -123,14 +128,16 @@ export class ProcessManager {
       stopped.status = "stopped";
       stopped.health = "unknown";
       stopped.stoppedAt = new Date().toISOString();
+      stopped.mcpDrain = await this.mcp.stopApp(id);
       this.#runtime.set(id, stopped);
-      return this.#view(stopped);
+      return this.#view(stopped, id);
     }
 
     entry.status = "stopped";
     entry.health = "unhealthy";
     entry.stoppedAt = new Date().toISOString();
     this.#appendLog(id, "[relaybase] stopping");
+    entry.mcpDrain = await this.mcp.stopApp(id);
 
     if (process.platform === "win32" && entry.child.pid) {
       spawnSync("taskkill", ["/pid", String(entry.child.pid), "/t", "/f"], { windowsHide: true });
@@ -138,7 +145,7 @@ export class ProcessManager {
       entry.child.kill("SIGTERM");
     }
 
-    return this.#view(entry);
+    return this.#view(entry, id);
   }
 
   async restart(id: string): Promise<RuntimeView> {
@@ -156,7 +163,7 @@ export class ProcessManager {
 
     for (const app of apps) {
       const runtime = this.#runtime.get(app.id);
-      const view = runtime ? this.#view(runtime) : this.#view(this.#entry("stopped", "unknown"));
+      const view = runtime ? this.#view(runtime, app.id) : this.#view(this.#entry("stopped", "unknown"), app.id);
       if (!runtime && app.upstreamPort) {
         view.externalPortOpen = await isPortOpen(app.upstreamPort, this.hubHost);
         if (view.externalPortOpen) {
@@ -185,6 +192,29 @@ export class ProcessManager {
     }
 
     return undefined;
+  }
+
+  async healthCheck(id: string): Promise<{ status: RuntimeView; reachable: boolean; checkedAt: string }> {
+    const app = await this.registry.get(id);
+    if (!app) {
+      throw new Error(`Unknown app: ${id}`);
+    }
+
+    const statuses = await this.listStatuses();
+    const status = statuses.find((entry) => entry.id === id)?.runtime ?? this.#view(this.#entry("stopped", "unknown"), id);
+    const port = status.assignedPort ?? app.upstreamPort;
+    const reachable = app.protocol === "tcp"
+      ? Boolean(port && await isPortOpen(port, this.hubHost))
+      : Boolean(port && await checkAppHealth(app, port, this.hubHost));
+
+    return {
+      status: {
+        ...status,
+        health: reachable ? "healthy" : "unhealthy"
+      },
+      reachable,
+      checkedAt: new Date().toISOString()
+    };
   }
 
   #entry(status: RuntimeStatus, health: "unknown" | "healthy" | "unhealthy", assignedPort?: number, lastError?: string): RuntimeEntry {
@@ -225,7 +255,8 @@ export class ProcessManager {
     }
   }
 
-  #view(entry: RuntimeEntry): RuntimeView {
+  #view(entry: RuntimeEntry, appId?: string): RuntimeView {
+    const mcpChildren = appId ? this.mcp.statusForApp(appId) : [];
     return {
       status: entry.status,
       health: entry.health,
@@ -234,7 +265,9 @@ export class ProcessManager {
       ...(entry.startedAt ? { startedAt: entry.startedAt } : {}),
       ...(entry.stoppedAt ? { stoppedAt: entry.stoppedAt } : {}),
       ...(entry.lastError ? { lastError: entry.lastError } : {}),
-      logLines: entry.logs.length
+      logLines: entry.logs.length,
+      ...(mcpChildren.length ? { mcpChildren } : {}),
+      ...(entry.mcpDrain?.length ? { mcpDrain: entry.mcpDrain } : {})
     };
   }
 }
