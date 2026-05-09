@@ -1,9 +1,9 @@
 # Relaybase
 
 [![CI](https://github.com/Cameloo1/agent-relaybase/actions/workflows/ci.yml/badge.svg)](https://github.com/Cameloo1/agent-relaybase/actions/workflows/ci.yml)
-[![Lint / Format](https://github.com/Cameloo1/agent-relaybase/actions/workflows/eslint.yml/badge.svg)](https://github.com/Cameloo1/agent-relaybase/actions/workflows/eslint.yml)
-[![Typecheck](https://github.com/Cameloo1/agent-relaybase/actions/workflows/typecheck.yml/badge.svg)](https://github.com/Cameloo1/agent-relaybase/actions/workflows/typecheck.yml)
-[![Jest](https://github.com/Cameloo1/agent-relaybase/actions/workflows/jest.yml/badge.svg)](https://github.com/Cameloo1/agent-relaybase/actions/workflows/jest.yml)
+[![Package](https://img.shields.io/badge/package-%40cameloo%2Frelaybase-blue)](https://www.npmjs.com/package/@cameloo/relaybase)
+![Node](https://img.shields.io/badge/node-%3E%3D24-339933)
+![License](https://img.shields.io/badge/license-MIT-green)
 
 > MCP is for tools and data. Relaybase is for processes, and Relaybase speaks MCP.
 
