@@ -4,7 +4,7 @@
 
 > MCP is for tools and data. Relaybase is for processes, and Relaybase speaks MCP.
 
-Relaybase is a local-first MCP router with lifecycle management. It runs as one localhost daemon that starts and stops app processes, keeps routes and logs visible, exposes its lifecycle control plane over MCP, and can aggregate child MCP servers declared by apps.
+Relaybase is a local-first  router with lifecycle management + MCP support. It runs as one localhost daemon that starts and stops app processes, keeps routes and logs visible, exposes its lifecycle control plane over MCP, and can aggregate child MCP servers declared by apps.
 
 Relaybase remains compatible with the original local app router: the CLI, dashboard, HTTP proxy, host/header routing, and TCP tunnel behavior still sit underneath the MCP layer.
 
