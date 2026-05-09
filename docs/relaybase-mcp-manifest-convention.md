@@ -119,3 +119,67 @@ Relaybase generates these names in its MCP schema. Apps declare original child n
 `stop_app(id)` stops accepting new child MCP tool calls, waits up to a fixed drain timeout for in-flight calls, then stops child MCP servers and the app process. The result includes per-child drain data.
 
 Child crashes are logged and scheduled for exponential backoff restart. Child list-change notifications propagate upward to connected Relaybase MCP clients.
+
+## App State Contract
+
+Relaybase exposes standard app state for dashboards and agents. Consumers should use this contract instead of rebuilding lifecycle, readiness, log, and access logic for each app.
+
+HTTP:
+
+```text
+GET /__hub/api/state
+GET /__hub/api/apps/<id>/state
+GET /__hub/api/apps/<id>/logs
+GET /__hub/api/apps/<id>/logs/stream
+```
+
+MCP:
+
+```text
+app_status(id)
+health_check(id)
+verify_app(id)
+tail_logs(id, lines)
+```
+
+State fields include:
+
+```text
+id
+name
+registered
+runtime.status
+runtime.health
+runtime.pid
+runtime.assignedPort
+backendPortOpen
+routeReachable
+humanUrl
+agentUrl
+agentHeaders
+logSnapshotUrl
+logStreamUrl
+recentLogs
+lastError
+readiness
+stopVerification
+mcpChildren
+```
+
+`readiness` includes a state, checked timestamp, bounded timeout, named checks, and a failure reason when Relaybase cannot prove the app is ready. Route reachability is checked through Relaybase routing, not by trusting the upstream port alone.
+
+`stopVerification` records whether stop was attempted, the backend port that was checked, whether it remained open, and whether port closure was verified. A backend port that remains open after stop is a failed stop even if a wrapper process exited.
+
+## Dashboard-Owned Pattern
+
+A dashboard may own the visible control surface: panels, buttons, app lists, logs UI, Access App flow, and state rendering.
+
+Relaybase should own app lifecycle: register, start, stop, restart, readiness, route reachability, backend port checks, and process logs.
+
+Dashboards should consume `/__hub/api/state`, `/__hub/api/apps/<id>/state`, and log stream URLs. They should not direct-spawn apps unless explicitly operating in documented fallback mode.
+
+Frontend/backend log classification is dashboard responsibility. Relaybase emits process channels as `stdout`, `stderr`, and `system`.
+
+## Local Security
+
+Relaybase is local-only by default. Discovery advertises auth requirements, accepted token headers, active state directory, and the session-token path without exposing the token. If discovery is healthy but mutations return `UNAUTHORIZED_MUTATION`, verify that the client and the running Relaybase process use the same state directory.

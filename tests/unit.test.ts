@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { namespaceChildName, relaybaseChildResourceUri } from "../src/childMcp.ts";
+import { composeAppState } from "../src/appState.ts";
+import { dashboardHtml } from "../src/dashboard.ts";
 import { Registry } from "../src/registry.ts";
 import { appIdFromHost, resolveRoute } from "../src/router.ts";
 import { normalizeManifest, validateAppId } from "../src/validation.ts";
@@ -99,6 +101,42 @@ test("generates child MCP namespaces and Relaybase resource URIs", () => {
   assert.equal(relaybaseChildResourceUri("notes", "docs://index"), "relaybase://app/notes/mcp/docs://index");
 });
 
+test("generates standard app state shape", () => {
+  const state = composeAppState({
+    id: "notes",
+    name: "Notes",
+    registered: true,
+    runtime: {
+      status: "running",
+      health: "healthy",
+      pid: 123,
+      assignedPort: 18001,
+      logLines: 2
+    },
+    hubHost: "127.0.0.1",
+    hubPort: 7777,
+    backendPort: 18001,
+    backendPortOpen: true,
+    routeReachable: true,
+    recentLogs: ["ready"],
+    readinessCheckedAt: "2026-05-08T00:00:00.000Z",
+    timeoutMs: 8000
+  });
+
+  assert.equal(state.id, "notes");
+  assert.equal(state.registered, true);
+  assert.equal(state.runtime.status, "running");
+  assert.equal(state.backendPortOpen, true);
+  assert.equal(state.routeReachable, true);
+  assert.equal(state.humanUrl, "http://notes.localhost:7777");
+  assert.equal(state.agentUrl, "http://127.0.0.1:7777");
+  assert.deepEqual(state.agentHeaders, { "X-Relaybase-App": "notes" });
+  assert.match(state.logSnapshotUrl, /\/__hub\/api\/apps\/notes\/logs$/);
+  assert.match(state.logStreamUrl, /\/__hub\/api\/apps\/notes\/logs\/stream$/);
+  assert.equal(state.readiness.state, "ready");
+  assert.ok(state.readiness.checks.some((check) => check.name === "route-reachable" && check.ok));
+});
+
 test("persists registry records", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-registry-"));
   const registry = new Registry(stateDir);
@@ -114,6 +152,35 @@ test("persists registry records", async () => {
   const reloaded = new Registry(stateDir);
   await reloaded.load();
   assert.equal((await reloaded.get("alpha"))?.name, "Alpha");
+});
+
+test("dashboard labels app backend ports explicitly", () => {
+  const html = dashboardHtml({
+    token: "test-token",
+    apps: [
+      {
+        id: "fixed-app",
+        name: "Fixed App",
+        command: "node server.js",
+        cwd: ".",
+        protocol: "http",
+        env: {},
+        upstreamPort: 3000,
+        createdAt: "2026-05-08T00:00:00.000Z",
+        updatedAt: "2026-05-08T00:00:00.000Z",
+        runtime: {
+          status: "stopped",
+          health: "unknown",
+          logLines: 0
+        }
+      }
+    ]
+  });
+
+  assert.match(html, /<th>Backend port<\/th>/);
+  assert.doesNotMatch(html, /<th>Port<\/th>/);
+  assert.match(html, /fixed :/);
+  assert.match(html, /requested/);
 });
 
 test("resolves agent header before host header", () => {

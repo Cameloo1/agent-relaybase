@@ -147,16 +147,16 @@ export function dashboardHtml(options: { token: string; apps: AppStatusView[] })
         return;
       }
 
-      root.innerHTML = '<table><thead><tr><th>App</th><th>Status</th><th>Route</th><th>Port</th><th>Actions</th></tr></thead><tbody>' +
+      root.innerHTML = '<table><thead><tr><th>App</th><th>Status</th><th>Route</th><th>Backend port</th><th>Actions</th></tr></thead><tbody>' +
         apps.map(app => {
           const status = app.runtime.status;
           const href = 'http://' + app.id + '.localhost:' + location.port;
-          const port = app.runtime.assignedPort || app.upstreamPort || '';
+          const backendPort = backendPortHtml(app);
           return '<tr>' +
             '<td><strong>' + escapeHtml(app.name) + '</strong><br><span class="muted">' + escapeHtml(app.id) + '</span></td>' +
             '<td><span class="status ' + status + '"><span class="dot"></span>' + status + '</span></td>' +
             '<td><a href="' + href + '"><code>' + escapeHtml(app.id) + '.localhost:' + location.port + '</code></a></td>' +
-            '<td>' + (port ? '<code>' + port + '</code>' : '<span class="muted">none</span>') + '</td>' +
+            '<td>' + backendPort + '</td>' +
             '<td><div class="actions"><button data-action="start" data-id="' + app.id + '">Start</button><button data-action="stop" data-id="' + app.id + '">Stop</button></div></td>' +
           '</tr>';
         }).join('') + '</tbody></table>';
@@ -178,6 +178,25 @@ export function dashboardHtml(options: { token: string; apps: AppStatusView[] })
         headers: { "X-Relaybase-Token": state.token }
       });
       await refresh();
+    }
+
+    function backendPortHtml(app) {
+      const runtimeActive = app.runtime && (app.runtime.status === 'running' || app.runtime.status === 'starting');
+      const runtimePort = runtimeActive ? numericPort(app.runtime && app.runtime.assignedPort) : null;
+      const fixedPort = numericPort(app.upstreamPort);
+      if (runtimePort) {
+        const detail = fixedPort ? 'fixed :' + fixedPort : 'ephemeral';
+        return '<code>' + runtimePort + '</code><br><span class="muted">' + detail + '</span>';
+      }
+      if (fixedPort) {
+        return '<span class="muted">none</span><br><span class="muted">fixed :' + fixedPort + ' requested</span>';
+      }
+      return '<span class="muted">none</span>';
+    }
+
+    function numericPort(value) {
+      const port = Number(value);
+      return Number.isInteger(port) && port > 0 ? port : null;
     }
 
     function escapeHtml(value) {

@@ -45,16 +45,30 @@ test("HTTP MCP rejects unauthorized mutation and accepts token auth", async () =
     const unauthorized = await createHttpMcpClient(hub.address().port);
     await assert.rejects(
       () => unauthorized.callTool({ name: "start_app", arguments: { id: "managed-auth" } }),
-      /Unauthorized/
+      /UNAUTHORIZED_MUTATION/
     );
     await unauthorized.close();
 
     const authorized = await createHttpMcpClient(hub.address().port, hub.runtime.token);
     const started = await authorized.callTool({ name: "start_app", arguments: { id: "managed-auth" } });
     assert.equal(started.structuredContent?.runtime.status, "running");
+    assert.equal(started.structuredContent?.state.routeReachable, true);
+
+    const appStatus = await authorized.callTool({ name: "app_status", arguments: { id: "managed-auth" } });
+    assert.equal(appStatus.structuredContent?.app.registered, true);
+    assert.equal(appStatus.structuredContent?.app.readiness.state, "ready");
+    assert.match(String(appStatus.structuredContent?.app.logStreamUrl), /\/logs\/stream$/);
+
+    const health = await authorized.callTool({ name: "health_check", arguments: { id: "managed-auth" } });
+    assert.equal(health.structuredContent?.routeReachable, true);
+    assert.equal(health.structuredContent?.backendPortOpen, true);
+
+    const verified = await authorized.callTool({ name: "verify_app", arguments: { id: "managed-auth" } });
+    assert.equal(verified.structuredContent?.state.routeReachable, true);
 
     const stopped = await authorized.callTool({ name: "stop_app", arguments: { id: "managed-auth" } });
     assert.equal(stopped.structuredContent?.runtime.status, "stopped");
+    assert.equal(stopped.structuredContent?.state.stopVerification.ok, true);
     await authorized.close();
   } finally {
     await hub.close();

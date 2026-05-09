@@ -1,6 +1,6 @@
 export type AppProtocol = "http" | "http+ws" | "tcp";
 
-export type RuntimeStatus = "stopped" | "starting" | "running" | "errored" | "conflict";
+export type RuntimeStatus = "stopped" | "starting" | "running" | "stopping" | "errored" | "conflict";
 
 export type HealthStatus = "unknown" | "healthy" | "unhealthy";
 
@@ -77,6 +77,7 @@ export interface RuntimeView {
   externalPortOpen?: boolean;
   mcpChildren?: ChildMcpRuntimeView[];
   mcpDrain?: ChildMcpDrainResult[];
+  stopVerification?: StopVerification;
 }
 
 export interface AppStatusView extends AppRecord {
@@ -99,6 +100,7 @@ export interface ServerOptions {
   stateDir?: string;
   portRangeStart?: number;
   portRangeEnd?: number;
+  stopPortOpenProbe?: (port: number, host: string) => Promise<boolean>;
 }
 
 export type ChildMcpRuntimeStatus = "stopped" | "starting" | "connected" | "draining" | "errored" | "restarting";
@@ -124,5 +126,54 @@ export interface ChildMcpDrainResult {
   pendingAfterTimeout: number;
   timedOut: boolean;
   stopped: boolean;
+}
+
+export interface StopVerification {
+  attempted: boolean;
+  checkedAt: string;
+  backendPort?: number;
+  backendPortOpen: boolean | null;
+  portClosureVerified: boolean;
+  ok: boolean;
+  failureReason?: string;
+  mcpDrain?: ChildMcpDrainResult[];
+}
+
+export type ReadinessState = "unregistered" | "stopped" | "starting" | "ready" | "unhealthy" | "failed";
+
+export interface ReadinessCheck {
+  name: string;
+  ok: boolean;
+  checkedAt: string;
+  detail?: string;
+  value?: unknown;
+}
+
+export interface AppReadiness {
+  state: ReadinessState;
+  checkedAt: string;
+  checks: ReadinessCheck[];
+  timeoutMs: number;
+  failureReason?: string;
+}
+
+export interface AppState {
+  id: string;
+  name: string;
+  registered: boolean;
+  runtime: RuntimeView;
+  backendPort?: number;
+  backendPortOpen: boolean;
+  routeReachable: boolean;
+  humanUrl: string;
+  agentUrl: string;
+  agentHeaders: Record<string, string>;
+  logSnapshotUrl: string;
+  logStreamUrl: string;
+  recentLogs: string[];
+  lastError: string | null;
+  readiness: AppReadiness;
+  stopVerification?: StopVerification;
+  mcpChildren?: ChildMcpRuntimeView[];
 }
 
