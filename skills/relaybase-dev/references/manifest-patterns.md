@@ -87,3 +87,5 @@ Prefer this for agent-facing tools and data that do not need a browser-visible H
 - Do not use wildcard child MCP exposure.
 - Do not invent fake health. If no health route exists, use `/` and verify the route.
 - Do not overwrite unrelated manifest fields.
+- Write generated manifests as UTF-8 without BOM.
+- Prefer `npm.cmd` in Windows manifests unless the app has a stronger local convention.

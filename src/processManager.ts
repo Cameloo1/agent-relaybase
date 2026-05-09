@@ -4,7 +4,7 @@ import { DEFAULT_HOST, DEFAULT_PORT, DEFAULT_PORT_RANGE_END, DEFAULT_PORT_RANGE_
 import { ChildMcpSupervisor } from "./childMcp.ts";
 import { checkAppHealth, waitForHealthy } from "./health.ts";
 import { findAvailablePort, isPortOpen } from "./ports.ts";
-import type { AppRecord, AppStatusView, ChildMcpDrainResult, RuntimeStatus, RuntimeView } from "./types.ts";
+import type { AppRecord, AppStatusView, ChildMcpDrainResult, RuntimeStatus, RuntimeView, StopVerification } from "./types.ts";
 
 interface RuntimeEntry {
   status: RuntimeStatus;
@@ -16,7 +16,23 @@ interface RuntimeEntry {
   stoppedAt?: string;
   lastError?: string;
   logs: string[];
+  logEvents: AppLogEvent[];
   mcpDrain?: ChildMcpDrainResult[];
+  stopVerification?: StopVerification;
+}
+
+interface SpawnSpec {
+  command: string;
+  args: string[];
+  shell: boolean;
+}
+
+export interface AppLogEvent {
+  appId: string;
+  line: string;
+  stream: "stdout" | "stderr" | "system";
+  sequence: number;
+  at: string;
 }
 
 export interface ProcessManagerOptions {
@@ -24,6 +40,7 @@ export interface ProcessManagerOptions {
   hubPort?: number;
   portRangeStart?: number;
   portRangeEnd?: number;
+  stopPortOpenProbe?: (port: number, host: string) => Promise<boolean>;
 }
 
 export class ProcessManager {
@@ -33,7 +50,10 @@ export class ProcessManager {
   readonly portRangeStart: number;
   readonly portRangeEnd: number;
   readonly mcp: ChildMcpSupervisor;
+  readonly stopPortOpenProbe: (port: number, host: string) => Promise<boolean>;
   #runtime = new Map<string, RuntimeEntry>();
+  #logSubscribers = new Set<(event: AppLogEvent) => void>();
+  #logSequence = 0;
 
   constructor(registry: Registry, options: ProcessManagerOptions = {}) {
     this.registry = registry;
@@ -41,6 +61,7 @@ export class ProcessManager {
     this.hubPort = options.hubPort ?? DEFAULT_PORT;
     this.portRangeStart = options.portRangeStart ?? DEFAULT_PORT_RANGE_START;
     this.portRangeEnd = options.portRangeEnd ?? DEFAULT_PORT_RANGE_END;
+    this.stopPortOpenProbe = options.stopPortOpenProbe ?? ((port, host) => isPortOpen(port, host));
     this.mcp = new ChildMcpSupervisor();
   }
 
@@ -65,7 +86,8 @@ export class ProcessManager {
     const entry = this.#entry("starting", "unknown", assignedPort);
     this.#runtime.set(id, entry);
 
-    const child = spawn(app.command, {
+    const spawnSpec = this.#spawnSpec(app.command);
+    const child = spawn(spawnSpec.command, spawnSpec.args, {
       cwd: app.cwd,
       env: {
         ...process.env,
@@ -75,18 +97,18 @@ export class ProcessManager {
         RELAYBASE_APP_ID: app.id,
         RELAYBASE_BASE_URL: `http://${app.id}.localhost:${this.hubPort}`
       },
-      shell: true,
+      shell: spawnSpec.shell,
       windowsHide: true
     });
 
     entry.child = child;
     entry.pid = child.pid;
     entry.startedAt = new Date().toISOString();
-    entry.logs.push(`[relaybase] starting ${app.id} on ${this.hubHost}:${assignedPort}`);
+    this.#appendLog(app.id, `[relaybase] starting ${app.id} on ${this.hubHost}:${assignedPort}`, "system");
     await this.mcp.startApp(app);
 
-    child.stdout.on("data", (chunk) => this.#appendLog(app.id, chunk.toString()));
-    child.stderr.on("data", (chunk) => this.#appendLog(app.id, chunk.toString()));
+    child.stdout.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stdout"));
+    child.stderr.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stderr"));
     child.once("error", (error) => {
       entry.status = "errored";
       entry.health = "unhealthy";
@@ -125,26 +147,67 @@ export class ProcessManager {
     const entry = this.#runtime.get(id);
     if (!entry?.child || entry.child.exitCode !== null) {
       const stopped = entry ?? this.#entry("stopped", "unknown");
-      stopped.status = "stopped";
-      stopped.health = "unknown";
-      stopped.stoppedAt = new Date().toISOString();
+      const assignedPort = stopped.assignedPort;
+      const checkedAt = new Date().toISOString();
+      const backendPortOpen = assignedPort ? await this.stopPortOpenProbe(assignedPort, this.hubHost) : null;
       stopped.mcpDrain = await this.mcp.stopApp(id);
+      stopped.stopVerification = {
+        attempted: true,
+        checkedAt,
+        ...(assignedPort ? { backendPort: assignedPort } : {}),
+        backendPortOpen,
+        portClosureVerified: Boolean(assignedPort && backendPortOpen === false),
+        ok: backendPortOpen !== true,
+        ...(backendPortOpen ? { failureReason: `Stop requested, but backend port ${assignedPort} is still open.` } : {}),
+        ...(stopped.mcpDrain?.length ? { mcpDrain: stopped.mcpDrain } : {})
+      };
+      stopped.status = stopped.stopVerification.ok ? "stopped" : "errored";
+      stopped.health = stopped.stopVerification.ok ? "unknown" : "unhealthy";
+      stopped.lastError = stopped.stopVerification.failureReason;
+      stopped.stoppedAt = new Date().toISOString();
       this.#runtime.set(id, stopped);
       return this.#view(stopped, id);
     }
 
-    entry.status = "stopped";
+    const assignedPort = entry.assignedPort;
+    entry.status = "stopping";
     entry.health = "unhealthy";
-    entry.stoppedAt = new Date().toISOString();
     this.#appendLog(id, "[relaybase] stopping");
     entry.mcpDrain = await this.mcp.stopApp(id);
 
-    if (process.platform === "win32" && entry.child.pid) {
-      spawnSync("taskkill", ["/pid", String(entry.child.pid), "/t", "/f"], { windowsHide: true });
-    } else {
-      entry.child.kill("SIGTERM");
+    await this.#terminateChild(entry.child);
+    entry.stoppedAt = new Date().toISOString();
+
+    const checkedAt = new Date().toISOString();
+    let portStillOpen = assignedPort ? !(await this.#waitForPortClosed(assignedPort, 3000)) : false;
+    if (portStillOpen && assignedPort && process.platform === "win32") {
+      this.#killPortOwner(assignedPort);
+      portStillOpen = !(await this.#waitForPortClosed(assignedPort, 3000));
+    }
+    entry.stopVerification = {
+      attempted: true,
+      checkedAt,
+      ...(assignedPort ? { backendPort: assignedPort } : {}),
+      backendPortOpen: assignedPort ? portStillOpen : null,
+      portClosureVerified: Boolean(assignedPort && !portStillOpen),
+      ok: !portStillOpen,
+      ...(portStillOpen ? { failureReason: `Stop requested, but backend port ${assignedPort} is still open.` } : {}),
+      ...(entry.mcpDrain?.length ? { mcpDrain: entry.mcpDrain } : {})
+    };
+    if (portStillOpen) {
+      entry.status = "errored";
+      entry.health = "unhealthy";
+      entry.lastError = entry.stopVerification.failureReason;
+      this.#appendLog(id, `[relaybase] stop failed: ${entry.lastError}`);
+      return this.#view(entry, id);
     }
 
+    entry.status = "stopped";
+    entry.health = "unknown";
+    entry.assignedPort = undefined;
+    entry.pid = undefined;
+    entry.lastError = undefined;
+    this.#appendLog(id, "[relaybase] stopped");
     return this.#view(entry, id);
   }
 
@@ -155,6 +218,22 @@ export class ProcessManager {
 
   async logs(id: string): Promise<string[]> {
     return [...(this.#runtime.get(id)?.logs ?? [])];
+  }
+
+  async logEvents(id: string): Promise<AppLogEvent[]> {
+    return [...(this.#runtime.get(id)?.logEvents ?? [])];
+  }
+
+  subscribeLogs(id: string, listener: (event: AppLogEvent) => void): () => void {
+    const wrapped = (event: AppLogEvent) => {
+      if (event.appId === id) {
+        listener(event);
+      }
+    };
+    this.#logSubscribers.add(wrapped);
+    return () => {
+      this.#logSubscribers.delete(wrapped);
+    };
   }
 
   async listStatuses(): Promise<AppStatusView[]> {
@@ -223,7 +302,8 @@ export class ProcessManager {
       health,
       ...(assignedPort ? { assignedPort } : {}),
       ...(lastError ? { lastError } : {}),
-      logs: []
+      logs: [],
+      logEvents: []
     };
   }
 
@@ -236,7 +316,125 @@ export class ProcessManager {
     return findAvailablePort(this.portRangeStart, this.portRangeEnd, this.hubHost);
   }
 
-  #appendLog(id: string, text: string): void {
+  #spawnSpec(command: string): SpawnSpec {
+    const tokens = this.#splitCommand(command);
+    if (!tokens.length || /[&|<>]/.test(command)) {
+      return { command, args: [], shell: true };
+    }
+
+    const executable = tokens[0];
+    if (process.platform === "win32" && /\.(?:cmd|bat)$/i.test(executable)) {
+      return { command, args: [], shell: true };
+    }
+
+    return {
+      command: executable,
+      args: tokens.slice(1),
+      shell: false
+    };
+  }
+
+  #splitCommand(command: string): string[] {
+    const tokens: string[] = [];
+    const pattern = /"([^"]*)"|'([^']*)'|([^\s]+)/g;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(command))) {
+      tokens.push(match[1] ?? match[2] ?? match[3] ?? "");
+    }
+    return tokens;
+  }
+
+  async #terminateChild(child: ChildProcessWithoutNullStreams): Promise<boolean> {
+    const exited = new Promise<boolean>((resolve) => {
+      if (child.exitCode !== null) {
+        resolve(true);
+        return;
+      }
+      const timer = setTimeout(() => {
+        child.off("exit", onExit);
+        resolve(false);
+      }, 5000);
+      const onExit = () => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      child.once("exit", onExit);
+    });
+
+    if (process.platform === "win32" && child.pid) {
+      const result = spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+        stdio: "ignore",
+        windowsHide: true
+      });
+      if (result.status !== 0) {
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // The process may have already exited; the wait below will settle either way.
+        }
+      }
+    } else {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // The process may have already exited; the wait below will settle either way.
+      }
+    }
+
+    const didExit = await exited;
+    child.stdout.destroy();
+    child.stderr.destroy();
+    child.stdin.destroy();
+    return didExit;
+  }
+
+  async #waitForPortClosed(port: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!(await this.stopPortOpenProbe(port, this.hubHost))) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    return !(await this.stopPortOpenProbe(port, this.hubHost));
+  }
+
+  #killPortOwner(port: number): void {
+    const result = spawnSync("netstat", ["-ano", "-p", "tcp"], {
+      encoding: "utf8",
+      windowsHide: true
+    });
+    if (result.status !== 0 || !result.stdout) {
+      return;
+    }
+
+    const pids = new Set<string>();
+    for (const line of result.stdout.split(/\r?\n/)) {
+      const columns = line.trim().split(/\s+/);
+      if (columns.length < 5 || columns[0].toUpperCase() !== "TCP") {
+        continue;
+      }
+      const localAddress = columns[1];
+      const state = columns[3]?.toUpperCase();
+      const pid = columns[4];
+      if (state !== "LISTENING" || pid === String(process.pid)) {
+        continue;
+      }
+      if (localAddress.endsWith(`:${port}`) || localAddress.endsWith(`]:${port}`)) {
+        pids.add(pid);
+      }
+    }
+
+    for (const pid of pids) {
+      spawnSync("taskkill", ["/pid", pid, "/t", "/f"], {
+        stdio: "ignore",
+        windowsHide: true
+      });
+    }
+  }
+
+  #appendLog(id: string, text: string, stream: AppLogEvent["stream"] = "system"): void {
     const entry = this.#runtime.get(id);
     if (!entry) {
       return;
@@ -248,10 +446,29 @@ export class ProcessManager {
       }
 
       entry.logs.push(line);
+      const event: AppLogEvent = {
+        appId: id,
+        line,
+        stream,
+        sequence: ++this.#logSequence,
+        at: new Date().toISOString()
+      };
+      entry.logEvents.push(event);
+      for (const subscriber of this.#logSubscribers) {
+        try {
+          subscriber(event);
+        } catch {
+          // Log subscribers are observers; app output should never be blocked by a broken stream.
+        }
+      }
     }
 
     if (entry.logs.length > 500) {
       entry.logs.splice(0, entry.logs.length - 500);
+    }
+
+    if (entry.logEvents.length > 500) {
+      entry.logEvents.splice(0, entry.logEvents.length - 500);
     }
   }
 
@@ -267,7 +484,8 @@ export class ProcessManager {
       ...(entry.lastError ? { lastError: entry.lastError } : {}),
       logLines: entry.logs.length,
       ...(mcpChildren.length ? { mcpChildren } : {}),
-      ...(entry.mcpDrain?.length ? { mcpDrain: entry.mcpDrain } : {})
+      ...(entry.mcpDrain?.length ? { mcpDrain: entry.mcpDrain } : {}),
+      ...(entry.stopVerification ? { stopVerification: entry.stopVerification } : {})
     };
   }
 }

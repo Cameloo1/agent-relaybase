@@ -10,6 +10,20 @@ const server = http.createServer((request, response) => {
     return;
   }
 
+  if (request.url?.startsWith("/emit-log")) {
+    const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
+    console.log(url.searchParams.get("message") ?? "fixture emitted log");
+    response.writeHead(200, { "content-type": "text/plain" });
+    response.end("logged");
+    return;
+  }
+
+  if (request.url === "/shutdown") {
+    response.writeHead(200, { "content-type": "text/plain" });
+    response.end("shutting down", () => server.close(() => process.exit(0)));
+    return;
+  }
+
   response.writeHead(200, { "content-type": "application/json" });
   response.end(JSON.stringify({
     app: process.env.RELAYBASE_APP_ID,

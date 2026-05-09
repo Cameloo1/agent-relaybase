@@ -2,6 +2,8 @@
 
 Relaybase is the primary local runtime surface for app development. It owns lifecycle, routing, logs, health, and child MCP aggregation.
 
+Relaybase success is not proven by a raw direct port. Treat success as proven only after routed access, routed health, logs, stop, and backend-port closure checks pass or a documented fallback is declared.
+
 ## Defaults
 
 - Host: `127.0.0.1`
@@ -18,6 +20,8 @@ Relaybase is the primary local runtime surface for app development. It owns life
 - Human route: `http://<app-id>.localhost:7777`
 - Agent route: `http://127.0.0.1:7777` with header `X-Relaybase-App: <app-id>`
 - TCP tunnel preface: `RELAYBASE-TCP <app-id>\n\n`
+
+For HTTP apps, route checks should use the manifest `healthUrl` when present and `/` otherwise. A route response below 500 usually proves the route reached the app; a 5xx or connection failure is not a passing routed-health check.
 
 ## MCP Tools
 
@@ -51,6 +55,30 @@ Authorization: Bearer <token>
 x-relaybase-token: <token>
 ```
 
+Discovery can be healthy while mutation calls fail with `401 Unauthorized`. In that case, run:
+
+```powershell
+.\scripts\relaybase-dev.ps1 -Action diagnose-token
+```
+
+Report token path, token presence, state dir, and state-dir mismatch suspicion. Do not print token contents unless explicitly asked.
+
+## HTTP API
+
+Core dashboard/control endpoints:
+
+```text
+GET  /__hub/api/apps
+POST /__hub/api/apps/register
+POST /__hub/api/apps/<id>/start
+POST /__hub/api/apps/<id>/stop
+POST /__hub/api/apps/<id>/restart
+GET  /__hub/api/apps/<id>/logs
+GET  /__hub/api/apps/<id>/logs/stream
+```
+
+Use `/logs/stream` when live logs matter. Fall back to `/logs` snapshots if the stream is unavailable.
+
 ## CLI
 
 Use the Relaybase repo-local CLI when working from the repo:
@@ -65,6 +93,8 @@ npm.cmd run relaybase -- stop <app-id>
 ```
 
 From outside the repo, prefer `npx @cameloo/relaybase` only if the package is available.
+
+Prefer `npm.cmd` on Windows. Do not use `npm.ps1` unless execution policy is known to allow it.
 
 ## State Token
 
@@ -81,3 +111,30 @@ If `RELAYBASE_STATE_DIR` is set, use:
 ```
 
 Do not print the token unless the user explicitly needs it. Report whether it exists.
+
+## Verification Contract
+
+Use these gates before claiming a Relaybase-managed app is working:
+
+1. Discovery works.
+2. Token is present for mutations.
+3. Register succeeds or an existing registration is verified.
+4. Start returns `running` or a useful structured failure.
+5. Routed health works through host or header routing.
+6. Logs are available, preferably live.
+7. Stop returns `stopped`.
+8. Backend port is closed after stop when a port is known.
+9. Dashboard UI and `/api/status` match Relaybase when a dashboard is involved.
+
+Helper actions:
+
+```powershell
+.\scripts\relaybase-dev.ps1 -Action preflight
+.\scripts\relaybase-dev.ps1 -Action diagnose-token
+.\scripts\relaybase-dev.ps1 -Action route-check -AppId <id>
+.\scripts\relaybase-dev.ps1 -Action stream-logs -AppId <id>
+.\scripts\relaybase-dev.ps1 -Action verify -AppId <id> -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.ps1 -Action check-stop -AppId <id> -BackendPort <port>
+```
+
+`verify` is intentionally strict: it registers, starts, checks routed health, checks logs, stops, and verifies backend-port closure when the assigned port is known.

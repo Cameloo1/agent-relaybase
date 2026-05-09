@@ -1,5 +1,7 @@
 # Relaybase
 
+[![CI](https://github.com/Cameloo1/agent-relaybase/actions/workflows/ci.yml/badge.svg)](https://github.com/Cameloo1/agent-relaybase/actions/workflows/ci.yml)
+
 > MCP is for tools and data. Relaybase is for processes, and Relaybase speaks MCP.
 
 Relaybase is a local-first MCP router with lifecycle management. It runs as one localhost daemon that starts and stops app processes, keeps routes and logs visible, exposes its lifecycle control plane over MCP, and can aggregate child MCP servers declared by apps.
@@ -137,6 +139,7 @@ Relaybase exposes these MCP tools:
 list_apps
 app_status
 health_check
+verify_app
 register_app
 start_app
 stop_app
@@ -146,6 +149,48 @@ app_url
 ```
 
 Mutation tools are token-gated: `register_app`, `start_app`, `stop_app`, and `restart_app`.
+
+## Standard App State
+
+Dashboards and agents should consume Relaybase state instead of recreating lifecycle logic app by app.
+
+HTTP:
+
+```text
+GET /__hub/api/state
+GET /__hub/api/apps/<id>/state
+GET /__hub/api/apps/<id>/logs
+GET /__hub/api/apps/<id>/logs/stream
+```
+
+MCP:
+
+```text
+app_status(id)
+health_check(id)
+verify_app(id)
+tail_logs(id, lines)
+```
+
+The app-state contract includes:
+
+```text
+id, name, registered
+runtime.status, runtime.health, runtime.pid, runtime.assignedPort
+backendPortOpen, routeReachable
+humanUrl, agentUrl, agentHeaders
+logSnapshotUrl, logStreamUrl, recentLogs
+lastError
+readiness.state, readiness.checkedAt, readiness.checks, readiness.timeoutMs, readiness.failureReason
+stopVerification
+mcpChildren
+```
+
+Readiness is bounded and deterministic. Relaybase checks app health, backend port openness, and route reachability through Relaybase routing. A start result that remains `starting` or unhealthy includes `lastError`, readiness failure details, and recent logs through app state.
+
+Stop is successful only when child MCP calls are drained, the process tree is terminated, and the assigned backend port is closed. If the backend port remains open, Relaybase returns an errored runtime with `lastError` and `stopVerification`.
+
+Live logs are first-class through `/__hub/api/apps/<id>/logs/stream`. Log events include app id, stream (`stdout`, `stderr`, or `system`), timestamp, sequence, and line. Dashboard-specific frontend/backend classification belongs in the dashboard layer; Relaybase provides clean process channels.
 
 ## Child MCP Aggregation
 
@@ -180,12 +225,14 @@ Child MCP servers start with `start_app`, stop with `stop_app`, and are included
 
 Relaybase binds to `127.0.0.1` by default. Remote/public MCP exposure, OAuth, TLS termination, and dashboard approval flows are outside this milestone.
 
+Discovery at `/.well-known/mcp.json` advertises mutation token requirements, accepted auth headers, the active state directory, and the session-token path without revealing the token. A healthy discovery response plus `401 UNAUTHORIZED_MUTATION` on mutations usually means the client is reading a token from a different Relaybase state directory.
+
 ## Current Limitations
 
 - Legacy SSE exists for compatibility; Streamable HTTP is preferred.
 - Child exposure is exact allowlists only.
 - Remote/public MCP exposure is not supported.
-- `tail_logs(..., follow: true)` currently returns a snapshot and marks follow as not accepted.
+- `tail_logs(..., follow: true)` currently returns a snapshot and marks follow as not accepted; use `/__hub/api/apps/<id>/logs/stream` for live logs.
 - TCP support uses an explicit Relaybase handshake for agents.
 
 ## Development And Tests

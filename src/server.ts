@@ -48,7 +48,8 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
       hubHost: host,
       hubPort: port,
       portRangeStart: options.portRangeStart ?? DEFAULT_PORT_RANGE_START,
-      portRangeEnd: options.portRangeEnd ?? DEFAULT_PORT_RANGE_END
+      portRangeEnd: options.portRangeEnd ?? DEFAULT_PORT_RANGE_END,
+      stopPortOpenProbe: options.stopPortOpenProbe
     })
   } as RelaybaseRuntime;
   runtime.mcp = new RelaybaseMcpService(runtime);
@@ -87,7 +88,9 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
     runtime,
     httpServer,
     netServer,
-    listen: () => listen(netServer, host, port),
+    listen: async () => {
+      runtime.port = await listen(netServer, host, port);
+    },
     close: () => close(runtime, netServer, httpServer, sockets),
     address: () => {
       const address = netServer.address();
@@ -199,7 +202,7 @@ async function handleUpgrade(runtime: RelaybaseRuntime, request: http.IncomingMe
   });
 }
 
-function listen(server: net.Server, host: string, port: number): Promise<void> {
+function listen(server: net.Server, host: string, port: number): Promise<number> {
   return new Promise((resolve, reject) => {
     const onError = (error: NodeJS.ErrnoException) => {
       server.off("listening", onListening);
@@ -211,7 +214,8 @@ function listen(server: net.Server, host: string, port: number): Promise<void> {
     };
     const onListening = () => {
       server.off("error", onError);
-      resolve();
+      const address = server.address();
+      resolve(typeof address === "object" && address ? address.port : port);
     };
 
     server.once("error", onError);
