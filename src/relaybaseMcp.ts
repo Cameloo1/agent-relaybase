@@ -71,13 +71,16 @@ export class RelaybaseMcpService {
     try {
       const sessionId = headerValue(request.headers["mcp-session-id"]);
       const parsedBody = request.method === "POST" ? await readJsonBody(request) : undefined;
-      let session = sessionId ? this.#streamableSessions.get(sessionId) : undefined;
+      const session = sessionId ? this.#streamableSessions.get(sessionId) : undefined;
 
       if (session) {
-        if (!(session.transport instanceof StreamableHTTPServerTransport)) {
+        const transport = session.transport;
+        if (!(transport instanceof StreamableHTTPServerTransport)) {
           sendJsonRpcError(response, 400, ErrorCode.InvalidRequest, "Session uses a different MCP transport.");
           return;
         }
+        await transport.handleRequest(request, response, parsedBody);
+        return;
       } else if (!sessionId && request.method === "POST" && isInitializeRequest(parsedBody)) {
         let initializedSessionId: string | undefined;
         const transport = new StreamableHTTPServerTransport({
@@ -103,13 +106,12 @@ export class RelaybaseMcpService {
           this.#servers.delete(server);
         };
         await server.connect(transport);
-        session = { server, transport };
+        await transport.handleRequest(request, response, parsedBody);
+        return;
       } else {
         sendJsonRpcError(response, 400, ErrorCode.InvalidRequest, "No valid MCP session. Initialize with POST /mcp first.");
         return;
       }
-
-      await session.transport.handleRequest(request, response, parsedBody);
     } catch (error) {
       if (!response.headersSent) {
         sendJsonRpcError(response, 500, ErrorCode.InternalError, error instanceof Error ? error.message : "Relaybase MCP error.");

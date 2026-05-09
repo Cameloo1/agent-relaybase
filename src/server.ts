@@ -60,7 +60,7 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
   });
 
   httpServer.on("upgrade", (request, socket, head) => {
-    void handleUpgrade(runtime, request, socket, head);
+    void handleUpgrade(runtime, request, socket as net.Socket, Buffer.isBuffer(head) ? head : Buffer.from(head));
   });
 
   httpServer.on("clientError", (error, socket) => {
@@ -69,9 +69,10 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
 
   const netServer = net.createServer((socket) => {
     socket.once("data", (chunk) => {
-      void maybeHandleTcpTunnel(runtime, socket, chunk).then((handled) => {
+      const firstChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      void maybeHandleTcpTunnel(runtime, socket, firstChunk).then((handled) => {
         if (!handled) {
-          socket.unshift(chunk);
+          socket.unshift(firstChunk);
           httpServer.emit("connection", socket);
         }
       }).catch((error) => {

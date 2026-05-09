@@ -1,0 +1,40 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - npm
+    groups:
+      lint-and-test-tooling:
+        patterns:
+          - eslint
+          - "@eslint/*"
+          - typescript-eslint
+          - typescript
+          - jest
+          - ts-jest
+          - "@types/*"
+          - prettier
+      mcp-runtime:
+        patterns:
+          - "@modelcontextprotocol/*"
+          - zod
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:30"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions

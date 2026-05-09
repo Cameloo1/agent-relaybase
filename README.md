@@ -1,10 +1,13 @@
 # Relaybase
 
 [![CI](https://github.com/Cameloo1/agent-relaybase/actions/workflows/ci.yml/badge.svg)](https://github.com/Cameloo1/agent-relaybase/actions/workflows/ci.yml)
+[![Lint / Format](https://github.com/Cameloo1/agent-relaybase/actions/workflows/eslint.yml/badge.svg)](https://github.com/Cameloo1/agent-relaybase/actions/workflows/eslint.yml)
+[![Typecheck](https://github.com/Cameloo1/agent-relaybase/actions/workflows/typecheck.yml/badge.svg)](https://github.com/Cameloo1/agent-relaybase/actions/workflows/typecheck.yml)
+[![Jest](https://github.com/Cameloo1/agent-relaybase/actions/workflows/jest.yml/badge.svg)](https://github.com/Cameloo1/agent-relaybase/actions/workflows/jest.yml)
 
 > MCP is for tools and data. Relaybase is for processes, and Relaybase speaks MCP.
 
-Relaybase is a local-first  router with lifecycle management + MCP support. It runs as one localhost daemon that starts and stops app processes, keeps routes and logs visible, exposes its lifecycle control plane over MCP, and can aggregate child MCP servers declared by apps.
+Relaybase is a local-first router with lifecycle management + MCP support. It runs as one localhost daemon that starts and stops app processes, keeps routes and logs visible, exposes its lifecycle control plane over MCP, and can aggregate child MCP servers declared by apps.
 
 Relaybase remains compatible with the original local app router: the CLI, dashboard, HTTP proxy, host/header routing, and TCP tunnel behavior still sit underneath the MCP layer.
 
@@ -239,6 +242,15 @@ Discovery at `/.well-known/mcp.json` advertises mutation token requirements, acc
 
 ```powershell
 npm.cmd test
+```
+
+Quality gates used by CI:
+
+```powershell
+npm.cmd run lint
+npm.cmd run format:check
+npm.cmd run typecheck
+npm.cmd run test:jest
 ```
 
 Local serve workflow:

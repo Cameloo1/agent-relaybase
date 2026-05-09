@@ -451,7 +451,7 @@ function rawSocketTranscript(port: number, payload: string): Promise<string> {
     const chunks: Buffer[] = [];
     socket.once("connect", () => socket.write(payload));
     socket.on("data", (chunk) => {
-      chunks.push(chunk);
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
       if (Buffer.concat(chunks).toString("utf8").includes("ping")) {
         socket.end();
       }
@@ -471,7 +471,7 @@ function tcpEcho(port: number, payload: string): Promise<string> {
     const chunks: Buffer[] = [];
     socket.once("connect", () => socket.write(payload));
     socket.on("data", (chunk) => {
-      chunks.push(chunk);
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
       socket.end();
     });
     socket.once("end", () => resolve(Buffer.concat(chunks).toString("utf8")));

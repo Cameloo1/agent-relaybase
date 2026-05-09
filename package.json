@@ -9,7 +9,12 @@
   "scripts": {
     "serve": "node --experimental-strip-types src/cli.ts serve",
     "relaybase": "node --experimental-strip-types src/cli.ts",
+    "lint": "eslint .",
+    "format": "prettier --write package.json .prettierrc.json eslint.config.mjs jest.config.mjs README.md \".github/**/*.{yml,yaml}\" \"tests/jest/**/*.ts\"",
+    "format:check": "prettier --check package.json .prettierrc.json eslint.config.mjs jest.config.mjs README.md \".github/**/*.{yml,yaml}\" \"tests/jest/**/*.ts\"",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test:jest": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.mjs",
     "smoke": "node --experimental-strip-types src/cli.ts status"
   },
   "engines": {
@@ -29,5 +34,16 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^25.6.2",
+    "eslint": "^10.3.0",
+    "jest": "^30.4.2",
+    "prettier": "^3.8.3",
+    "ts-jest": "^29.4.9",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.59.2"
   }
 }
