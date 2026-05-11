@@ -63,20 +63,32 @@ export function composeAppState(input: {
     recentLogs: input.recentLogs,
     lastError: input.runtime.lastError ?? null,
     readiness,
+    canStart:
+      input.runtime.canStart ??
+      (input.runtime.status === "stopped" || input.runtime.status === "errored" || input.runtime.status === "conflict"),
+    canStop: input.runtime.canStop ?? (input.runtime.status === "running" || input.runtime.status === "starting"),
+    canOpen: input.runtime.canOpen ?? readiness.state === "ready",
+    primaryAction: input.runtime.primaryAction ?? primaryAction(input.runtime, readiness.state),
+    ...(input.runtime.blockingReason ? { blockingReason: input.runtime.blockingReason } : {}),
     ...(input.runtime.stopVerification ? { stopVerification: input.runtime.stopVerification } : {}),
     ...(input.runtime.mcpChildren?.length ? { mcpChildren: input.runtime.mcpChildren } : {})
   };
 }
 
-async function buildAppState(runtime: RelaybaseRuntime, id: string, options: { status?: AppStatusView } = {}): Promise<AppState> {
+async function buildAppState(
+  runtime: RelaybaseRuntime,
+  id: string,
+  options: { status?: AppStatusView } = {}
+): Promise<AppState> {
   const checkedAt = new Date().toISOString();
   const status = options.status;
   const runtimeView = status?.runtime ?? stoppedRuntime();
   const backendPort = runtimeView.assignedPort ?? status?.upstreamPort;
   const backendPortOpen = backendPort ? await isPortOpen(backendPort, runtime.host) : false;
-  const route = status && status.protocol !== "tcp"
-    ? await checkRouteReachability(runtime, status, DEFAULT_READINESS_TIMEOUT_MS)
-    : { reachable: status?.protocol === "tcp" ? backendPortOpen : false };
+  const route =
+    status && status.protocol !== "tcp"
+      ? await checkRouteReachability(runtime, status, DEFAULT_READINESS_TIMEOUT_MS)
+      : { reachable: status?.protocol === "tcp" ? backendPortOpen : false };
   const recentLogs = status ? (await runtime.processes.logs(id)).slice(-50) : [];
 
   const state = composeAppState({
@@ -127,7 +139,12 @@ function buildReadiness(input: {
 }): AppReadiness {
   const checks: ReadinessCheck[] = [
     { name: "registered", ok: input.registered, checkedAt: input.checkedAt },
-    { name: "runtime-running", ok: input.runtime.status === "running", checkedAt: input.checkedAt, value: input.runtime.status },
+    {
+      name: "runtime-running",
+      ok: input.runtime.status === "running",
+      checkedAt: input.checkedAt,
+      value: input.runtime.status
+    },
     { name: "health", ok: input.runtime.health === "healthy", checkedAt: input.checkedAt, value: input.runtime.health },
     { name: "backend-port-open", ok: input.backendPortOpen, checkedAt: input.checkedAt },
     { name: "route-reachable", ok: input.routeReachable, checkedAt: input.checkedAt }
@@ -145,13 +162,27 @@ function buildReadiness(input: {
   };
 }
 
-function readinessState(input: { registered: boolean; runtime: RuntimeView; backendPortOpen: boolean; routeReachable: boolean }): ReadinessState {
+function readinessState(input: {
+  registered: boolean;
+  runtime: RuntimeView;
+  backendPortOpen: boolean;
+  routeReachable: boolean;
+}): ReadinessState {
   if (!input.registered) {
     return "unregistered";
   }
 
   if (input.runtime.status === "stopped") {
     return "stopped";
+  }
+
+  if (
+    input.runtime.phase === "prestarting" ||
+    input.runtime.phase === "building" ||
+    input.runtime.phase === "launching" ||
+    input.runtime.phase === "waiting_for_health"
+  ) {
+    return "starting";
   }
 
   if (input.runtime.status === "starting") {
@@ -162,14 +193,24 @@ function readinessState(input: { registered: boolean; runtime: RuntimeView; back
     return "failed";
   }
 
-  if (input.runtime.status === "running" && input.runtime.health === "healthy" && input.backendPortOpen && input.routeReachable) {
+  if (
+    input.runtime.status === "running" &&
+    input.runtime.health === "healthy" &&
+    input.backendPortOpen &&
+    input.routeReachable
+  ) {
     return "ready";
   }
 
   return "unhealthy";
 }
 
-function readinessFailureReason(input: { registered: boolean; runtime: RuntimeView; backendPortOpen: boolean; routeReachable: boolean }): string | undefined {
+function readinessFailureReason(input: {
+  registered: boolean;
+  runtime: RuntimeView;
+  backendPortOpen: boolean;
+  routeReachable: boolean;
+}): string | undefined {
   if (!input.registered) {
     return "App is not registered.";
   }
@@ -201,27 +242,57 @@ function readinessFailureReason(input: { registered: boolean; runtime: RuntimeVi
   return undefined;
 }
 
-async function checkRouteReachability(runtime: RelaybaseRuntime, app: AppStatusView, timeoutMs: number): Promise<RouteCheck> {
+function primaryAction(
+  runtime: RuntimeView,
+  readinessState: ReadinessState
+): "start" | "stop" | "open" | "repair" | "wait" {
+  if (readinessState === "ready") {
+    return "open";
+  }
+
+  if (runtime.status === "starting" || runtime.status === "stopping") {
+    return "wait";
+  }
+
+  if (runtime.status === "running") {
+    return "stop";
+  }
+
+  if (runtime.status === "errored" || runtime.status === "conflict") {
+    return "repair";
+  }
+
+  return "start";
+}
+
+async function checkRouteReachability(
+  runtime: RelaybaseRuntime,
+  app: AppStatusView,
+  timeoutMs: number
+): Promise<RouteCheck> {
   const path = routeHealthPath(app.healthUrl);
   return new Promise((resolve) => {
-    const request = http.request({
-      host: runtime.host,
-      port: runtime.port,
-      path,
-      method: "GET",
-      timeout: Math.min(timeoutMs, 1000),
-      headers: {
-        host: "localhost",
-        "x-relaybase-app": app.id
+    const request = http.request(
+      {
+        host: runtime.host,
+        port: runtime.port,
+        path,
+        method: "GET",
+        timeout: Math.min(timeoutMs, 1000),
+        headers: {
+          host: "localhost",
+          "x-relaybase-app": app.id
+        }
+      },
+      (response) => {
+        response.resume();
+        const statusCode = response.statusCode ?? 0;
+        resolve({
+          reachable: statusCode >= 200 && statusCode < 500,
+          statusCode
+        });
       }
-    }, (response) => {
-      response.resume();
-      const statusCode = response.statusCode ?? 0;
-      resolve({
-        reachable: statusCode >= 200 && statusCode < 500,
-        statusCode
-      });
-    });
+    );
 
     request.once("timeout", () => {
       request.destroy();

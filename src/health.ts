@@ -3,14 +3,20 @@ import https from "node:https";
 import type { AppRecord } from "./types.ts";
 import { isPortOpen } from "./ports.ts";
 
-export async function checkAppHealth(app: AppRecord, port: number, host = "127.0.0.1", timeoutMs = 1000): Promise<boolean> {
+export async function checkAppHealth(
+  app: AppRecord,
+  port: number,
+  host = "127.0.0.1",
+  timeoutMs = 1000
+): Promise<boolean> {
   if (!app.healthUrl) {
     return isPortOpen(port, host, timeoutMs);
   }
 
-  const url = app.healthUrl.startsWith("http://") || app.healthUrl.startsWith("https://")
-    ? app.healthUrl
-    : `http://${host}:${port}${app.healthUrl}`;
+  const url =
+    app.healthUrl.startsWith("http://") || app.healthUrl.startsWith("https://")
+      ? app.healthUrl
+      : `http://${host}:${port}${app.healthUrl}`;
 
   return checkHttpHealth(url, timeoutMs);
 }
@@ -44,4 +50,3 @@ function checkHttpHealth(url: string, timeoutMs: number): Promise<boolean> {
     request.end();
   });
 }
-

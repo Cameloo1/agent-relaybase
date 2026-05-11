@@ -15,6 +15,16 @@ Relaybase success is not proven when a raw localhost port responds. Success is p
 
 Use Relaybase first for local app runtime work. Treat direct ports as fallback, not the default.
 
+For ordinary app setup and launch, keep the public CLI path to three commands:
+
+```powershell
+relaybase configure
+relaybase open
+relaybase health
+```
+
+`configure` is the setup and repair wizard, `open` is the daily launch path, and `health` is read-only diagnosis. Lower-level lifecycle controls are still available through MCP, HTTP, and the helper when proof needs to be more granular.
+
 Before starting, previewing, or debugging a local app runtime, check discovery:
 
 ```powershell
@@ -31,6 +41,7 @@ Decide which surface owns the work before changing code:
 - Relaybase repo owns runtime/process/proxy/MCP/token/logging/lifecycle bugs, route matching, child MCP supervision, and whether stop really closes the backend port.
 - Dashboard repo owns visible panels, buttons, app lists, Access App flow, logs UI, status rendering, and whether UI state matches Relaybase state.
 - Operations dashboard pattern: a dashboard may start Relaybase and control apps through Relaybase, but it must not direct-spawn apps unless it is explicitly in fallback mode.
+- Docker or multi-service apps: the app repo owns Compose/service scripts, while Relaybase owns hook execution, state, logs, health proof, and stop correctness.
 
 If ownership is unclear, inspect status/logs first, then choose the smallest owner that can explain the failure.
 
@@ -71,6 +82,7 @@ Use the helper proof chain when possible:
 Use MCP tools when they are available:
 
 ```text
+configure_project
 list_apps
 app_status
 health_check

@@ -3,7 +3,11 @@ import type { RelaybaseRuntime } from "./server.ts";
 
 const MAX_HANDSHAKE_BYTES = 4096;
 
-export async function maybeHandleTcpTunnel(runtime: RelaybaseRuntime, socket: net.Socket, firstChunk: Buffer): Promise<boolean> {
+export async function maybeHandleTcpTunnel(
+  runtime: RelaybaseRuntime,
+  socket: net.Socket,
+  firstChunk: Buffer
+): Promise<boolean> {
   if (!firstChunk.toString("utf8", 0, Math.min(firstChunk.length, 32)).startsWith("RELAYBASE-TCP ")) {
     return false;
   }
@@ -84,4 +88,3 @@ function readOnce(socket: net.Socket): Promise<Buffer | undefined> {
     socket.once("error", onEnd);
   });
 }
-

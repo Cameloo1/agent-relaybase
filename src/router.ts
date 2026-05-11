@@ -70,4 +70,3 @@ function stripPort(host: string): string {
   const index = host.lastIndexOf(":");
   return index === -1 ? host : host.slice(0, index);
 }
-

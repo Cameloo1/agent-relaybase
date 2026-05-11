@@ -42,4 +42,3 @@ export async function findAvailablePort(start: number, end: number, host = "127.
 
   throw new Error(`No available ports in range ${start}-${end}.`);
 }
-

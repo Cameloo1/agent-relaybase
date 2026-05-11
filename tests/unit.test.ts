@@ -20,16 +20,19 @@ test("validates app ids", () => {
 
 test("normalizes manifests with relative cwd and env", () => {
   const manifestPath = path.join(os.tmpdir(), "relaybase-manifest", "relaybase.app.json");
-  const app = normalizeManifest({
-    id: "notes",
-    name: "Notes",
-    command: "npm.cmd run dev",
-    cwd: "app",
-    protocol: "http",
-    healthUrl: "/health",
-    env: { NODE_ENV: "development" },
-    upstreamPort: 18001
-  }, { manifestPath, now: new Date("2026-05-06T00:00:00.000Z") });
+  const app = normalizeManifest(
+    {
+      id: "notes",
+      name: "Notes",
+      command: "npm.cmd run dev",
+      cwd: "app",
+      protocol: "http",
+      healthUrl: "/health",
+      env: { NODE_ENV: "development" },
+      upstreamPort: 18001
+    },
+    { manifestPath, now: new Date("2026-05-06T00:00:00.000Z") }
+  );
 
   assert.equal(app.id, "notes");
   assert.equal(app.cwd, path.join(os.tmpdir(), "relaybase-manifest", "app"));
@@ -37,33 +40,67 @@ test("normalizes manifests with relative cwd and env", () => {
   assert.equal(app.upstreamPort, 18001);
 });
 
+test("normalizes lifecycle hook fields and rejects invalid timeouts", () => {
+  const app = normalizeManifest({
+    id: "compose-app",
+    name: "Compose App",
+    command: ".\\scripts\\relaybase-start.ps1",
+    cwd: ".",
+    protocol: "http",
+    preStartCommand: ".\\scripts\\relaybase-prestart.ps1",
+    stopCommand: ".\\scripts\\relaybase-stop.ps1",
+    verifyStoppedCommand: ".\\scripts\\relaybase-verify-stopped.ps1",
+    preStartTimeoutMs: 120000,
+    startTimeoutMs: 600000,
+    stopTimeoutMs: 60000,
+    healthTimeoutMs: 30000
+  });
+
+  assert.equal(app.schemaVersion, 1);
+  assert.equal(app.preStartCommand, ".\\scripts\\relaybase-prestart.ps1");
+  assert.equal(app.stopTimeoutMs, 60000);
+  assert.throws(
+    () =>
+      normalizeManifest({
+        id: "bad-timeout",
+        name: "Bad Timeout",
+        command: "node server.js",
+        stopTimeoutMs: 1
+      }),
+    /stopTimeoutMs/
+  );
+});
+
 test("normalizes MCP child blocks with exact allowlists", () => {
   const manifestPath = path.join(os.tmpdir(), "relaybase-mcp-manifest", "relaybase.app.json");
-  const app = normalizeManifest({
-    schemaVersion: 1,
-    id: "notes",
-    name: "Notes",
-    command: "npm.cmd run dev",
-    cwd: "app",
-    protocol: "http",
-    mcp: {
-      enabled: true,
-      children: [
-        {
-          id: "tools",
-          transport: "stdio",
-          command: "node",
-          args: ["./mcp-server.js"],
-          cwd: ".",
-          expose: {
-            tools: ["search", "search"],
-            resources: ["docs://index"],
-            prompts: ["debug"]
+  const app = normalizeManifest(
+    {
+      schemaVersion: 1,
+      id: "notes",
+      name: "Notes",
+      command: "npm.cmd run dev",
+      cwd: "app",
+      protocol: "http",
+      mcp: {
+        enabled: true,
+        children: [
+          {
+            id: "tools",
+            transport: "stdio",
+            command: "node",
+            args: ["./mcp-server.js"],
+            cwd: ".",
+            expose: {
+              tools: ["search", "search"],
+              resources: ["docs://index"],
+              prompts: ["debug"]
+            }
           }
-        }
-      ]
-    }
-  }, { manifestPath, now: new Date("2026-05-06T00:00:00.000Z") });
+        ]
+      }
+    },
+    { manifestPath, now: new Date("2026-05-06T00:00:00.000Z") }
+  );
 
   assert.equal(app.schemaVersion, 1);
   assert.equal(app.mcp?.enabled, true);
@@ -72,28 +109,32 @@ test("normalizes MCP child blocks with exact allowlists", () => {
 });
 
 test("rejects wildcard MCP child exposure", () => {
-  assert.throws(() => normalizeManifest({
-    id: "notes",
-    name: "Notes",
-    command: "npm.cmd run dev",
-    cwd: ".",
-    protocol: "http",
-    mcp: {
-      enabled: true,
-      children: [
-        {
-          id: "tools",
-          transport: "stdio",
-          command: "node",
-          expose: {
-            tools: ["*"],
-            resources: [],
-            prompts: []
-          }
+  assert.throws(
+    () =>
+      normalizeManifest({
+        id: "notes",
+        name: "Notes",
+        command: "npm.cmd run dev",
+        cwd: ".",
+        protocol: "http",
+        mcp: {
+          enabled: true,
+          children: [
+            {
+              id: "tools",
+              transport: "stdio",
+              command: "node",
+              expose: {
+                tools: ["*"],
+                resources: [],
+                prompts: []
+              }
+            }
+          ]
         }
-      ]
-    }
-  }), /wildcard/);
+      }),
+    /wildcard/
+  );
 });
 
 test("generates child MCP namespaces and Relaybase resource URIs", () => {
@@ -200,4 +241,3 @@ test("resolves hub and host routes", () => {
   assert.equal(appIdFromHost("notes.localhost:7777"), "notes");
   assert.equal(appIdFromHost("localhost:7777"), undefined);
 });
-

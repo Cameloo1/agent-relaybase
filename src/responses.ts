@@ -28,4 +28,3 @@ export function sendHtml(response: http.ServerResponse, statusCode: number, body
 export function notFound(response: http.ServerResponse): void {
   sendJson(response, 404, { error: "Not found" });
 }
-

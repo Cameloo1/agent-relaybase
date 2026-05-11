@@ -13,10 +13,12 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 
 test("proxies HTTP by agent header and host header", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-http-"));
-  const upstream = await createHttpUpstream((request) => JSON.stringify({
-    url: request.url,
-    routedApp: request.headers["x-relaybase-routed-app"]
-  }));
+  const upstream = await createHttpUpstream((request) =>
+    JSON.stringify({
+      url: request.url,
+      routedApp: request.headers["x-relaybase-routed-app"]
+    })
+  );
   const hub = await createRelaybaseServer({ port: 0, stateDir });
 
   try {
@@ -79,16 +81,19 @@ test("proxies upgrade sockets for WebSocket-style dev servers", async () => {
     });
     await hub.listen();
 
-    const transcript = await rawSocketTranscript(hub.address().port, [
-      "GET /live HTTP/1.1",
-      `Host: socket.localhost:${hub.address().port}`,
-      "Connection: Upgrade",
-      "Upgrade: websocket",
-      "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
-      "Sec-WebSocket-Version: 13",
-      "",
-      "ping"
-    ].join("\r\n"));
+    const transcript = await rawSocketTranscript(
+      hub.address().port,
+      [
+        "GET /live HTTP/1.1",
+        `Host: socket.localhost:${hub.address().port}`,
+        "Connection: Upgrade",
+        "Upgrade: websocket",
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+        "Sec-WebSocket-Version: 13",
+        "",
+        "ping"
+      ].join("\r\n")
+    );
 
     assert.match(transcript, /101 Switching Protocols/);
     assert.match(transcript, /upgraded/);
@@ -152,7 +157,11 @@ test("manages process lifecycle and injects hub env", async () => {
 
     const allStateResponse = await httpRequest(hub.address().port, "/__hub/api/state", { host: "localhost" });
     assert.equal(allStateResponse.statusCode, 200);
-    assert.ok(JSON.parse(allStateResponse.body).apps.some((app: { id: string; routeReachable: boolean }) => app.id === "managed" && app.routeReachable));
+    assert.ok(
+      JSON.parse(allStateResponse.body).apps.some(
+        (app: { id: string; routeReachable: boolean }) => app.id === "managed" && app.routeReachable
+      )
+    );
 
     const stream = openSseCollector(hub.address().port, "/__hub/api/apps/managed/logs/stream");
     await stream.until("event: snapshot");
@@ -178,6 +187,225 @@ test("manages process lifecycle and injects hub env", async () => {
     }
     unsubscribeLogs();
     await hub.close();
+  }
+});
+
+test("runs lifecycle hooks, labels hook logs, redacts secrets, and records attempts", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-hooks-"));
+  const marker = path.join(stateDir, "hook-marker.txt");
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18150, portRangeEnd: 18170 });
+  const logEvents: Array<{ line: string; stream: string; source?: string }> = [];
+  let unsubscribeLogs = () => {};
+  let started = false;
+
+  try {
+    await hub.listen();
+    const fixture = path.join(rootDir, "tests", "fixtures", "fake-managed-app.ts");
+    await hub.runtime.registry.upsertManifest({
+      id: "hooked",
+      name: "Hooked",
+      command: `"${process.execPath}" --experimental-strip-types "${fixture}"`,
+      cwd: rootDir,
+      protocol: "http",
+      healthUrl: "/health",
+      preStartCommand: hookCommand("success", marker, "pre"),
+      stopCommand: hookCommand("success", marker, "stop"),
+      verifyStoppedCommand: hookCommand("success", marker, "verify"),
+      env: {
+        SECRET_TOKEN: "super-secret-value"
+      }
+    });
+
+    unsubscribeLogs = hub.runtime.processes.subscribeLogs("hooked", (event) => logEvents.push(event));
+    const runtime = await hub.runtime.processes.start("hooked");
+    started = true;
+    assert.equal(runtime.status, "running");
+    assert.equal(runtime.phase, "running");
+    assert.equal(runtime.lastStartAttempt?.status, "succeeded");
+    assert.equal(runtime.lastStartAttempt?.hooks[0]?.name, "preStart");
+    assert.equal(runtime.canOpen, true);
+    assert.ok(
+      logEvents.some((event) => event.source === "preStart" && event.line.includes("[fake-compose:pre] stdout"))
+    );
+    assert.equal(
+      logEvents.some((event) => event.line.includes("super-secret-value")),
+      false
+    );
+    assert.ok(logEvents.some((event) => event.line.includes("[redacted]")));
+
+    const stopped = await hub.runtime.processes.stop("hooked");
+    assert.equal(stopped.status, "stopped");
+    assert.equal(stopped.phase, "stopped");
+    assert.equal(stopped.cleanupStatus, "succeeded");
+    assert.equal(stopped.stopVerification?.ok, true);
+    assert.equal(stopped.stopVerification?.stopCommand?.status, "succeeded");
+    assert.equal(stopped.stopVerification?.verifyStoppedCommand?.status, "succeeded");
+    assert.equal(stopped.lastStopAttempt?.status, "succeeded");
+    assert.match(await fs.readFile(marker, "utf8"), /pre:success/);
+    assert.match(await fs.readFile(marker, "utf8"), /stop:success/);
+    assert.match(await fs.readFile(marker, "utf8"), /verify:success/);
+  } finally {
+    if (started) {
+      await hub.runtime.processes.stop("hooked").catch(() => undefined);
+    }
+    unsubscribeLogs();
+    await hub.close();
+  }
+});
+
+test("does not report stopped when stopCommand fails, times out, or verifyStopped fails", async () => {
+  const scenarios: Array<{
+    id: string;
+    stopMode: string;
+    verifyMode?: string;
+    expectedPhase: string;
+    expectedCleanup: string;
+  }> = [
+    { id: "stop-fails", stopMode: "fail", expectedPhase: "cleanup_failed", expectedCleanup: "failed" },
+    { id: "stop-hangs", stopMode: "hang", expectedPhase: "cleanup_failed", expectedCleanup: "timeout" },
+    {
+      id: "verify-fails",
+      stopMode: "success",
+      verifyMode: "fail",
+      expectedPhase: "stop_verification_failed",
+      expectedCleanup: "verification_failed"
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), `relaybase-${scenario.id}-`));
+    const marker = path.join(stateDir, "hook-marker.txt");
+    const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18180, portRangeEnd: 18199 });
+    let started = false;
+
+    try {
+      await hub.listen();
+      const fixture = path.join(rootDir, "tests", "fixtures", "fake-managed-app.ts");
+      await hub.runtime.registry.upsertManifest({
+        id: scenario.id,
+        name: scenario.id,
+        command: `"${process.execPath}" --experimental-strip-types "${fixture}"`,
+        cwd: rootDir,
+        protocol: "http",
+        healthUrl: "/health",
+        stopCommand: hookCommand(scenario.stopMode, marker, "stop"),
+        ...(scenario.verifyMode ? { verifyStoppedCommand: hookCommand(scenario.verifyMode, marker, "verify") } : {}),
+        stopTimeoutMs: 200
+      });
+
+      const runtime = await hub.runtime.processes.start(scenario.id);
+      assert.equal(runtime.status, "running");
+      started = true;
+      const stopped = await hub.runtime.processes.stop(scenario.id);
+      assert.equal(stopped.status, "errored");
+      assert.equal(stopped.phase, scenario.expectedPhase);
+      assert.equal(stopped.cleanupStatus, scenario.expectedCleanup);
+      assert.equal(stopped.stopVerification?.ok, false);
+      assert.equal(stopped.lastStopAttempt?.status, "failed");
+    } finally {
+      if (started) {
+        await hub.close();
+      } else {
+        await hub.close();
+      }
+    }
+  }
+});
+
+test("cleans up after a start that never reaches health", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-start-cleanup-"));
+  const marker = path.join(stateDir, "cleanup-marker.txt");
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18220, portRangeEnd: 18240 });
+
+  try {
+    await hub.listen();
+    const fixture = path.join(rootDir, "tests", "fixtures", "fake-managed-app.ts");
+    await hub.runtime.registry.upsertManifest({
+      id: "never-healthy",
+      name: "Never Healthy",
+      command: `"${process.execPath}" --experimental-strip-types "${fixture}"`,
+      cwd: rootDir,
+      protocol: "http",
+      healthUrl: "/health",
+      healthTimeoutMs: 200,
+      stopCommand: hookCommand("success", marker, "cleanup"),
+      env: {
+        HEALTH_READY_DELAY_MS: "5000"
+      }
+    });
+
+    const runtime = await hub.runtime.processes.start("never-healthy");
+    assert.equal(runtime.status, "errored");
+    assert.equal(runtime.phase, "errored");
+    assert.equal(runtime.cleanupStatus, "succeeded");
+    assert.equal(runtime.lastStartAttempt?.status, "failed");
+    assert.ok(runtime.lastStartAttempt?.hooks.some((hook) => hook.name === "stop" && hook.status === "succeeded"));
+    assert.match(await fs.readFile(marker, "utf8"), /cleanup:success/);
+  } finally {
+    await hub.runtime.processes.stop("never-healthy").catch(() => undefined);
+    await hub.close();
+  }
+});
+
+test("serializes repeated starts and does not create duplicate backend launches", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-locks-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18260, portRangeEnd: 18280 });
+
+  try {
+    await hub.listen();
+    const fixture = path.join(rootDir, "tests", "fixtures", "fake-managed-app.ts");
+    await hub.runtime.registry.upsertManifest({
+      id: "locked",
+      name: "Locked",
+      command: `"${process.execPath}" --experimental-strip-types "${fixture}"`,
+      cwd: rootDir,
+      protocol: "http",
+      healthUrl: "/health",
+      healthTimeoutMs: 2000,
+      env: {
+        HEALTH_READY_DELAY_MS: "300"
+      }
+    });
+
+    const [first, second] = await Promise.all([
+      hub.runtime.processes.start("locked"),
+      hub.runtime.processes.start("locked")
+    ]);
+
+    assert.equal(first.status, "running");
+    assert.equal(second.status, "running");
+    assert.equal(first.assignedPort, second.assignedPort);
+    assert.equal(second.attemptHistory?.filter((attempt) => attempt.kind === "start").length, 1);
+  } finally {
+    await hub.runtime.processes.stop("locked").catch(() => undefined);
+    await hub.close();
+  }
+});
+
+test("external upstream stop remains route-only unless app owns cleanup", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-external-stop-"));
+  const upstream = await createHttpUpstream(() => "external");
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
+
+  try {
+    await hub.listen();
+    await hub.runtime.registry.upsertManifest({
+      id: "external",
+      name: "External",
+      command: "external",
+      cwd: ".",
+      protocol: "http",
+      healthUrl: "/",
+      upstreamPort: upstream.port
+    });
+
+    const stopped = await hub.runtime.processes.stop("external");
+    assert.equal(stopped.status, "stopped");
+    assert.equal(stopped.stopVerification?.ok, true);
+    assert.equal(await isPortOpen(upstream.port), true);
+  } finally {
+    await hub.close();
+    await upstream.close();
   }
 });
 
@@ -208,7 +436,7 @@ test("reports failed stop when backend port remains open", async () => {
     stateDir,
     portRangeStart: 18130,
     portRangeEnd: 18140,
-    stopPortOpenProbe: async (port, host) => port === stalePort ? true : isPortOpen(port, host)
+    stopPortOpenProbe: async (port, host) => (port === stalePort ? true : isPortOpen(port, host))
   });
   let startedStale = false;
 
@@ -298,7 +526,9 @@ test("routes basic TCP tunnel handshakes", async () => {
   }
 });
 
-async function createHttpUpstream(handler: (request: http.IncomingMessage) => string): Promise<{ port: number; close(): Promise<void> }> {
+async function createHttpUpstream(
+  handler: (request: http.IncomingMessage) => string
+): Promise<{ port: number; close(): Promise<void> }> {
   const server = http.createServer((request, response) => {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(handler(request));
@@ -346,36 +576,60 @@ function closeServer(server: http.Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
-function httpRequest(port: number, pathName: string, headers: Record<string, string>): Promise<{ statusCode: number; body: string }> {
+function hookCommand(mode: string, marker: string, label: string): string {
+  const fixture = path.join(rootDir, "tests", "fixtures", "fake-compose-hook.cjs");
+  return `"${process.execPath}" "${fixture}" --mode ${mode} --marker "${marker}" --label ${label}`;
+}
+
+function httpRequest(
+  port: number,
+  pathName: string,
+  headers: Record<string, string>
+): Promise<{ statusCode: number; body: string }> {
   return new Promise((resolve, reject) => {
     const request = http.request({ host: "127.0.0.1", port, path: pathName, headers }, (response) => {
       const chunks: Buffer[] = [];
       response.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-      response.on("end", () => resolve({ statusCode: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+      response.on("end", () =>
+        resolve({ statusCode: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") })
+      );
     });
     request.once("error", reject);
     request.end();
   });
 }
 
-function apiRequest(port: number, method: string, pathName: string, body?: unknown, headers: Record<string, string> = {}): Promise<{ statusCode: number; body: string }> {
+function apiRequest(
+  port: number,
+  method: string,
+  pathName: string,
+  body?: unknown,
+  headers: Record<string, string> = {}
+): Promise<{ statusCode: number; body: string }> {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : JSON.stringify(body);
-    const request = http.request({
-      host: "127.0.0.1",
-      port,
-      path: pathName,
-      method,
-      headers: {
-        host: "localhost",
-        ...(payload ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload).toString() } : {}),
-        ...headers
+    const request = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        path: pathName,
+        method,
+        headers: {
+          host: "localhost",
+          ...(payload
+            ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload).toString() }
+            : {}),
+          ...headers
+        }
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        response.on("end", () =>
+          resolve({ statusCode: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") })
+        );
       }
-    }, (response) => {
-      const chunks: Buffer[] = [];
-      response.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-      response.on("end", () => resolve({ statusCode: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
-    });
+    );
     request.once("error", reject);
     if (payload) {
       request.write(payload);
@@ -384,32 +638,44 @@ function apiRequest(port: number, method: string, pathName: string, body?: unkno
   });
 }
 
-function openSseCollector(port: number, pathName: string, headers: Record<string, string> = {}): {
+function openSseCollector(
+  port: number,
+  pathName: string,
+  headers: Record<string, string> = {}
+): {
   until(needle: string, timeoutMs?: number): Promise<string>;
   close(): void;
 } {
   let transcript = "";
   let responseStream: http.IncomingMessage | undefined;
-  const waiters: Array<{ needle: string; resolve: (value: string) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }> = [];
-  const request = http.request({
-    host: "127.0.0.1",
-    port,
-    path: pathName,
-    headers: { accept: "text/event-stream", ...headers }
-  }, (response) => {
-    responseStream = response;
-    response.setEncoding("utf8");
-    response.on("data", (chunk) => {
-      transcript += chunk;
-      for (const waiter of [...waiters]) {
-        if (transcript.includes(waiter.needle)) {
-          clearTimeout(waiter.timer);
-          waiters.splice(waiters.indexOf(waiter), 1);
-          waiter.resolve(transcript);
+  const waiters: Array<{
+    needle: string;
+    resolve: (value: string) => void;
+    reject: (error: Error) => void;
+    timer: NodeJS.Timeout;
+  }> = [];
+  const request = http.request(
+    {
+      host: "127.0.0.1",
+      port,
+      path: pathName,
+      headers: { accept: "text/event-stream", ...headers }
+    },
+    (response) => {
+      responseStream = response;
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => {
+        transcript += chunk;
+        for (const waiter of [...waiters]) {
+          if (transcript.includes(waiter.needle)) {
+            clearTimeout(waiter.timer);
+            waiters.splice(waiters.indexOf(waiter), 1);
+            waiter.resolve(transcript);
+          }
         }
-      }
-    });
-  });
+      });
+    }
+  );
 
   request.once("error", (error) => {
     for (const waiter of waiters.splice(0)) {
@@ -451,7 +717,7 @@ function rawSocketTranscript(port: number, payload: string): Promise<string> {
     const chunks: Buffer[] = [];
     socket.once("connect", () => socket.write(payload));
     socket.on("data", (chunk) => {
-      chunks.push(chunk);
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
       if (Buffer.concat(chunks).toString("utf8").includes("ping")) {
         socket.end();
       }
@@ -471,7 +737,7 @@ function tcpEcho(port: number, payload: string): Promise<string> {
     const chunks: Buffer[] = [];
     socket.once("connect", () => socket.write(payload));
     socket.on("data", (chunk) => {
-      chunks.push(chunk);
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
       socket.end();
     });
     socket.once("end", () => resolve(Buffer.concat(chunks).toString("utf8")));

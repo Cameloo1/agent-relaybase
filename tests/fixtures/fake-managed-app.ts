@@ -2,9 +2,16 @@ import http from "node:http";
 
 const port = Number(process.env.PORT);
 const host = process.env.HOST ?? "127.0.0.1";
+const readyAt = Date.now() + Number(process.env.HEALTH_READY_DELAY_MS ?? 0);
 
 const server = http.createServer((request, response) => {
   if (request.url === "/health") {
+    if (Date.now() < readyAt) {
+      response.writeHead(503, { "content-type": "text/plain" });
+      response.end("warming");
+      return;
+    }
+
     response.writeHead(200, { "content-type": "text/plain" });
     response.end("ok");
     return;
@@ -25,12 +32,14 @@ const server = http.createServer((request, response) => {
   }
 
   response.writeHead(200, { "content-type": "application/json" });
-  response.end(JSON.stringify({
-    app: process.env.RELAYBASE_APP_ID,
-    port: process.env.PORT,
-    baseUrl: process.env.RELAYBASE_BASE_URL,
-    url: request.url
-  }));
+  response.end(
+    JSON.stringify({
+      app: process.env.RELAYBASE_APP_ID,
+      port: process.env.PORT,
+      baseUrl: process.env.RELAYBASE_BASE_URL,
+      url: request.url
+    })
+  );
 });
 
 server.listen(port, host, () => {
@@ -39,4 +48,3 @@ server.listen(port, host, () => {
 
 process.once("SIGTERM", () => server.close(() => process.exit(0)));
 process.once("SIGINT", () => server.close(() => process.exit(0)));
-

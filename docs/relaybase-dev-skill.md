@@ -35,7 +35,17 @@ When working in this repo or building an app that should run through Relaybase, 
 Use $relaybase-dev at skills/relaybase-dev to run this app through Relaybase with direct ports only as fallback.
 ```
 
-For local manual checks, use the bundled helper:
+For normal app setup, keep the public CLI path to three commands:
+
+```powershell
+relaybase configure
+relaybase open
+relaybase health
+```
+
+`configure` owns setup and repair, `open` owns daily launch and routed access, and `health` owns read-only diagnosis. Lower-level lifecycle actions remain available to dashboards, MCP tools, and the helper when precise proof is needed.
+
+For manual lifecycle proof, use the bundled helper:
 
 ```powershell
 .\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action preflight
@@ -56,6 +66,8 @@ Use Relaybase when the task involves local app runtime, preview, routing, logs, 
 Use direct ports only when Relaybase is unreachable, unsuitable for the app shape, explicitly bypassed by the user, or being debugged itself. When fallback happens, say why and how to return to Relaybase.
 
 Success means the Relaybase route works, routed health works, logs are available, stop returns stopped, and the backend port is closed after stop when a port is known. A raw direct port listening is not Relaybase success.
+
+For app-owned infrastructure such as Docker Compose, keep the boundary sharp: the app repo owns Compose files and wrapper scripts; Relaybase owns lifecycle state, hook execution, logs, readiness proof, and refusal to report `stopped` when cleanup or stop verification fails.
 
 ## Troubleshooting Model
 

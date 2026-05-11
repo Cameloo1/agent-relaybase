@@ -7,7 +7,14 @@ import { Registry } from "./registry.ts";
 import { RelaybaseMcpService } from "./relaybaseMcp.ts";
 import { proxyHttpRequest, proxyUpgrade, writeSocketHttpError } from "./proxy.ts";
 import { resolveRoute } from "./router.ts";
-import { DEFAULT_HOST, DEFAULT_PORT, DEFAULT_PORT_RANGE_END, DEFAULT_PORT_RANGE_START, getDefaultStateDir, getOrCreateSessionToken } from "./state.ts";
+import {
+  DEFAULT_HOST,
+  DEFAULT_PORT,
+  DEFAULT_PORT_RANGE_END,
+  DEFAULT_PORT_RANGE_START,
+  getDefaultStateDir,
+  getOrCreateSessionToken
+} from "./state.ts";
 import { sendHtml, sendJson } from "./responses.ts";
 import { maybeHandleTcpTunnel } from "./tcpTunnel.ts";
 import type { ServerOptions } from "./types.ts";
@@ -60,7 +67,7 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
   });
 
   httpServer.on("upgrade", (request, socket, head) => {
-    void handleUpgrade(runtime, request, socket, head);
+    void handleUpgrade(runtime, request, socket as net.Socket, Buffer.isBuffer(head) ? head : Buffer.from(head));
   });
 
   httpServer.on("clientError", (error, socket) => {
@@ -69,14 +76,17 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
 
   const netServer = net.createServer((socket) => {
     socket.once("data", (chunk) => {
-      void maybeHandleTcpTunnel(runtime, socket, chunk).then((handled) => {
-        if (!handled) {
-          socket.unshift(chunk);
-          httpServer.emit("connection", socket);
-        }
-      }).catch((error) => {
-        socket.end(`Relaybase connection failed: ${error instanceof Error ? error.message : String(error)}\n`);
-      });
+      const firstChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      void maybeHandleTcpTunnel(runtime, socket, firstChunk)
+        .then((handled) => {
+          if (!handled) {
+            socket.unshift(firstChunk);
+            httpServer.emit("connection", socket);
+          }
+        })
+        .catch((error) => {
+          socket.end(`Relaybase connection failed: ${error instanceof Error ? error.message : String(error)}\n`);
+        });
     });
   });
   netServer.on("connection", (socket) => {
@@ -103,7 +113,11 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
   };
 }
 
-async function handleHttp(runtime: RelaybaseRuntime, request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+async function handleHttp(
+  runtime: RelaybaseRuntime,
+  request: http.IncomingMessage,
+  response: http.ServerResponse
+): Promise<void> {
   const route = resolveRoute({ url: request.url, headers: request.headers });
 
   if (route.kind === "hub") {
@@ -137,7 +151,11 @@ async function handleHttp(runtime: RelaybaseRuntime, request: http.IncomingMessa
   });
 }
 
-async function handleHub(runtime: RelaybaseRuntime, request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+async function handleHub(
+  runtime: RelaybaseRuntime,
+  request: http.IncomingMessage,
+  response: http.ServerResponse
+): Promise<void> {
   const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
 
   if (pathname === "/__hub" || pathname === "/__hub/") {
@@ -168,7 +186,12 @@ async function handleHub(runtime: RelaybaseRuntime, request: http.IncomingMessag
   sendJson(response, 404, { error: "Unknown Relaybase route" });
 }
 
-async function handleUpgrade(runtime: RelaybaseRuntime, request: http.IncomingMessage, socket: net.Socket, head: Buffer): Promise<void> {
+async function handleUpgrade(
+  runtime: RelaybaseRuntime,
+  request: http.IncomingMessage,
+  socket: net.Socket,
+  head: Buffer
+): Promise<void> {
   const route = resolveRoute({ url: request.url, headers: request.headers });
 
   if (route.kind === "hub") {
@@ -224,7 +247,12 @@ function listen(server: net.Server, host: string, port: number): Promise<number>
   });
 }
 
-async function close(runtime: RelaybaseRuntime, netServer: net.Server, httpServer: http.Server, sockets: Set<net.Socket>): Promise<void> {
+async function close(
+  runtime: RelaybaseRuntime,
+  netServer: net.Server,
+  httpServer: http.Server,
+  sockets: Set<net.Socket>
+): Promise<void> {
   await runtime.mcp.close();
 
   return new Promise((resolve) => {
