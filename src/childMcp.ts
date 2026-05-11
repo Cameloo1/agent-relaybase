@@ -2,8 +2,21 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { CallToolResult, GetPromptResult, Prompt, ReadResourceResult, Resource, Tool } from "@modelcontextprotocol/sdk/types.js";
-import type { AppRecord, ChildMcpConfig, ChildMcpDrainResult, ChildMcpRuntimeStatus, ChildMcpRuntimeView } from "./types.ts";
+import type {
+  CallToolResult,
+  GetPromptResult,
+  Prompt,
+  ReadResourceResult,
+  Resource,
+  Tool
+} from "@modelcontextprotocol/sdk/types.js";
+import type {
+  AppRecord,
+  ChildMcpConfig,
+  ChildMcpDrainResult,
+  ChildMcpRuntimeStatus,
+  ChildMcpRuntimeView
+} from "./types.ts";
 
 const DRAIN_TIMEOUT_MS = 3000;
 const INITIAL_RESTART_BACKOFF_MS = 1000;
@@ -98,7 +111,10 @@ export class ChildMcpSupervisor {
     return this.statusForApp(app.id);
   }
 
-  async stopApp(appId: string, options: { drainTimeoutMs?: number; quiet?: boolean } = {}): Promise<ChildMcpDrainResult[]> {
+  async stopApp(
+    appId: string,
+    options: { drainTimeoutMs?: number; quiet?: boolean } = {}
+  ): Promise<ChildMcpDrainResult[]> {
     const runtime = this.#apps.get(appId);
     if (!runtime) {
       return [];
@@ -166,10 +182,10 @@ export class ChildMcpSupervisor {
     this.#assertCallable(child);
     child.inFlight += 1;
     try {
-      return await child.client!.callTool({
+      return (await child.client!.callTool({
         name: exposed.originalName,
         arguments: args
-      }) as CallToolResult;
+      })) as CallToolResult;
     } finally {
       this.#completeInFlight(child);
     }
@@ -233,21 +249,39 @@ export class ChildMcpSupervisor {
     child.nextRestartAt = undefined;
 
     try {
-      const client = new Client({
-        name: `relaybase-${child.app.id}-${child.config.id}`,
-        version: "0.1.0"
-      }, {
-        listChanged: {
-          tools: { debounceMs: 0, onChanged: (error, tools) => void this.#handleChildListChanged(child, "tools", error, tools) },
-          resources: { debounceMs: 0, onChanged: (error, resources) => void this.#handleChildListChanged(child, "resources", error, resources) },
-          prompts: { debounceMs: 0, onChanged: (error, prompts) => void this.#handleChildListChanged(child, "prompts", error, prompts) }
+      const client = new Client(
+        {
+          name: `relaybase-${child.app.id}-${child.config.id}`,
+          version: "0.1.0"
+        },
+        {
+          listChanged: {
+            tools: {
+              debounceMs: 0,
+              onChanged: (error, tools) => void this.#handleChildListChanged(child, "tools", error, tools)
+            },
+            resources: {
+              debounceMs: 0,
+              onChanged: (error, resources) => void this.#handleChildListChanged(child, "resources", error, resources)
+            },
+            prompts: {
+              debounceMs: 0,
+              onChanged: (error, prompts) => void this.#handleChildListChanged(child, "prompts", error, prompts)
+            }
+          }
         }
-      });
+      );
       const transport = await this.#createTransport(child);
       transport.onclose = () => void this.#handleChildClosed(child);
       transport.onerror = (error) => {
         child.lastError = error.message;
-        this.#emit({ type: "log", appId: child.app.id, childId: child.config.id, level: "error", message: error.message });
+        this.#emit({
+          type: "log",
+          appId: child.app.id,
+          childId: child.config.id,
+          level: "error",
+          message: error.message
+        });
       };
 
       child.client = client;
@@ -257,13 +291,25 @@ export class ChildMcpSupervisor {
       child.status = "connected";
       child.acceptingCalls = true;
       child.restartAttempts = 0;
-      this.#emit({ type: "log", appId: child.app.id, childId: child.config.id, level: "info", message: "Child MCP server connected." });
+      this.#emit({
+        type: "log",
+        appId: child.app.id,
+        childId: child.config.id,
+        level: "info",
+        message: "Child MCP server connected."
+      });
       this.#emitListChanged(child);
     } catch (error) {
       child.status = "errored";
       child.acceptingCalls = false;
       child.lastError = error instanceof Error ? error.message : String(error);
-      this.#emit({ type: "log", appId: child.app.id, childId: child.config.id, level: "error", message: `Child MCP server failed: ${child.lastError}` });
+      this.#emit({
+        type: "log",
+        appId: child.app.id,
+        childId: child.config.id,
+        level: "error",
+        message: `Child MCP server failed: ${child.lastError}`
+      });
       this.#scheduleRestart(child);
     }
   }
@@ -311,27 +357,28 @@ export class ChildMcpSupervisor {
   }
 
   async #refreshChildListings(child: ChildRuntime): Promise<void> {
-    await Promise.all([
-      this.#refreshTools(child),
-      this.#refreshResources(child),
-      this.#refreshPrompts(child)
-    ]);
+    await Promise.all([this.#refreshTools(child), this.#refreshResources(child), this.#refreshPrompts(child)]);
   }
 
   async #refreshTools(child: ChildRuntime, tools?: Tool[] | null): Promise<void> {
     try {
       const listed = tools ?? (await child.client!.listTools()).tools;
       const allow = new Set(child.config.expose.tools);
-      child.exposedTools = new Map(listed
-        .filter((tool) => allow.has(tool.name))
-        .map((tool) => [namespaceChildName(child.app.id, tool.name), {
-          originalName: tool.name,
-          tool: {
-            ...tool,
-            name: namespaceChildName(child.app.id, tool.name),
-            description: tool.description ?? `Child MCP tool ${tool.name} from ${child.app.id}.`
-          }
-        }]));
+      child.exposedTools = new Map(
+        listed
+          .filter((tool) => allow.has(tool.name))
+          .map((tool) => [
+            namespaceChildName(child.app.id, tool.name),
+            {
+              originalName: tool.name,
+              tool: {
+                ...tool,
+                name: namespaceChildName(child.app.id, tool.name),
+                description: tool.description ?? `Child MCP tool ${tool.name} from ${child.app.id}.`
+              }
+            }
+          ])
+      );
     } catch (error) {
       child.exposedTools = new Map();
       child.lastError = error instanceof Error ? error.message : String(error);
@@ -342,16 +389,21 @@ export class ChildMcpSupervisor {
     try {
       const listed = resources ?? (await child.client!.listResources()).resources;
       const allow = new Set(child.config.expose.resources);
-      child.exposedResources = new Map(listed
-        .filter((resource) => allow.has(resource.uri))
-        .map((resource) => [relaybaseChildResourceUri(child.app.id, resource.uri), {
-          originalUri: resource.uri,
-          resource: {
-            ...resource,
-            uri: relaybaseChildResourceUri(child.app.id, resource.uri),
-            name: `${child.app.id}.${resource.name}`
-          }
-        }]));
+      child.exposedResources = new Map(
+        listed
+          .filter((resource) => allow.has(resource.uri))
+          .map((resource) => [
+            relaybaseChildResourceUri(child.app.id, resource.uri),
+            {
+              originalUri: resource.uri,
+              resource: {
+                ...resource,
+                uri: relaybaseChildResourceUri(child.app.id, resource.uri),
+                name: `${child.app.id}.${resource.name}`
+              }
+            }
+          ])
+      );
     } catch (error) {
       child.exposedResources = new Map();
       child.lastError = error instanceof Error ? error.message : String(error);
@@ -362,26 +414,42 @@ export class ChildMcpSupervisor {
     try {
       const listed = prompts ?? (await child.client!.listPrompts()).prompts;
       const allow = new Set(child.config.expose.prompts);
-      child.exposedPrompts = new Map(listed
-        .filter((prompt) => allow.has(prompt.name))
-        .map((prompt) => [namespaceChildName(child.app.id, prompt.name), {
-          originalName: prompt.name,
-          prompt: {
-            ...prompt,
-            name: namespaceChildName(child.app.id, prompt.name),
-            description: prompt.description ?? `Child MCP prompt ${prompt.name} from ${child.app.id}.`
-          }
-        }]));
+      child.exposedPrompts = new Map(
+        listed
+          .filter((prompt) => allow.has(prompt.name))
+          .map((prompt) => [
+            namespaceChildName(child.app.id, prompt.name),
+            {
+              originalName: prompt.name,
+              prompt: {
+                ...prompt,
+                name: namespaceChildName(child.app.id, prompt.name),
+                description: prompt.description ?? `Child MCP prompt ${prompt.name} from ${child.app.id}.`
+              }
+            }
+          ])
+      );
     } catch (error) {
       child.exposedPrompts = new Map();
       child.lastError = error instanceof Error ? error.message : String(error);
     }
   }
 
-  async #handleChildListChanged(child: ChildRuntime, list: "tools" | "resources" | "prompts", error: Error | null, items: Tool[] | Resource[] | Prompt[] | null): Promise<void> {
+  async #handleChildListChanged(
+    child: ChildRuntime,
+    list: "tools" | "resources" | "prompts",
+    error: Error | null,
+    items: Tool[] | Resource[] | Prompt[] | null
+  ): Promise<void> {
     if (error) {
       child.lastError = error.message;
-      this.#emit({ type: "log", appId: child.app.id, childId: child.config.id, level: "warning", message: `Child MCP ${list} refresh failed: ${error.message}` });
+      this.#emit({
+        type: "log",
+        appId: child.app.id,
+        childId: child.config.id,
+        level: "warning",
+        message: `Child MCP ${list} refresh failed: ${error.message}`
+      });
       return;
     }
 
@@ -411,7 +479,13 @@ export class ChildMcpSupervisor {
 
     child.status = "errored";
     child.lastError = "Child MCP server connection closed.";
-    this.#emit({ type: "log", appId: child.app.id, childId: child.config.id, level: "warning", message: "Child MCP server closed; scheduling restart." });
+    this.#emit({
+      type: "log",
+      appId: child.app.id,
+      childId: child.config.id,
+      level: "warning",
+      message: "Child MCP server closed; scheduling restart."
+    });
     this.#scheduleRestart(child);
   }
 
@@ -429,7 +503,13 @@ export class ChildMcpSupervisor {
       void this.#connectChild(child);
     }, delay);
     child.restartTimer.unref();
-    this.#emit({ type: "log", appId: child.app.id, childId: child.config.id, level: "warning", message: `Restarting child MCP server in ${delay}ms.` });
+    this.#emit({
+      type: "log",
+      appId: child.app.id,
+      childId: child.config.id,
+      level: "warning",
+      message: `Restarting child MCP server in ${delay}ms.`
+    });
   }
 
   async #stopChild(child: ChildRuntime, timeoutMs: number, quiet: boolean): Promise<ChildMcpDrainResult> {
@@ -456,7 +536,13 @@ export class ChildMcpSupervisor {
     child.exposedResources.clear();
     child.exposedPrompts.clear();
     if (!quiet) {
-      this.#emit({ type: "log", appId: child.app.id, childId: child.config.id, level: "info", message: "Child MCP server stopped." });
+      this.#emit({
+        type: "log",
+        appId: child.app.id,
+        childId: child.config.id,
+        level: "info",
+        message: "Child MCP server stopped."
+      });
       this.#emitListChanged(child);
     }
 

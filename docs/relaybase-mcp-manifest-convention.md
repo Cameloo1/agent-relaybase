@@ -120,6 +120,25 @@ Relaybase generates these names in its MCP schema. Apps declare original child n
 
 Child crashes are logged and scheduled for exponential backoff restart. Child list-change notifications propagate upward to connected Relaybase MCP clients.
 
+## Lifecycle Hooks
+
+Apps can declare app-owned lifecycle hooks:
+
+```json
+{
+  "preStartCommand": ".\\scripts\\relaybase-prestart.ps1",
+  "command": ".\\scripts\\relaybase-start.ps1",
+  "stopCommand": ".\\scripts\\relaybase-stop.ps1",
+  "verifyStoppedCommand": ".\\scripts\\relaybase-verify-stopped.ps1",
+  "preStartTimeoutMs": 120000,
+  "startTimeoutMs": 600000,
+  "stopTimeoutMs": 60000,
+  "healthTimeoutMs": 30000
+}
+```
+
+Relaybase runs these as generic local commands. Docker, Compose, database, and service-specific details remain in the app repo scripts. Relaybase records hook output, exit codes, timeouts, and cleanup status, then refuses to report `stopped` when cleanup or stop verification fails.
+
 ## App State Contract
 
 Relaybase exposes standard app state for dashboards and agents. Consumers should use this contract instead of rebuilding lifecycle, readiness, log, and access logic for each app.
@@ -136,6 +155,7 @@ GET /__hub/api/apps/<id>/logs/stream
 MCP:
 
 ```text
+configure_project(apply)
 app_status(id)
 health_check(id)
 verify_app(id)
@@ -150,6 +170,16 @@ name
 registered
 runtime.status
 runtime.health
+runtime.phase
+runtime.canStart
+runtime.canStop
+runtime.canOpen
+runtime.primaryAction
+runtime.blockingReason
+runtime.cleanupStatus
+runtime.lastStartAttempt
+runtime.lastStopAttempt
+runtime.attemptHistory
 runtime.pid
 runtime.assignedPort
 backendPortOpen
@@ -169,6 +199,10 @@ mcpChildren
 `readiness` includes a state, checked timestamp, bounded timeout, named checks, and a failure reason when Relaybase cannot prove the app is ready. Route reachability is checked through Relaybase routing, not by trusting the upstream port alone.
 
 `stopVerification` records whether stop was attempted, the backend port that was checked, whether it remained open, and whether port closure was verified. A backend port that remains open after stop is a failed stop even if a wrapper process exited.
+
+`cleanupStatus` records whether stop cleanup was not needed, pending, succeeded, failed, timed out, or failed verification. Dashboards should use `canStart`, `canStop`, `canOpen`, `primaryAction`, and `blockingReason` instead of inferring button state from raw process details.
+
+`configure_project` uses the same setup engine as `relaybase configure`. Dry-run planning is allowed without mutation credentials; `apply: true` is a token-gated mutation because it may write project files, register apps, and launch verification.
 
 ## Dashboard-Owned Pattern
 

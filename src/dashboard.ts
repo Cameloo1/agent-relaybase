@@ -214,4 +214,3 @@ export function dashboardHtml(options: { token: string; apps: AppStatusView[] })
 </body>
 </html>`;
 }
-

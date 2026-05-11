@@ -11,7 +11,12 @@ class ApiError extends Error {
   readonly recoverable: boolean;
   readonly details?: Record<string, unknown>;
 
-  constructor(statusCode: number, code: string, message: string, options: { recoverable?: boolean; details?: Record<string, unknown> } = {}) {
+  constructor(
+    statusCode: number,
+    code: string,
+    message: string,
+    options: { recoverable?: boolean; details?: Record<string, unknown> } = {}
+  ) {
     super(message);
     this.statusCode = statusCode;
     this.code = code;
@@ -20,7 +25,11 @@ class ApiError extends Error {
   }
 }
 
-export async function handleApiRequest(runtime: RelaybaseRuntime, request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+export async function handleApiRequest(
+  runtime: RelaybaseRuntime,
+  request: http.IncomingMessage,
+  response: http.ServerResponse
+): Promise<void> {
   const url = new URL(request.url ?? "/", "http://localhost");
   const parts = url.pathname.split("/").filter(Boolean);
 
@@ -38,10 +47,11 @@ export async function handleApiRequest(runtime: RelaybaseRuntime, request: http.
     if (request.method === "POST" && url.pathname === "/__hub/api/apps/register") {
       requireToken(runtime, request);
       const body = await readJsonBody(request);
-      const manifest = typeof body.manifestPath === "string"
-        ? await readManifestFile(body.manifestPath)
-        : body;
-      const app = await runtime.registry.upsertManifest(manifest, typeof body.manifestPath === "string" ? { manifestPath: body.manifestPath } : {});
+      const manifest = typeof body.manifestPath === "string" ? await readManifestFile(body.manifestPath) : body;
+      const app = await runtime.registry.upsertManifest(
+        manifest,
+        typeof body.manifestPath === "string" ? { manifestPath: body.manifestPath } : {}
+      );
       sendJson(response, 201, { app });
       return;
     }
@@ -72,17 +82,39 @@ export async function handleApiRequest(runtime: RelaybaseRuntime, request: http.
       }
     }
 
-    if (request.method === "GET" && parts.length === 5 && parts[0] === "__hub" && parts[1] === "api" && parts[2] === "apps" && parts[4] === "state") {
+    if (
+      request.method === "GET" &&
+      parts.length === 5 &&
+      parts[0] === "__hub" &&
+      parts[1] === "api" &&
+      parts[2] === "apps" &&
+      parts[4] === "state"
+    ) {
       sendJson(response, 200, { state: await getAppState(runtime, parts[3]) });
       return;
     }
 
-    if (request.method === "GET" && parts.length === 6 && parts[0] === "__hub" && parts[1] === "api" && parts[2] === "apps" && parts[4] === "logs" && parts[5] === "stream") {
+    if (
+      request.method === "GET" &&
+      parts.length === 6 &&
+      parts[0] === "__hub" &&
+      parts[1] === "api" &&
+      parts[2] === "apps" &&
+      parts[4] === "logs" &&
+      parts[5] === "stream"
+    ) {
       await streamAppLogs(runtime, request, response, parts[3]);
       return;
     }
 
-    if (request.method === "GET" && parts.length === 5 && parts[0] === "__hub" && parts[1] === "api" && parts[2] === "apps" && parts[4] === "logs") {
+    if (
+      request.method === "GET" &&
+      parts.length === 5 &&
+      parts[0] === "__hub" &&
+      parts[1] === "api" &&
+      parts[2] === "apps" &&
+      parts[4] === "logs"
+    ) {
       sendJson(response, 200, {
         id: parts[3],
         logs: await runtime.processes.logs(parts[3]),
@@ -98,7 +130,12 @@ export async function handleApiRequest(runtime: RelaybaseRuntime, request: http.
   }
 }
 
-async function streamAppLogs(runtime: RelaybaseRuntime, request: http.IncomingMessage, response: http.ServerResponse, id: string): Promise<void> {
+async function streamAppLogs(
+  runtime: RelaybaseRuntime,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  id: string
+): Promise<void> {
   response.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
     "cache-control": "no-cache, no-transform",
@@ -181,14 +218,12 @@ function sendApiError(runtime: RelaybaseRuntime, response: http.ServerResponse, 
 function tokenDiagnostics(runtime: RelaybaseRuntime): Record<string, unknown> {
   return {
     requiredForMutations: true,
-    acceptedHeaders: [
-      "Authorization: Bearer <token>",
-      "x-relaybase-token: <token>"
-    ],
+    acceptedHeaders: ["Authorization: Bearer <token>", "x-relaybase-token: <token>"],
     stateDir: runtime.stateDir,
     tokenPath: path.join(runtime.stateDir, "session-token"),
     tokenPresent: Boolean(runtime.token),
-    mismatchHint: "Discovery can be healthy while mutations return 401 if the client reads a token from a different Relaybase state directory."
+    mismatchHint:
+      "Discovery can be healthy while mutations return 401 if the client reads a token from a different Relaybase state directory."
   };
 }
 
@@ -204,4 +239,3 @@ async function readJsonBody(request: http.IncomingMessage): Promise<Record<strin
 
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
 }
-

@@ -19,6 +19,22 @@ Relaybase fills that process layer and exposes it back to agents as MCP.
 
 ## Quick Start
 
+Relaybase keeps the normal user surface to three commands:
+
+```powershell
+relaybase configure
+relaybase open
+relaybase health
+```
+
+`configure` is the smart setup and repair flow. It detects the project, proposes launch architectures, asks setup questions in an arrow-key wizard, writes guarded Relaybase artifacts, registers the app, can start and verify it, and records an inspectable setup report under `.relaybase/`.
+
+`open` is the daily one-click path. It loads the saved launch profile, ensures Relaybase is available, starts the app when needed, waits for readiness, and opens the stable Relaybase route.
+
+`health` is read-only diagnosis. It checks the daemon, token/state alignment, project config, registered app state, route reachability, recent logs, MCP exposure, and readiness. If repair is needed, it points back to `relaybase configure --repair`.
+
+Advanced daemon development:
+
 ```powershell
 npm.cmd run relaybase -- serve
 ```
@@ -88,7 +104,7 @@ x-relaybase-token: <token>
 
 ## App Manifest
 
-Existing `relaybase.app.json` files remain valid:
+`relaybase configure` creates or preserves `relaybase.app.json`. Existing manifests remain valid:
 
 ```json
 {
@@ -100,6 +116,29 @@ Existing `relaybase.app.json` files remain valid:
   "healthUrl": "/"
 }
 ```
+
+Apps that own heavier local infrastructure, such as Docker Compose wrappers, can add app-owned lifecycle hooks without making Relaybase parse Compose files:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "skylineops",
+  "name": "SkylineOps",
+  "preStartCommand": ".\\scripts\\relaybase-prestart.ps1",
+  "command": ".\\scripts\\relaybase-start.ps1",
+  "stopCommand": ".\\scripts\\relaybase-stop.ps1",
+  "verifyStoppedCommand": ".\\scripts\\relaybase-verify-stopped.ps1",
+  "preStartTimeoutMs": 120000,
+  "startTimeoutMs": 600000,
+  "stopTimeoutMs": 60000,
+  "healthTimeoutMs": 30000,
+  "cwd": ".",
+  "protocol": "http",
+  "healthUrl": "/api/health"
+}
+```
+
+Relaybase treats these hooks as generic app-owned commands. The app repo owns Docker/Compose details; Relaybase owns lifecycle state, logs, health proof, hook execution, and stop correctness.
 
 Apps can also declare child MCP servers:
 
@@ -136,9 +175,12 @@ Child exposure is exact allowlist only. Wildcards and expose-all defaults are in
 
 ## Lifecycle Tools
 
+The CLI intentionally exposes setup, launch, and diagnosis as the three main commands. Lower-level lifecycle actions remain available to dashboards and agents through HTTP/MCP so custom dashboards can launch apps with one click without recreating process logic.
+
 Relaybase exposes these MCP tools:
 
 ```text
+configure_project
 list_apps
 app_status
 health_check
@@ -151,7 +193,7 @@ tail_logs
 app_url
 ```
 
-Mutation tools are token-gated: `register_app`, `start_app`, `stop_app`, and `restart_app`.
+Mutation tools are token-gated: `configure_project` when `apply: true`, `register_app`, `start_app`, `stop_app`, and `restart_app`.
 
 ## Standard App State
 
@@ -180,6 +222,9 @@ The app-state contract includes:
 ```text
 id, name, registered
 runtime.status, runtime.health, runtime.pid, runtime.assignedPort
+runtime.phase, runtime.canStart, runtime.canStop, runtime.canOpen
+runtime.primaryAction, runtime.blockingReason, runtime.cleanupStatus
+runtime.lastStartAttempt, runtime.lastStopAttempt, runtime.attemptHistory
 backendPortOpen, routeReachable
 humanUrl, agentUrl, agentHeaders
 logSnapshotUrl, logStreamUrl, recentLogs
@@ -191,7 +236,7 @@ mcpChildren
 
 Readiness is bounded and deterministic. Relaybase checks app health, backend port openness, and route reachability through Relaybase routing. A start result that remains `starting` or unhealthy includes `lastError`, readiness failure details, and recent logs through app state.
 
-Stop is successful only when child MCP calls are drained, the process tree is terminated, and the assigned backend port is closed. If the backend port remains open, Relaybase returns an errored runtime with `lastError` and `stopVerification`.
+Stop is successful only when child MCP calls are drained, the process tree is terminated, configured cleanup hooks pass, configured stop-verification hooks pass, and the assigned backend port is closed when Relaybase owns it. If cleanup fails, verification fails, or the backend port remains open, Relaybase returns an errored runtime with `phase` such as `cleanup_failed` or `stop_verification_failed`, `lastError`, attempt metadata, and `stopVerification`.
 
 Live logs are first-class through `/__hub/api/apps/<id>/logs/stream`. Log events include app id, stream (`stdout`, `stderr`, or `system`), timestamp, sequence, and line. Dashboard-specific frontend/backend classification belongs in the dashboard layer; Relaybase provides clean process channels.
 
@@ -240,6 +285,14 @@ Discovery at `/.well-known/mcp.json` advertises mutation token requirements, acc
 
 ## Development And Tests
 
+Full local release gate:
+
+```powershell
+npm.cmd run verify
+```
+
+The gate runs formatting, lint, TypeScript checking, Node's built-in test suite, Jest compatibility tests, and a read-only CLI smoke check.
+
 ```powershell
 npm.cmd test
 ```
@@ -247,10 +300,17 @@ npm.cmd test
 Quality gates used by CI:
 
 ```powershell
-npm.cmd run lint
 npm.cmd run format:check
+npm.cmd run lint
 npm.cmd run typecheck
 npm.cmd run test:jest
+npm.cmd run smoke
+```
+
+Package artifact check:
+
+```powershell
+npm.cmd run package:check
 ```
 
 Local serve workflow:

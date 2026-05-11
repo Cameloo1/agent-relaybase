@@ -1,5 +1,13 @@
 import path from "node:path";
-import type { AppManifestInput, AppMcpConfig, AppProtocol, AppRecord, ChildMcpConfig, ChildMcpTransport, McpExposePolicy } from "./types.ts";
+import type {
+  AppManifestInput,
+  AppMcpConfig,
+  AppProtocol,
+  AppRecord,
+  ChildMcpConfig,
+  ChildMcpTransport,
+  McpExposePolicy
+} from "./types.ts";
 
 const APP_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const VALID_PROTOCOLS = new Set<AppProtocol>(["http", "http+ws", "tcp"]);
@@ -7,7 +15,9 @@ const VALID_CHILD_MCP_TRANSPORTS = new Set<ChildMcpTransport>(["stdio", "streama
 
 export function validateAppId(id: string): void {
   if (!APP_ID_PATTERN.test(id)) {
-    throw new Error("App id must be 1-63 chars of lowercase letters, numbers, or dashes, and cannot start or end with a dash.");
+    throw new Error(
+      "App id must be 1-63 chars of lowercase letters, numbers, or dashes, and cannot start or end with a dash."
+    );
   }
 }
 
@@ -15,7 +25,10 @@ export function isValidAppId(id: string): boolean {
   return APP_ID_PATTERN.test(id);
 }
 
-export function normalizeManifest(input: AppManifestInput, options: { manifestPath?: string; now?: Date } = {}): AppRecord {
+export function normalizeManifest(
+  input: AppManifestInput,
+  options: { manifestPath?: string; now?: Date } = {}
+): AppRecord {
   const now = (options.now ?? new Date()).toISOString();
   const manifestDir = options.manifestPath ? path.dirname(path.resolve(options.manifestPath)) : process.cwd();
   const id = requiredString(input.id, "id").trim();
@@ -42,7 +55,23 @@ export function normalizeManifest(input: AppManifestInput, options: { manifestPa
   const env = normalizeEnv(input.env);
   const upstreamPort = normalizePort(input.upstreamPort);
   const healthUrl = normalizeHealthUrl(input.healthUrl);
-  const schemaVersion = normalizeSchemaVersion(input.schemaVersion, input.mcp !== undefined);
+  const preStartCommand = normalizeLifecycleCommand(input.preStartCommand, "preStartCommand");
+  const stopCommand = normalizeLifecycleCommand(input.stopCommand, "stopCommand");
+  const verifyStoppedCommand = normalizeLifecycleCommand(input.verifyStoppedCommand, "verifyStoppedCommand");
+  const preStartTimeoutMs = normalizeTimeout(input.preStartTimeoutMs, "preStartTimeoutMs");
+  const startTimeoutMs = normalizeTimeout(input.startTimeoutMs, "startTimeoutMs");
+  const stopTimeoutMs = normalizeTimeout(input.stopTimeoutMs, "stopTimeoutMs");
+  const healthTimeoutMs = normalizeTimeout(input.healthTimeoutMs, "healthTimeoutMs");
+  const hasLifecycleFields = [
+    preStartCommand,
+    stopCommand,
+    verifyStoppedCommand,
+    preStartTimeoutMs,
+    startTimeoutMs,
+    stopTimeoutMs,
+    healthTimeoutMs
+  ].some((value) => value !== undefined);
+  const schemaVersion = normalizeSchemaVersion(input.schemaVersion, input.mcp !== undefined || hasLifecycleFields);
   const mcp = normalizeMcpConfig(input.mcp, cwd);
 
   return {
@@ -55,6 +84,13 @@ export function normalizeManifest(input: AppManifestInput, options: { manifestPa
     ...(healthUrl ? { healthUrl } : {}),
     env,
     ...(upstreamPort ? { upstreamPort } : {}),
+    ...(preStartCommand ? { preStartCommand } : {}),
+    ...(stopCommand ? { stopCommand } : {}),
+    ...(verifyStoppedCommand ? { verifyStoppedCommand } : {}),
+    ...(preStartTimeoutMs !== undefined ? { preStartTimeoutMs } : {}),
+    ...(startTimeoutMs !== undefined ? { startTimeoutMs } : {}),
+    ...(stopTimeoutMs !== undefined ? { stopTimeoutMs } : {}),
+    ...(healthTimeoutMs !== undefined ? { healthTimeoutMs } : {}),
     ...(mcp ? { mcp } : {}),
     ...(options.manifestPath ? { manifestPath: path.resolve(options.manifestPath) } : {}),
     createdAt: now,
@@ -138,6 +174,27 @@ function normalizeHealthUrl(value: unknown): string | undefined {
   }
 
   throw new Error("Manifest field healthUrl must be an absolute http(s) URL or a path starting with '/'.");
+}
+
+function normalizeLifecycleCommand(value: unknown, field: string): string | undefined {
+  const command = optionalString(value, field)?.trim();
+  if (command === "") {
+    throw new Error(`Manifest field ${field} cannot be empty.`);
+  }
+
+  return command;
+}
+
+function normalizeTimeout(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 100 || value > 3_600_000) {
+    throw new Error(`Manifest field ${field} must be an integer between 100 and 3600000 milliseconds.`);
+  }
+
+  return value;
 }
 
 function normalizeSchemaVersion(value: unknown, hasMcpBlock: boolean): 1 | undefined {
@@ -309,4 +366,3 @@ function normalizeHttpUrl(value: unknown, field: string): string | undefined {
     throw new Error(`Manifest field ${field} must be an absolute http(s) URL.`);
   }
 }
-

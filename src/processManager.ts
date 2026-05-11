@@ -1,14 +1,27 @@
+import { randomUUID } from "node:crypto";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Registry } from "./registry.ts";
 import { DEFAULT_HOST, DEFAULT_PORT, DEFAULT_PORT_RANGE_END, DEFAULT_PORT_RANGE_START } from "./state.ts";
 import { ChildMcpSupervisor } from "./childMcp.ts";
 import { checkAppHealth, waitForHealthy } from "./health.ts";
 import { findAvailablePort, isPortOpen } from "./ports.ts";
-import type { AppRecord, AppStatusView, ChildMcpDrainResult, RuntimeStatus, RuntimeView, StopVerification } from "./types.ts";
+import type {
+  AppRecord,
+  AppStatusView,
+  ChildMcpDrainResult,
+  LifecycleAttempt,
+  LifecycleHookAttempt,
+  LifecycleHookName,
+  LifecyclePhase,
+  RuntimeStatus,
+  RuntimeView,
+  StopVerification
+} from "./types.ts";
 
 interface RuntimeEntry {
   status: RuntimeStatus;
   health: "unknown" | "healthy" | "unhealthy";
+  phase: LifecyclePhase;
   child?: ChildProcessWithoutNullStreams;
   assignedPort?: number;
   pid?: number;
@@ -17,6 +30,11 @@ interface RuntimeEntry {
   lastError?: string;
   logs: string[];
   logEvents: AppLogEvent[];
+  lastStartAttempt?: LifecycleAttempt;
+  lastStopAttempt?: LifecycleAttempt;
+  attemptHistory: LifecycleAttempt[];
+  blockingReason?: string;
+  cleanupStatus?: RuntimeView["cleanupStatus"];
   mcpDrain?: ChildMcpDrainResult[];
   stopVerification?: StopVerification;
 }
@@ -31,6 +49,7 @@ export interface AppLogEvent {
   appId: string;
   line: string;
   stream: "stdout" | "stderr" | "system";
+  source: "system" | LifecycleHookName;
   sequence: number;
   at: string;
 }
@@ -52,6 +71,7 @@ export class ProcessManager {
   readonly mcp: ChildMcpSupervisor;
   readonly stopPortOpenProbe: (port: number, host: string) => Promise<boolean>;
   #runtime = new Map<string, RuntimeEntry>();
+  #mutations = new Map<string, { action: "start" | "stop" | "restart"; promise: Promise<RuntimeView> }>();
   #logSubscribers = new Set<(event: AppLogEvent) => void>();
   #logSequence = 0;
 
@@ -66,6 +86,25 @@ export class ProcessManager {
   }
 
   async start(id: string): Promise<RuntimeView> {
+    const active = this.#mutations.get(id);
+    if (active) {
+      if (active.action === "start") {
+        return active.promise;
+      }
+
+      const entry = this.#runtime.get(id) ?? this.#entry("stopped", "unknown");
+      entry.blockingReason = `${active.action}_in_progress`;
+      return this.#view(entry, id);
+    }
+
+    const promise = this.#startLocked(id).finally(() => {
+      this.#mutations.delete(id);
+    });
+    this.#mutations.set(id, { action: "start", promise });
+    return promise;
+  }
+
+  async #startLocked(id: string): Promise<RuntimeView> {
     const app = await this.registry.get(id);
     if (!app) {
       throw new Error(`Unknown app: ${id}`);
@@ -73,30 +112,59 @@ export class ProcessManager {
 
     const existing = this.#runtime.get(id);
     if (existing?.child && existing.child.exitCode === null && existing.assignedPort) {
+      existing.phase = "running";
+      existing.status = "running";
+      existing.health = "healthy";
       return this.#view(existing, id);
     }
 
     const assignedPort = await this.#assignPort(app);
     if (assignedPort === undefined) {
-      const conflict = this.#entry("conflict", "unhealthy", undefined, "Requested upstream port is already in use.");
+      const conflict = this.#entry(
+        "conflict",
+        "unhealthy",
+        undefined,
+        "Requested upstream port is already in use.",
+        "conflict"
+      );
       this.#runtime.set(id, conflict);
       return this.#view(conflict, id);
     }
 
-    const entry = this.#entry("starting", "unknown", assignedPort);
+    const entry = this.#entry("starting", "unknown", assignedPort, undefined, "prestarting");
+    entry.cleanupStatus = "not_needed";
+    const attempt = this.#startAttempt(app, assignedPort);
+    entry.lastStartAttempt = attempt;
+    this.#recordAttempt(entry, attempt);
     this.#runtime.set(id, entry);
 
+    const env = this.#appEnv(app, assignedPort);
+    if (app.preStartCommand) {
+      const preStart = await this.#runHook(
+        app,
+        entry,
+        "preStart",
+        app.preStartCommand,
+        app.preStartTimeoutMs ?? 120_000,
+        env
+      );
+      attempt.hooks.push(preStart);
+      if (preStart.status !== "succeeded") {
+        const message = preStart.error ?? `preStartCommand failed with exit code ${preStart.exitCode ?? "unknown"}.`;
+        entry.status = "errored";
+        entry.health = "unhealthy";
+        entry.phase = "errored";
+        entry.lastError = message;
+        this.#finishAttempt(attempt, "failed", entry.phase, message);
+        return this.#view(entry, id);
+      }
+    }
+
+    entry.phase = "launching";
     const spawnSpec = this.#spawnSpec(app.command);
     const child = spawn(spawnSpec.command, spawnSpec.args, {
       cwd: app.cwd,
-      env: {
-        ...process.env,
-        ...app.env,
-        PORT: String(assignedPort),
-        HOST: this.hubHost,
-        RELAYBASE_APP_ID: app.id,
-        RELAYBASE_BASE_URL: `http://${app.id}.localhost:${this.hubPort}`
-      },
+      env,
       shell: spawnSpec.shell,
       windowsHide: true
     });
@@ -104,116 +172,138 @@ export class ProcessManager {
     entry.child = child;
     entry.pid = child.pid;
     entry.startedAt = new Date().toISOString();
-    this.#appendLog(app.id, `[relaybase] starting ${app.id} on ${this.hubHost}:${assignedPort}`, "system");
+    this.#appendLog(app.id, `[relaybase] starting ${app.id} on ${this.hubHost}:${assignedPort}`, "system", "system");
     await this.mcp.startApp(app);
 
-    child.stdout.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stdout"));
-    child.stderr.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stderr"));
+    child.stdout.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stdout", "start"));
+    child.stderr.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stderr", "start"));
     child.once("error", (error) => {
       entry.status = "errored";
       entry.health = "unhealthy";
+      entry.phase = "errored";
       entry.lastError = error.message;
-      this.#appendLog(app.id, `[relaybase] process error: ${error.message}`);
+      this.#appendLog(app.id, `[relaybase] process error: ${error.message}`, "system", "system");
     });
     child.once("exit", (code, signal) => {
-      if (entry.status !== "stopped") {
+      if (entry.status !== "stopped" && entry.status !== "errored") {
         entry.status = code === 0 ? "stopped" : "errored";
+        entry.phase = code === 0 ? "stopped" : "errored";
       }
 
       entry.health = "unhealthy";
       entry.stoppedAt = new Date().toISOString();
-      entry.lastError = code === 0 ? undefined : `Process exited with code ${code ?? "null"} signal ${signal ?? "null"}.`;
-      this.#appendLog(app.id, `[relaybase] exited code=${code ?? "null"} signal=${signal ?? "null"}`);
+      if (entry.status !== "errored") {
+        entry.lastError =
+          code === 0 ? undefined : `Process exited with code ${code ?? "null"} signal ${signal ?? "null"}.`;
+      }
+      this.#appendLog(
+        app.id,
+        `[relaybase] exited code=${code ?? "null"} signal=${signal ?? "null"}`,
+        "system",
+        "system"
+      );
     });
 
-    const healthy = await waitForHealthy(app, assignedPort, this.hubHost, 8000);
+    entry.phase = "waiting_for_health";
+    const healthy = await waitForHealthy(
+      app,
+      assignedPort,
+      this.hubHost,
+      app.healthTimeoutMs ?? app.startTimeoutMs ?? 8000
+    );
     if (child.exitCode !== null) {
       entry.status = "errored";
       entry.health = "unhealthy";
+      entry.phase = "errored";
       entry.lastError ??= "Process exited before becoming healthy.";
+      this.#finishAttempt(attempt, "failed", entry.phase, entry.lastError);
     } else if (healthy) {
       entry.status = "running";
       entry.health = "healthy";
+      entry.phase = "running";
+      entry.lastError = undefined;
+      this.#finishAttempt(attempt, "succeeded", entry.phase);
     } else {
-      entry.status = "starting";
+      entry.status = "errored";
       entry.health = "unhealthy";
+      entry.phase = "errored";
       entry.lastError = "App did not become healthy before the startup timeout.";
+      this.#finishAttempt(attempt, "failed", entry.phase, entry.lastError);
+      await this.#cleanupAfterFailedStart(app, entry, child);
     }
 
     return this.#view(entry, id);
   }
 
   async stop(id: string): Promise<RuntimeView> {
+    const active = this.#mutations.get(id);
+    if (active) {
+      if (active.action === "stop") {
+        return active.promise;
+      }
+
+      const entry = this.#runtime.get(id) ?? this.#entry("stopped", "unknown");
+      entry.blockingReason = `${active.action}_in_progress`;
+      return this.#view(entry, id);
+    }
+
+    const promise = this.#stopLocked(id).finally(() => {
+      this.#mutations.delete(id);
+    });
+    this.#mutations.set(id, { action: "stop", promise });
+    return promise;
+  }
+
+  async #stopLocked(id: string): Promise<RuntimeView> {
+    const app = await this.registry.get(id);
     const entry = this.#runtime.get(id);
+    if (!app) {
+      throw new Error(`Unknown app: ${id}`);
+    }
+
+    const stopped = entry ?? this.#entry("stopped", "unknown");
+    const attempt = this.#stopAttempt(app, stopped.assignedPort);
+    stopped.lastStopAttempt = attempt;
+    this.#recordAttempt(stopped, attempt);
+
     if (!entry?.child || entry.child.exitCode !== null) {
-      const stopped = entry ?? this.#entry("stopped", "unknown");
       const assignedPort = stopped.assignedPort;
-      const checkedAt = new Date().toISOString();
-      const backendPortOpen = assignedPort ? await this.stopPortOpenProbe(assignedPort, this.hubHost) : null;
-      stopped.mcpDrain = await this.mcp.stopApp(id);
-      stopped.stopVerification = {
-        attempted: true,
-        checkedAt,
-        ...(assignedPort ? { backendPort: assignedPort } : {}),
-        backendPortOpen,
-        portClosureVerified: Boolean(assignedPort && backendPortOpen === false),
-        ok: backendPortOpen !== true,
-        ...(backendPortOpen ? { failureReason: `Stop requested, but backend port ${assignedPort} is still open.` } : {}),
-        ...(stopped.mcpDrain?.length ? { mcpDrain: stopped.mcpDrain } : {})
-      };
-      stopped.status = stopped.stopVerification.ok ? "stopped" : "errored";
-      stopped.health = stopped.stopVerification.ok ? "unknown" : "unhealthy";
-      stopped.lastError = stopped.stopVerification.failureReason;
-      stopped.stoppedAt = new Date().toISOString();
+      stopped.status = "stopping";
+      stopped.phase = "stopping";
+      stopped.health = "unhealthy";
+      stopped.cleanupStatus = app.stopCommand ? "pending" : "not_needed";
       this.#runtime.set(id, stopped);
-      return this.#view(stopped, id);
+      stopped.mcpDrain = await this.mcp.stopApp(id);
+      return this.#finalizeStop(app, stopped, attempt, assignedPort);
     }
 
     const assignedPort = entry.assignedPort;
     entry.status = "stopping";
+    entry.phase = "stopping";
     entry.health = "unhealthy";
-    this.#appendLog(id, "[relaybase] stopping");
+    entry.cleanupStatus = app.stopCommand ? "pending" : "not_needed";
+    this.#appendLog(id, "[relaybase] stopping", "system", "system");
     entry.mcpDrain = await this.mcp.stopApp(id);
 
     await this.#terminateChild(entry.child);
     entry.stoppedAt = new Date().toISOString();
-
-    const checkedAt = new Date().toISOString();
-    let portStillOpen = assignedPort ? !(await this.#waitForPortClosed(assignedPort, 3000)) : false;
-    if (portStillOpen && assignedPort && process.platform === "win32") {
-      this.#killPortOwner(assignedPort);
-      portStillOpen = !(await this.#waitForPortClosed(assignedPort, 3000));
-    }
-    entry.stopVerification = {
-      attempted: true,
-      checkedAt,
-      ...(assignedPort ? { backendPort: assignedPort } : {}),
-      backendPortOpen: assignedPort ? portStillOpen : null,
-      portClosureVerified: Boolean(assignedPort && !portStillOpen),
-      ok: !portStillOpen,
-      ...(portStillOpen ? { failureReason: `Stop requested, but backend port ${assignedPort} is still open.` } : {}),
-      ...(entry.mcpDrain?.length ? { mcpDrain: entry.mcpDrain } : {})
-    };
-    if (portStillOpen) {
-      entry.status = "errored";
-      entry.health = "unhealthy";
-      entry.lastError = entry.stopVerification.failureReason;
-      this.#appendLog(id, `[relaybase] stop failed: ${entry.lastError}`);
-      return this.#view(entry, id);
-    }
-
-    entry.status = "stopped";
-    entry.health = "unknown";
-    entry.assignedPort = undefined;
-    entry.pid = undefined;
-    entry.lastError = undefined;
-    this.#appendLog(id, "[relaybase] stopped");
-    return this.#view(entry, id);
+    return this.#finalizeStop(app, entry, attempt, assignedPort);
   }
 
   async restart(id: string): Promise<RuntimeView> {
-    await this.stop(id);
-    return this.start(id);
+    const active = this.#mutations.get(id);
+    if (active) {
+      return active.promise;
+    }
+
+    const promise = (async () => {
+      await this.#stopLocked(id);
+      return this.#startLocked(id);
+    })().finally(() => {
+      this.#mutations.delete(id);
+    });
+    this.#mutations.set(id, { action: "restart", promise });
+    return promise;
   }
 
   async logs(id: string): Promise<string[]> {
@@ -247,10 +337,15 @@ export class ProcessManager {
         view.externalPortOpen = await isPortOpen(app.upstreamPort, this.hubHost);
         if (view.externalPortOpen) {
           view.status = "running";
-          view.health = app.protocol === "tcp" ? "healthy" : await checkAppHealth(app, app.upstreamPort, this.hubHost)
-            ? "healthy"
-            : "unhealthy";
+          view.health =
+            app.protocol === "tcp"
+              ? "healthy"
+              : (await checkAppHealth(app, app.upstreamPort, this.hubHost))
+                ? "healthy"
+                : "unhealthy";
+          view.phase = "running";
           view.assignedPort = app.upstreamPort;
+          view.canOpen = view.health === "healthy";
         }
       }
 
@@ -262,11 +357,16 @@ export class ProcessManager {
 
   async getProxyTarget(app: AppRecord): Promise<{ port: number; external: boolean } | undefined> {
     const runtime = this.#runtime.get(app.id);
-    if (runtime?.assignedPort && runtime.status !== "errored" && runtime.status !== "conflict" && runtime.status !== "stopped") {
+    if (
+      runtime?.assignedPort &&
+      runtime.status !== "errored" &&
+      runtime.status !== "conflict" &&
+      runtime.status !== "stopped"
+    ) {
       return { port: runtime.assignedPort, external: false };
     }
 
-    if (app.upstreamPort && await isPortOpen(app.upstreamPort, this.hubHost)) {
+    if (app.upstreamPort && (await isPortOpen(app.upstreamPort, this.hubHost))) {
       return { port: app.upstreamPort, external: true };
     }
 
@@ -280,11 +380,13 @@ export class ProcessManager {
     }
 
     const statuses = await this.listStatuses();
-    const status = statuses.find((entry) => entry.id === id)?.runtime ?? this.#view(this.#entry("stopped", "unknown"), id);
+    const status =
+      statuses.find((entry) => entry.id === id)?.runtime ?? this.#view(this.#entry("stopped", "unknown"), id);
     const port = status.assignedPort ?? app.upstreamPort;
-    const reachable = app.protocol === "tcp"
-      ? Boolean(port && await isPortOpen(port, this.hubHost))
-      : Boolean(port && await checkAppHealth(app, port, this.hubHost));
+    const reachable =
+      app.protocol === "tcp"
+        ? Boolean(port && (await isPortOpen(port, this.hubHost)))
+        : Boolean(port && (await checkAppHealth(app, port, this.hubHost)));
 
     return {
       status: {
@@ -296,15 +398,314 @@ export class ProcessManager {
     };
   }
 
-  #entry(status: RuntimeStatus, health: "unknown" | "healthy" | "unhealthy", assignedPort?: number, lastError?: string): RuntimeEntry {
+  async #finalizeStop(
+    app: AppRecord,
+    entry: RuntimeEntry,
+    attempt: LifecycleAttempt,
+    assignedPort?: number
+  ): Promise<RuntimeView> {
+    const env = this.#appEnv(app, assignedPort ?? app.upstreamPort ?? 0);
+    let stopHook: LifecycleHookAttempt | undefined;
+    let verifyHook: LifecycleHookAttempt | undefined;
+    let failureReason: string | undefined;
+
+    if (app.stopCommand) {
+      stopHook = await this.#runHook(app, entry, "stop", app.stopCommand, app.stopTimeoutMs ?? 60_000, env);
+      attempt.hooks.push(stopHook);
+      if (stopHook.status !== "succeeded") {
+        entry.cleanupStatus = stopHook.timedOut ? "timeout" : "failed";
+        failureReason = stopHook.error ?? `stopCommand failed with exit code ${stopHook.exitCode ?? "unknown"}.`;
+      } else {
+        entry.cleanupStatus = "succeeded";
+      }
+    } else {
+      entry.cleanupStatus = "not_needed";
+    }
+
+    if (!failureReason && app.verifyStoppedCommand) {
+      verifyHook = await this.#runHook(
+        app,
+        entry,
+        "verifyStopped",
+        app.verifyStoppedCommand,
+        app.stopTimeoutMs ?? 60_000,
+        env
+      );
+      attempt.hooks.push(verifyHook);
+      if (verifyHook.status !== "succeeded") {
+        entry.cleanupStatus = "verification_failed";
+        failureReason =
+          verifyHook.error ?? `verifyStoppedCommand failed with exit code ${verifyHook.exitCode ?? "unknown"}.`;
+      }
+    }
+
+    const checkedAt = new Date().toISOString();
+    const shouldCheckPort = Boolean(assignedPort && this.#ownsBackendPort(app, entry));
+    let portStillOpen = shouldCheckPort && assignedPort ? !(await this.#waitForPortClosed(assignedPort, 3000)) : false;
+    if (!failureReason && portStillOpen && assignedPort && process.platform === "win32" && !app.stopCommand) {
+      this.#killPortOwner(assignedPort);
+      portStillOpen = !(await this.#waitForPortClosed(assignedPort, 3000));
+    }
+    if (!failureReason && portStillOpen && assignedPort) {
+      entry.cleanupStatus = "verification_failed";
+      failureReason = `Stop requested, but backend port ${assignedPort} is still open.`;
+    }
+
+    entry.stopVerification = {
+      attempted: true,
+      checkedAt,
+      ...(assignedPort ? { backendPort: assignedPort } : {}),
+      backendPortOpen: shouldCheckPort && assignedPort ? portStillOpen : null,
+      portClosureVerified: Boolean(shouldCheckPort && assignedPort && !portStillOpen),
+      ok: !failureReason,
+      ...(failureReason ? { failureReason } : {}),
+      ...(entry.cleanupStatus ? { cleanupStatus: entry.cleanupStatus } : {}),
+      ...(stopHook ? { stopCommand: stopHook } : {}),
+      ...(verifyHook ? { verifyStoppedCommand: verifyHook } : {}),
+      ...(entry.mcpDrain?.length ? { mcpDrain: entry.mcpDrain } : {})
+    };
+
+    entry.stoppedAt = new Date().toISOString();
+    if (failureReason) {
+      entry.status = "errored";
+      entry.health = "unhealthy";
+      entry.phase = entry.cleanupStatus === "verification_failed" ? "stop_verification_failed" : "cleanup_failed";
+      entry.lastError = failureReason;
+      this.#finishAttempt(attempt, "failed", entry.phase, failureReason);
+      this.#appendLog(app.id, `[relaybase] stop failed: ${failureReason}`, "system", "system");
+      return this.#view(entry, app.id);
+    }
+
+    entry.status = "stopped";
+    entry.health = "unknown";
+    entry.phase = "stopped";
+    entry.assignedPort = undefined;
+    entry.pid = undefined;
+    entry.lastError = undefined;
+    entry.blockingReason = undefined;
+    this.#finishAttempt(attempt, "succeeded", entry.phase);
+    this.#appendLog(app.id, "[relaybase] stopped", "system", "system");
+    return this.#view(entry, app.id);
+  }
+
+  async #cleanupAfterFailedStart(
+    app: AppRecord,
+    entry: RuntimeEntry,
+    child: ChildProcessWithoutNullStreams
+  ): Promise<void> {
+    await this.#terminateChild(child);
+    entry.pid = undefined;
+    entry.stoppedAt = new Date().toISOString();
+    if (!app.stopCommand) {
+      entry.cleanupStatus = "not_needed";
+      if (entry.assignedPort && (await this.#waitForPortClosed(entry.assignedPort, 3000))) {
+        entry.assignedPort = undefined;
+      }
+      return;
+    }
+
+    entry.cleanupStatus = "pending";
+    const hook = await this.#runHook(
+      app,
+      entry,
+      "stop",
+      app.stopCommand,
+      app.stopTimeoutMs ?? 60_000,
+      this.#appEnv(app, entry.assignedPort ?? 0)
+    );
+    entry.lastStartAttempt?.hooks.push(hook);
+    entry.cleanupStatus = hook.status === "succeeded" ? "succeeded" : hook.timedOut ? "timeout" : "failed";
+    if (hook.status !== "succeeded") {
+      entry.lastError = `${entry.lastError} Cleanup also failed: ${hook.error ?? `stopCommand exited ${hook.exitCode ?? "unknown"}`}`;
+      return;
+    }
+
+    if (entry.assignedPort && (await this.#waitForPortClosed(entry.assignedPort, 3000))) {
+      entry.assignedPort = undefined;
+    } else if (entry.assignedPort) {
+      entry.cleanupStatus = "verification_failed";
+      entry.lastError = `${entry.lastError} Cleanup ran, but backend port ${entry.assignedPort} is still open.`;
+    }
+  }
+
+  async #runHook(
+    app: AppRecord,
+    entry: RuntimeEntry,
+    name: LifecycleHookName,
+    command: string,
+    timeoutMs: number,
+    env: NodeJS.ProcessEnv
+  ): Promise<LifecycleHookAttempt> {
+    const hook: LifecycleHookAttempt = {
+      name,
+      command,
+      status: "running",
+      startedAt: new Date().toISOString(),
+      stdout: [],
+      stderr: []
+    };
+    const spec = this.#spawnSpec(command);
+
+    await new Promise<void>((resolve) => {
+      const child = spawn(spec.command, spec.args, {
+        cwd: app.cwd,
+        env,
+        shell: spec.shell,
+        windowsHide: true
+      });
+      let settled = false;
+      const timer = setTimeout(() => {
+        hook.timedOut = true;
+        hook.error = `${name} hook timed out after ${timeoutMs}ms.`;
+        this.#terminateChild(child);
+      }, timeoutMs);
+
+      child.stdout.on("data", (chunk) => {
+        const text = this.#redact(chunk.toString(), env);
+        hook.stdout?.push(...this.#lines(text));
+        this.#appendLog(app.id, text, "stdout", name);
+      });
+      child.stderr.on("data", (chunk) => {
+        const text = this.#redact(chunk.toString(), env);
+        hook.stderr?.push(...this.#lines(text));
+        this.#appendLog(app.id, text, "stderr", name);
+      });
+      child.once("error", (error) => {
+        hook.error = error.message;
+      });
+      const finish = (code: number | null, signal: NodeJS.Signals | null) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        hook.exitCode = code;
+        hook.signal = signal;
+        hook.endedAt = new Date().toISOString();
+        hook.status = code === 0 && !hook.timedOut && !hook.error ? "succeeded" : "failed";
+        hook.error ??=
+          hook.status === "failed"
+            ? `${name} hook exited with code ${code ?? "null"} signal ${signal ?? "null"}.`
+            : undefined;
+        resolve();
+      };
+      child.once("exit", finish);
+      child.once("close", finish);
+    });
+
+    return hook;
+  }
+
+  #entry(
+    status: RuntimeStatus,
+    health: "unknown" | "healthy" | "unhealthy",
+    assignedPort?: number,
+    lastError?: string,
+    phase?: LifecyclePhase
+  ): RuntimeEntry {
     return {
       status,
       health,
+      phase:
+        phase ??
+        (status === "running"
+          ? "running"
+          : status === "stopped"
+            ? "stopped"
+            : status === "conflict"
+              ? "conflict"
+              : status === "starting"
+                ? "launching"
+                : status === "stopping"
+                  ? "stopping"
+                  : "errored"),
       ...(assignedPort ? { assignedPort } : {}),
       ...(lastError ? { lastError } : {}),
       logs: [],
-      logEvents: []
+      logEvents: [],
+      attemptHistory: []
     };
+  }
+
+  #startAttempt(app: AppRecord, assignedPort: number): LifecycleAttempt {
+    return {
+      id: randomUUID(),
+      kind: "start",
+      status: "running",
+      phase: "prestarting",
+      startedAt: new Date().toISOString(),
+      assignedPort,
+      command: app.command,
+      hooks: []
+    };
+  }
+
+  #stopAttempt(app: AppRecord, assignedPort?: number): LifecycleAttempt {
+    return {
+      id: randomUUID(),
+      kind: "stop",
+      status: "running",
+      phase: "stopping",
+      startedAt: new Date().toISOString(),
+      ...(assignedPort ? { assignedPort } : {}),
+      command: app.stopCommand,
+      hooks: []
+    };
+  }
+
+  #recordAttempt(entry: RuntimeEntry, attempt: LifecycleAttempt): void {
+    entry.attemptHistory.push(attempt);
+    if (entry.attemptHistory.length > 20) {
+      entry.attemptHistory.splice(0, entry.attemptHistory.length - 20);
+    }
+  }
+
+  #finishAttempt(
+    attempt: LifecycleAttempt,
+    status: LifecycleAttempt["status"],
+    phase: LifecyclePhase,
+    error?: string
+  ): void {
+    attempt.status = status;
+    attempt.phase = phase;
+    attempt.endedAt = new Date().toISOString();
+    if (error) {
+      attempt.error = error;
+    }
+  }
+
+  #appEnv(app: AppRecord, assignedPort: number): NodeJS.ProcessEnv {
+    return {
+      ...process.env,
+      ...app.env,
+      ...(assignedPort ? { PORT: String(assignedPort) } : {}),
+      HOST: this.hubHost,
+      RELAYBASE_APP_ID: app.id,
+      RELAYBASE_BASE_URL: `http://${app.id}.localhost:${this.hubPort}`
+    };
+  }
+
+  #ownsBackendPort(app: AppRecord, entry: RuntimeEntry): boolean {
+    if (app.command === "external" && !entry.child) {
+      return false;
+    }
+
+    return Boolean(entry.assignedPort);
+  }
+
+  #redact(text: string, env: NodeJS.ProcessEnv): string {
+    let redacted = text;
+    for (const [key, value] of Object.entries(env)) {
+      if (!value || value.length < 4 || !/(token|secret|password|key)/i.test(key)) {
+        continue;
+      }
+      redacted = redacted.split(value).join("[redacted]");
+    }
+    return redacted;
+  }
+
+  #lines(text: string): string[] {
+    return text.split(/\r?\n/).filter(Boolean);
   }
 
   async #assignPort(app: AppRecord): Promise<number | undefined> {
@@ -323,6 +724,14 @@ export class ProcessManager {
     }
 
     const executable = tokens[0];
+    if (process.platform === "win32" && /\.ps1$/i.test(executable)) {
+      return {
+        command: "powershell.exe",
+        args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", executable, ...tokens.slice(1)],
+        shell: false
+      };
+    }
+
     if (process.platform === "win32" && /\.(?:cmd|bat)$/i.test(executable)) {
       return { command, args: [], shell: true };
     }
@@ -434,7 +843,12 @@ export class ProcessManager {
     }
   }
 
-  #appendLog(id: string, text: string, stream: AppLogEvent["stream"] = "system"): void {
+  #appendLog(
+    id: string,
+    text: string,
+    stream: AppLogEvent["stream"] = "system",
+    source: AppLogEvent["source"] = "system"
+  ): void {
     const entry = this.#runtime.get(id);
     if (!entry) {
       return;
@@ -450,6 +864,7 @@ export class ProcessManager {
         appId: id,
         line,
         stream,
+        source,
         sequence: ++this.#logSequence,
         at: new Date().toISOString()
       };
@@ -474,19 +889,75 @@ export class ProcessManager {
 
   #view(entry: RuntimeEntry, appId?: string): RuntimeView {
     const mcpChildren = appId ? this.mcp.statusForApp(appId) : [];
+    const actionState = this.#actionState(entry);
     return {
       status: entry.status,
       health: entry.health,
+      phase: entry.phase,
       ...(entry.pid ? { pid: entry.pid } : {}),
       ...(entry.assignedPort ? { assignedPort: entry.assignedPort } : {}),
       ...(entry.startedAt ? { startedAt: entry.startedAt } : {}),
       ...(entry.stoppedAt ? { stoppedAt: entry.stoppedAt } : {}),
       ...(entry.lastError ? { lastError: entry.lastError } : {}),
       logLines: entry.logs.length,
+      ...actionState,
+      ...(entry.cleanupStatus ? { cleanupStatus: entry.cleanupStatus } : {}),
+      ...(entry.lastStartAttempt ? { lastStartAttempt: entry.lastStartAttempt } : {}),
+      ...(entry.lastStopAttempt ? { lastStopAttempt: entry.lastStopAttempt } : {}),
+      ...(entry.attemptHistory.length ? { attemptHistory: [...entry.attemptHistory] } : {}),
       ...(mcpChildren.length ? { mcpChildren } : {}),
       ...(entry.mcpDrain?.length ? { mcpDrain: entry.mcpDrain } : {}),
       ...(entry.stopVerification ? { stopVerification: entry.stopVerification } : {})
     };
   }
-}
 
+  #actionState(
+    entry: RuntimeEntry
+  ): Pick<RuntimeView, "canStart" | "canStop" | "canOpen" | "primaryAction" | "blockingReason"> {
+    if (entry.blockingReason) {
+      return {
+        canStart: false,
+        canStop: false,
+        canOpen: false,
+        primaryAction: "wait",
+        blockingReason: entry.blockingReason
+      };
+    }
+
+    if (entry.status === "running" && entry.health === "healthy") {
+      return {
+        canStart: false,
+        canStop: true,
+        canOpen: true,
+        primaryAction: "open"
+      };
+    }
+
+    if (entry.status === "starting" || entry.status === "stopping") {
+      return {
+        canStart: false,
+        canStop: entry.status === "starting",
+        canOpen: false,
+        primaryAction: "wait",
+        blockingReason: `${entry.phase}_in_progress`
+      };
+    }
+
+    if (entry.status === "errored" || entry.status === "conflict") {
+      return {
+        canStart: true,
+        canStop: Boolean(entry.assignedPort),
+        canOpen: false,
+        primaryAction: "repair",
+        ...(entry.lastError ? { blockingReason: entry.lastError } : {})
+      };
+    }
+
+    return {
+      canStart: true,
+      canStop: false,
+      canOpen: false,
+      primaryAction: "start"
+    };
+  }
+}

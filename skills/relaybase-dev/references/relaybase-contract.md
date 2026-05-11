@@ -28,6 +28,7 @@ For HTTP apps, route checks should use the manifest `healthUrl` when present and
 Prefer these tools when available:
 
 ```text
+configure_project
 list_apps
 app_status
 health_check
@@ -42,6 +43,7 @@ app_url
 Mutation tools require a Relaybase token:
 
 ```text
+configure_project with apply: true
 register_app
 start_app
 stop_app
@@ -81,7 +83,23 @@ Use `/logs/stream` when live logs matter. Fall back to `/logs` snapshots if the 
 
 ## CLI
 
-Use the Relaybase repo-local CLI when working from the repo:
+The public CLI is intentionally small:
+
+```powershell
+relaybase configure
+relaybase open
+relaybase health
+```
+
+From the repo, use the same flow through the local script:
+
+```powershell
+npm.cmd run relaybase -- configure
+npm.cmd run relaybase -- open
+npm.cmd run relaybase -- health
+```
+
+Use advanced commands only for daemon development or low-level lifecycle debugging:
 
 ```powershell
 npm.cmd run relaybase -- serve

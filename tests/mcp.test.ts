@@ -57,11 +57,15 @@ test("HTTP MCP rejects unauthorized mutation and accepts token auth", async () =
     const appStatus = await authorized.callTool({ name: "app_status", arguments: { id: "managed-auth" } });
     assert.equal(appStatus.structuredContent?.app.registered, true);
     assert.equal(appStatus.structuredContent?.app.readiness.state, "ready");
+    assert.equal(appStatus.structuredContent?.app.primaryAction, "open");
+    assert.equal(appStatus.structuredContent?.app.runtime.phase, "running");
+    assert.equal(appStatus.structuredContent?.app.runtime.lastStartAttempt.status, "succeeded");
     assert.match(String(appStatus.structuredContent?.app.logStreamUrl), /\/logs\/stream$/);
 
     const health = await authorized.callTool({ name: "health_check", arguments: { id: "managed-auth" } });
     assert.equal(health.structuredContent?.routeReachable, true);
     assert.equal(health.structuredContent?.backendPortOpen, true);
+    assert.equal(health.structuredContent?.state.canOpen, true);
 
     const verified = await authorized.callTool({ name: "verify_app", arguments: { id: "managed-auth" } });
     assert.equal(verified.structuredContent?.state.routeReachable, true);
@@ -70,6 +74,53 @@ test("HTTP MCP rejects unauthorized mutation and accepts token auth", async () =
     assert.equal(stopped.structuredContent?.runtime.status, "stopped");
     assert.equal(stopped.structuredContent?.state.stopVerification.ok, true);
     await authorized.close();
+  } finally {
+    await hub.close();
+  }
+});
+
+test("MCP configure_project uses the shared setup flow and gates writes behind token auth", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-mcp-configure-state-"));
+  const project = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-mcp-configure-project-"));
+  await fs.writeFile(
+    path.join(project, "package.json"),
+    JSON.stringify(
+      {
+        name: "mcp-configured-app",
+        scripts: {
+          dev: "node server.js"
+        }
+      },
+      null,
+      2
+    )
+  );
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
+
+  try {
+    await hub.listen();
+    const unauthenticated = await createHttpMcpClient(hub.address().port);
+    const dryRun = await unauthenticated.callTool({
+      name: "configure_project",
+      arguments: { cwd: project, apply: false }
+    });
+    assert.equal(dryRun.structuredContent?.selectedPlan.id, "managed-web");
+    await assert.rejects(
+      () =>
+        unauthenticated.callTool({ name: "configure_project", arguments: { cwd: project, apply: true, start: false } }),
+      /UNAUTHORIZED_MUTATION/
+    );
+    await unauthenticated.close();
+
+    const authenticated = await createHttpMcpClient(hub.address().port, hub.runtime.token);
+    const applied = await authenticated.callTool({
+      name: "configure_project",
+      arguments: { cwd: project, apply: true, start: false }
+    });
+    assert.equal(applied.structuredContent?.verification.attempted, false);
+    assert.ok(await exists(path.join(project, "relaybase.app.json")));
+    assert.equal((await hub.runtime.registry.get("mcp-configured-app"))?.id, "mcp-configured-app");
+    await authenticated.close();
   } finally {
     await hub.close();
   }
@@ -145,7 +196,10 @@ test("aggregates child stdio MCP tools, resources, and prompts with exact allowl
     try {
       const tools = await client.listTools();
       assert.ok(tools.tools.some((tool) => tool.name === "managed.echo"));
-      assert.equal(tools.tools.some((tool) => tool.name === "managed.hidden"), false);
+      assert.equal(
+        tools.tools.some((tool) => tool.name === "managed.hidden"),
+        false
+      );
 
       const result = await client.callTool({ name: "managed.echo", arguments: { text: "hello" } });
       assert.equal(result.structuredContent?.name, "echo");
@@ -153,14 +207,20 @@ test("aggregates child stdio MCP tools, resources, and prompts with exact allowl
       const resources = await client.listResources();
       const childUri = "relaybase://app/managed/mcp/docs://index";
       assert.ok(resources.resources.some((resource) => resource.uri === childUri));
-      assert.equal(resources.resources.some((resource) => resource.uri.includes("secret://hidden")), false);
+      assert.equal(
+        resources.resources.some((resource) => resource.uri.includes("secret://hidden")),
+        false
+      );
 
       const read = await client.readResource({ uri: childUri });
       assert.match(read.contents[0].text, /stdio resource/);
 
       const prompts = await client.listPrompts();
       assert.ok(prompts.prompts.some((prompt) => prompt.name === "managed.debug"));
-      assert.equal(prompts.prompts.some((prompt) => prompt.name === "managed.hidden"), false);
+      assert.equal(
+        prompts.prompts.some((prompt) => prompt.name === "managed.hidden"),
+        false
+      );
     } finally {
       await client.close();
       await hub.runtime.processes.stop("managed");
@@ -202,7 +262,10 @@ test("aggregates child Streamable HTTP MCP tools with exact allowlists", async (
     try {
       const tools = await client.listTools();
       assert.ok(tools.tools.some((tool) => tool.name === "webapp.query"));
-      assert.equal(tools.tools.some((tool) => tool.name === "webapp.hidden"), false);
+      assert.equal(
+        tools.tools.some((tool) => tool.name === "webapp.hidden"),
+        false
+      );
 
       const result = await client.callTool({ name: "webapp.query", arguments: { text: "hello" } });
       assert.equal(result.structuredContent?.child, "http");
@@ -233,9 +296,11 @@ async function registerManagedApp(registry: Registry, id: string, extra: Record<
 
 async function createHttpMcpClient(port: number, token?: string): Promise<Client> {
   const client = new Client({ name: "relaybase-http-test", version: "1.0.0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {
-    requestInit: token ? { headers: { authorization: `Bearer ${token}` } } : undefined
-  }));
+  await client.connect(
+    new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {
+      requestInit: token ? { headers: { authorization: `Bearer ${token}` } } : undefined
+    })
+  );
   return client;
 }
 
@@ -290,9 +355,20 @@ function httpRequest(port: number, pathName: string): Promise<{ statusCode: numb
     const request = http.request({ host: "127.0.0.1", port, path: pathName }, (response) => {
       const chunks: Buffer[] = [];
       response.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-      response.on("end", () => resolve({ statusCode: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+      response.on("end", () =>
+        resolve({ statusCode: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") })
+      );
     });
     request.once("error", reject);
     request.end();
   });
+}
+
+async function exists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }

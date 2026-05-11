@@ -26,27 +26,36 @@ export function proxyHttpRequest(options: {
   headers["x-forwarded-proto"] = "http";
   headers["x-relaybase-routed-app"] = app.id;
 
-  const upstream = http.request({
-    host: targetHost,
-    port: targetPort,
-    method: request.method,
-    path: request.url,
-    headers
-  }, (upstreamResponse) => {
-    response.writeHead(upstreamResponse.statusCode ?? 502, filterHeaders(upstreamResponse.headers));
-    upstreamResponse.pipe(response);
-  });
+  const upstream = http.request(
+    {
+      host: targetHost,
+      port: targetPort,
+      method: request.method,
+      path: request.url,
+      headers
+    },
+    (upstreamResponse) => {
+      response.writeHead(upstreamResponse.statusCode ?? 502, filterHeaders(upstreamResponse.headers));
+      upstreamResponse.pipe(response);
+    }
+  );
 
   upstream.once("error", (error) => {
     if (!response.headersSent) {
       response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
     }
 
-    response.end(JSON.stringify({
-      error: "Relaybase proxy failed",
-      app: app.id,
-      detail: error.message
-    }, null, 2));
+    response.end(
+      JSON.stringify(
+        {
+          error: "Relaybase proxy failed",
+          app: app.id,
+          detail: error.message
+        },
+        null,
+        2
+      )
+    );
   });
 
   request.pipe(upstream);
@@ -80,7 +89,9 @@ export function proxyUpgrade(options: {
 
 export function writeSocketHttpError(socket: net.Socket, statusCode: number, message: string): void {
   const status = statusCode === 404 ? "Not Found" : statusCode === 400 ? "Bad Request" : "Bad Gateway";
-  socket.write(`HTTP/1.1 ${statusCode} ${status}\r\ncontent-type: text/plain; charset=utf-8\r\nconnection: close\r\n\r\n${message}`);
+  socket.write(
+    `HTTP/1.1 ${statusCode} ${status}\r\ncontent-type: text/plain; charset=utf-8\r\nconnection: close\r\n\r\n${message}`
+  );
   socket.destroy();
 }
 
@@ -103,4 +114,3 @@ function rebuildUpgradeRequest(request: http.IncomingMessage): string {
 
   return `${lines.join("\r\n")}\r\n\r\n`;
 }
-

@@ -47,6 +47,29 @@ Use `upstreamPort` only when a process is already managed outside Relaybase.
 }
 ```
 
+## App-Owned Lifecycle Hooks
+
+Use hooks when an app has local infrastructure that Relaybase should supervise without parsing domain-specific files such as Docker Compose:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "skylineops",
+  "name": "SkylineOps",
+  "preStartCommand": ".\\scripts\\relaybase-prestart.ps1",
+  "command": ".\\scripts\\relaybase-start.ps1",
+  "stopCommand": ".\\scripts\\relaybase-stop.ps1",
+  "verifyStoppedCommand": ".\\scripts\\relaybase-verify-stopped.ps1",
+  "cwd": ".",
+  "protocol": "http",
+  "healthUrl": "/api/health",
+  "startTimeoutMs": 600000,
+  "stopTimeoutMs": 60000
+}
+```
+
+The app repo owns the hook scripts and infrastructure details. Relaybase owns execution, timeouts, logs, health proof, cleanup status, and refusal to report `stopped` when cleanup or stop verification fails.
+
 ## Child MCP Over Stdio
 
 Prefer this for agent-facing tools and data that do not need a browser-visible HTTP server.
@@ -89,3 +112,4 @@ Prefer this for agent-facing tools and data that do not need a browser-visible H
 - Do not overwrite unrelated manifest fields.
 - Write generated manifests as UTF-8 without BOM.
 - Prefer `npm.cmd` in Windows manifests unless the app has a stronger local convention.
+- Keep Docker, database, and service-specific logic inside app-owned hook scripts instead of teaching Relaybase to parse every ecosystem.

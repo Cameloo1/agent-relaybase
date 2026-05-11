@@ -47,4 +47,3 @@ export async function getOrCreateSessionToken(stateDir: string): Promise<string>
 export function isNodeErrno(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
 }
-

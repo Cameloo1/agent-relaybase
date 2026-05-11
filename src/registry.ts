@@ -98,4 +98,3 @@ export async function readManifestFile(manifestPath: string): Promise<AppManifes
   const raw = await fs.readFile(path.resolve(manifestPath), "utf8");
   return JSON.parse(raw) as AppManifestInput;
 }
-

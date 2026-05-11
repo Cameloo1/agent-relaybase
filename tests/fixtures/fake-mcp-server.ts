@@ -10,16 +10,19 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 export function createFakeMcpServer(label: string): Server {
-  const server = new Server({
-    name: `fake-${label}-mcp-child`,
-    version: "1.0.0"
-  }, {
-    capabilities: {
-      tools: { listChanged: true },
-      resources: { listChanged: true },
-      prompts: { listChanged: true }
+  const server = new Server(
+    {
+      name: `fake-${label}-mcp-child`,
+      version: "1.0.0"
+    },
+    {
+      capabilities: {
+        tools: { listChanged: true },
+        resources: { listChanged: true },
+        prompts: { listChanged: true }
+      }
     }
-  });
+  );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [

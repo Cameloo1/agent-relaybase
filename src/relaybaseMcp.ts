@@ -17,10 +17,18 @@ import {
   McpError,
   ReadResourceRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
-import type { CallToolResult, GetPromptResult, Prompt, ReadResourceResult, Resource, Tool } from "@modelcontextprotocol/sdk/types.js";
+import type {
+  CallToolResult,
+  GetPromptResult,
+  Prompt,
+  ReadResourceResult,
+  Resource,
+  Tool
+} from "@modelcontextprotocol/sdk/types.js";
 import { getAllAppStates, getAppState } from "./appState.ts";
 import { readManifestFile } from "./registry.ts";
 import { sendJson } from "./responses.ts";
+import { configureProject } from "./setup.ts";
 import type { RelaybaseRuntime } from "./server.ts";
 import type { AppRecord } from "./types.ts";
 
@@ -46,11 +54,13 @@ export class RelaybaseMcpService {
     this.#unsubscribeChildEvents = runtime.processes.mcp.onEvent((event) => {
       for (const server of this.#servers) {
         if (event.type === "log") {
-          void server.sendLoggingMessage({
-            level: event.level,
-            logger: `relaybase.${event.appId}.${event.childId}`,
-            data: event.message
-          }).catch(() => undefined);
+          void server
+            .sendLoggingMessage({
+              level: event.level,
+              logger: `relaybase.${event.appId}.${event.childId}`,
+              data: event.message
+            })
+            .catch(() => undefined);
         } else if (event.list === "tools") {
           void server.sendToolListChanged().catch(() => undefined);
         } else if (event.list === "resources") {
@@ -109,12 +119,22 @@ export class RelaybaseMcpService {
         await transport.handleRequest(request, response, parsedBody);
         return;
       } else {
-        sendJsonRpcError(response, 400, ErrorCode.InvalidRequest, "No valid MCP session. Initialize with POST /mcp first.");
+        sendJsonRpcError(
+          response,
+          400,
+          ErrorCode.InvalidRequest,
+          "No valid MCP session. Initialize with POST /mcp first."
+        );
         return;
       }
     } catch (error) {
       if (!response.headersSent) {
-        sendJsonRpcError(response, 500, ErrorCode.InternalError, error instanceof Error ? error.message : "Relaybase MCP error.");
+        sendJsonRpcError(
+          response,
+          500,
+          ErrorCode.InternalError,
+          error instanceof Error ? error.message : "Relaybase MCP error."
+        );
       }
     }
   }
@@ -150,7 +170,12 @@ export class RelaybaseMcpService {
       sendJsonRpcError(response, 405, ErrorCode.InvalidRequest, "Method not allowed for /sse.");
     } catch (error) {
       if (!response.headersSent) {
-        sendJsonRpcError(response, 500, ErrorCode.InternalError, error instanceof Error ? error.message : "Relaybase SSE MCP error.");
+        sendJsonRpcError(
+          response,
+          500,
+          ErrorCode.InternalError,
+          error instanceof Error ? error.message : "Relaybase SSE MCP error."
+        );
       }
     }
   }
@@ -167,14 +192,12 @@ export class RelaybaseMcpService {
       },
       auth: {
         requiredForMutations: true,
-        accepted: [
-          "Authorization: Bearer <token>",
-          `${LOCAL_TOKEN_HEADER}: <token>`
-        ],
+        accepted: ["Authorization: Bearer <token>", `${LOCAL_TOKEN_HEADER}: <token>`],
         stateDir: this.runtime.stateDir,
         tokenPath: path.join(this.runtime.stateDir, "session-token"),
         tokenPresent: Boolean(this.runtime.token),
-        mismatchHint: "Discovery can be healthy while mutations fail with 401 if the client is reading a token from a different Relaybase state directory."
+        mismatchHint:
+          "Discovery can be healthy while mutations fail with 401 if the client is reading a token from a different Relaybase state directory."
       },
       warning: "Relaybase MCP is local-only by default. Do not expose this endpoint publicly.",
       capabilities: {
@@ -198,26 +221,34 @@ export class RelaybaseMcpService {
   }
 
   #createServer(mutationAuthMode: MutationAuthMode): Server {
-    const server = new Server({
-      name: "Relaybase",
-      version: RELAYBASE_VERSION
-    }, {
-      capabilities: {
-        tools: { listChanged: true },
-        resources: { listChanged: true },
-        prompts: { listChanged: true },
-        logging: {}
+    const server = new Server(
+      {
+        name: "Relaybase",
+        version: RELAYBASE_VERSION
       },
-      instructions: "Relaybase manages local app processes, app routes, logs, health checks, and child MCP servers for agent-driven development."
-    });
+      {
+        capabilities: {
+          tools: { listChanged: true },
+          resources: { listChanged: true },
+          prompts: { listChanged: true },
+          logging: {}
+        },
+        instructions:
+          "Relaybase manages local app processes, app routes, logs, health checks, and child MCP servers for agent-driven development."
+      }
+    );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: this.#listTools() }));
-    server.setRequestHandler(CallToolRequestSchema, async (request, extra) => this.#callTool(request.params.name, request.params.arguments ?? {}, extra, mutationAuthMode));
+    server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
+      this.#callTool(request.params.name, request.params.arguments ?? {}, extra, mutationAuthMode)
+    );
     server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: await this.#listResources() }));
     server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
     server.setRequestHandler(ReadResourceRequestSchema, async (request) => this.#readResource(request.params.uri));
     server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: this.#listPrompts() }));
-    server.setRequestHandler(GetPromptRequestSchema, async (request) => this.#getPrompt(request.params.name, request.params.arguments ?? {}));
+    server.setRequestHandler(GetPromptRequestSchema, async (request) =>
+      this.#getPrompt(request.params.name, request.params.arguments ?? {})
+    );
 
     this.#servers.add(server);
     return server;
@@ -225,6 +256,36 @@ export class RelaybaseMcpService {
 
   #listTools(): Tool[] {
     const lifecycleTools: Tool[] = [
+      {
+        name: "configure_project",
+        description:
+          "Analyze, configure, optionally apply, and optionally start one project through the single Relaybase setup flow.",
+        inputSchema: objectSchema(
+          {
+            cwd: stringSchema("Project root directory to configure."),
+            apply: {
+              type: "boolean",
+              description: "When true, write setup artifacts and register the app. False returns a dry-run plan."
+            },
+            start: {
+              type: "boolean",
+              description: "When true with apply, start and verify the app through Relaybase."
+            },
+            profile: stringSchema("Optional setup profile id or architecture to select."),
+            envStrategy: {
+              type: "string",
+              enum: ["runtime-injection", "env-relaybase-file", "guarded-env-block", "none"],
+              description: "How Relaybase should handle project env values."
+            },
+            mcpInstall: {
+              type: "boolean",
+              description: "Write a Relaybase MCP client config artifact when setup is applied."
+            }
+          },
+          ["cwd"]
+        ),
+        annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false }
+      },
       {
         name: "list_apps",
         description: "List registered Relaybase apps and runtime state.",
@@ -242,7 +303,8 @@ export class RelaybaseMcpService {
       },
       {
         name: "verify_app",
-        description: "Return the standard Relaybase app state contract with readiness, route, log, and stop verification fields.",
+        description:
+          "Return the standard Relaybase app state contract with readiness, route, log, and stop verification fields.",
         inputSchema: objectSchema({ id: stringSchema("Relaybase app id.") }, ["id"])
       },
       {
@@ -275,29 +337,48 @@ export class RelaybaseMcpService {
       {
         name: "tail_logs",
         description: "Read recent in-memory logs for one app.",
-        inputSchema: objectSchema({
-          id: stringSchema("Relaybase app id."),
-          lines: { type: "number", minimum: 1, maximum: 500, description: "Number of recent log lines to return." },
-          follow: { type: "boolean", description: "Accepted for compatibility; this tool returns a snapshot." }
-        }, ["id"])
+        inputSchema: objectSchema(
+          {
+            id: stringSchema("Relaybase app id."),
+            lines: { type: "number", minimum: 1, maximum: 500, description: "Number of recent log lines to return." },
+            follow: { type: "boolean", description: "Accepted for compatibility; this tool returns a snapshot." }
+          },
+          ["id"]
+        )
       },
       {
         name: "app_url",
         description: "Return the human hostname route or the agent header route for an app.",
-        inputSchema: objectSchema({
-          id: stringSchema("Relaybase app id."),
-          type: { type: "string", enum: ["human", "agent"] }
-        }, ["id", "type"])
+        inputSchema: objectSchema(
+          {
+            id: stringSchema("Relaybase app id."),
+            type: { type: "string", enum: ["human", "agent"] }
+          },
+          ["id", "type"]
+        )
       }
     ];
 
     return [...lifecycleTools, ...this.runtime.processes.mcp.listTools()];
   }
 
-  async #callTool(name: string, args: Record<string, unknown>, extra: unknown, mutationAuthMode: MutationAuthMode): Promise<CallToolResult> {
+  async #callTool(
+    name: string,
+    args: Record<string, unknown>,
+    extra: unknown,
+    mutationAuthMode: MutationAuthMode
+  ): Promise<CallToolResult> {
     switch (name) {
       case "list_apps":
-        return structuredToolResult({ apps: await this.runtime.processes.listStatuses(), states: await getAllAppStates(this.runtime) });
+        return structuredToolResult({
+          apps: await this.runtime.processes.listStatuses(),
+          states: await getAllAppStates(this.runtime)
+        });
+      case "configure_project":
+        if (args.apply === true) {
+          this.#requireMutationToken(extra, mutationAuthMode);
+        }
+        return structuredToolResult(await this.#configureProject(args));
       case "app_status":
         return structuredToolResult({ app: await getAppState(this.runtime, requiredArg(args.id, "id")) });
       case "health_check":
@@ -342,6 +423,31 @@ export class RelaybaseMcpService {
     return this.runtime.registry.upsertManifest(args.manifest as Record<string, unknown>);
   }
 
+  async #configureProject(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const cwd = requiredArg(args.cwd, "cwd");
+    const result = await configureProject({
+      cwd,
+      host: this.runtime.host,
+      port: this.runtime.port,
+      stateDir: this.runtime.stateDir,
+      yes: true,
+      dryRun: args.apply !== true,
+      noStart: args.start !== true,
+      mcpInstall: args.mcpInstall === true,
+      startDaemon: false,
+      ...(typeof args.profile === "string" ? { profile: args.profile } : {}),
+      ...(typeof args.envStrategy === "string" ? { envStrategy: requiredEnvStrategy(args.envStrategy) } : {})
+    });
+
+    if (args.apply === true) {
+      const manifestPath = path.join(cwd, "relaybase.app.json");
+      const manifest = await readManifestFile(manifestPath);
+      await this.runtime.registry.upsertManifest(manifest, { manifestPath });
+    }
+
+    return result as unknown as Record<string, unknown>;
+  }
+
   async #healthCheck(id: string): Promise<Record<string, unknown>> {
     const health = await this.runtime.processes.healthCheck(id);
     const state = await getAppState(this.runtime, id);
@@ -357,11 +463,12 @@ export class RelaybaseMcpService {
   }
 
   async #lifecycleResult(id: string, action: "start" | "stop" | "restart"): Promise<CallToolResult> {
-    const runtime = action === "start"
-      ? await this.runtime.processes.start(id)
-      : action === "stop"
-        ? await this.runtime.processes.stop(id)
-        : await this.runtime.processes.restart(id);
+    const runtime =
+      action === "start"
+        ? await this.runtime.processes.start(id)
+        : action === "stop"
+          ? await this.runtime.processes.stop(id)
+          : await this.runtime.processes.restart(id);
 
     return structuredToolResult({
       runtime,
@@ -369,11 +476,19 @@ export class RelaybaseMcpService {
     });
   }
 
-  async #tailLogs(args: Record<string, unknown>): Promise<{ id: string; lines: string[]; events: unknown[]; follow: boolean; followAccepted: boolean; logStreamUrl: string }> {
+  async #tailLogs(args: Record<string, unknown>): Promise<{
+    id: string;
+    lines: string[];
+    events: unknown[];
+    follow: boolean;
+    followAccepted: boolean;
+    logStreamUrl: string;
+  }> {
     const id = requiredArg(args.id, "id");
-    const requestedLines = typeof args.lines === "number" && Number.isFinite(args.lines)
-      ? Math.max(1, Math.min(500, Math.trunc(args.lines)))
-      : 100;
+    const requestedLines =
+      typeof args.lines === "number" && Number.isFinite(args.lines)
+        ? Math.max(1, Math.min(500, Math.trunc(args.lines)))
+        : 100;
     const logs = await this.runtime.processes.logs(id);
     const events = await this.runtime.processes.logEvents(id);
     return {
@@ -429,15 +544,18 @@ export class RelaybaseMcpService {
     ];
 
     for (const app of apps) {
-      resources.push({
-        uri: `relaybase://app/${app.id}/logs`,
-        name: `${app.id} logs`,
-        mimeType: "text/plain"
-      }, {
-        uri: `relaybase://app/${app.id}/manifest`,
-        name: `${app.id} manifest`,
-        mimeType: "application/json"
-      });
+      resources.push(
+        {
+          uri: `relaybase://app/${app.id}/logs`,
+          name: `${app.id} logs`,
+          mimeType: "text/plain"
+        },
+        {
+          uri: `relaybase://app/${app.id}/manifest`,
+          name: `${app.id} manifest`,
+          mimeType: "application/json"
+        }
+      );
     }
 
     return [...resources, ...this.runtime.processes.mcp.listResources()];
@@ -445,7 +563,11 @@ export class RelaybaseMcpService {
 
   async #readResource(uri: string): Promise<ReadResourceResult> {
     if (uri === "relaybase://apps") {
-      return textResource(uri, JSON.stringify({ apps: await getAllAppStates(this.runtime) }, null, 2), "application/json");
+      return textResource(
+        uri,
+        JSON.stringify({ apps: await getAllAppStates(this.runtime) }, null, 2),
+        "application/json"
+      );
     }
 
     if (uri === "relaybase://dashboard") {
@@ -618,7 +740,22 @@ function requiredAppUrlType(value: unknown): "human" | "agent" {
     return value;
   }
 
-  throw new Error("Argument type must be \"human\" or \"agent\".");
+  throw new Error('Argument type must be "human" or "agent".');
+}
+
+function requiredEnvStrategy(value: string): "runtime-injection" | "env-relaybase-file" | "guarded-env-block" | "none" {
+  if (
+    value === "runtime-injection" ||
+    value === "env-relaybase-file" ||
+    value === "guarded-env-block" ||
+    value === "none"
+  ) {
+    return value;
+  }
+
+  throw new Error(
+    "Argument envStrategy must be one of: runtime-injection, env-relaybase-file, guarded-env-block, none."
+  );
 }
 
 function requestHeaders(extra: unknown): http.IncomingHttpHeaders | undefined {
