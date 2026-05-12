@@ -183,14 +183,14 @@ The Docker profile is included in the machine-readable `health --json` result wh
 The repo-local helper has Docker-aware diagnostics for proof and troubleshooting:
 
 ```powershell
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action docker-preflight -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-detect -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-status -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-health -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-logs -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-cleanup -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-verify-stop -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action docker-diagnose -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action docker-preflight -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-detect -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-status -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-health -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-logs -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-cleanup -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-verify-stop -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action docker-diagnose -ManifestPath .\relaybase.app.json
 ```
 
 These are supporting diagnostics, not additional public setup commands.

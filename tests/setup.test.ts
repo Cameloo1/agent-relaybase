@@ -331,6 +331,57 @@ test("configure generates a Docker Compose profile, override, lifecycle hooks, a
   assert.match(helperScript, /\$ErrorActionPreference = "Continue"/);
 });
 
+test("Windows helper wrapper uses process-local policy bypass and preserves exit code", async () => {
+  const wrapper = await fs.readFile(
+    path.join(rootDir, "skills", "relaybase-dev", "scripts", "relaybase-dev.cmd"),
+    "utf8"
+  );
+
+  assert.match(wrapper, /%~dp0relaybase-dev\.ps1/);
+  assert.match(wrapper, /-NoProfile -NonInteractive -ExecutionPolicy Bypass -File/);
+  assert.match(wrapper, /"%RELAYBASE_DEV_SCRIPT%" %\*/);
+  assert.match(wrapper, /if not errorlevel 1/);
+  assert.doesNotMatch(wrapper, /if "%ERRORLEVEL%"/);
+  assert.match(wrapper, /endlocal & exit \/b %RELAYBASE_DEV_EXIT_CODE%/);
+  assert.doesNotMatch(wrapper, /Set-ExecutionPolicy/i);
+});
+
+test("helper docs prefer the Windows wrapper for direct helper actions", async () => {
+  const docs = [
+    "skills/relaybase-dev/SKILL.md",
+    "skills/relaybase-dev/references/windows-runtime.md",
+    "skills/relaybase-dev/references/relaybase-contract.md",
+    "docs/relaybase-dev-skill.md",
+    "docs/docker-compose-lifecycle.md",
+    "docs/development.md"
+  ];
+
+  for (const relativePath of docs) {
+    const text = await fs.readFile(path.join(rootDir, relativePath), "utf8");
+    assert.match(text, /relaybase-dev\.cmd/);
+    for (const line of text.split(/\r?\n/)) {
+      if (line.includes("relaybase-dev.ps1 -Action")) {
+        assert.match(line, /pwsh -NoProfile -File/, `${relativePath} has a direct .ps1 helper action: ${line}`);
+      }
+    }
+  }
+});
+
+test(
+  "Windows helper wrapper runs preflight through the checked-in cmd shim",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const wrapperPath = path.join(rootDir, "skills", "relaybase-dev", "scripts", "relaybase-dev.cmd");
+    const result = await runCommand("cmd.exe", ["/d", "/c", wrapperPath, "-Action", "preflight"], {
+      timeoutMs: 30_000
+    });
+
+    assert.equal(result.code, 0, `STDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`);
+    const body = JSON.parse(result.stdout) as { action?: string };
+    assert.equal(body.action, "preflight");
+  }
+);
+
 test("Docker health diagnostics flag missing profiles, dangerous config, and required Compose env", async () => {
   const project = await tempProject("relaybase-docker-danger-");
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-docker-danger-state-"));
@@ -518,6 +569,40 @@ async function runRelaybaseCliJson(args: string[]): Promise<Record<string, any>>
   });
 
   return JSON.parse(result.stdout) as Record<string, any>;
+}
+
+function runCommand(
+  command: string,
+  args: string[],
+  options: { timeoutMs: number }
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: rootDir,
+      windowsHide: true
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`${command} timed out: ${args.join(" ")}`));
+    }, options.timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    });
+  });
 }
 
 async function tempProject(prefix: string): Promise<string> {

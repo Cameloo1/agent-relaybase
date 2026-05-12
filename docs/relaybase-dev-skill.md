@@ -45,18 +45,18 @@ relaybase health
 
 `configure` owns setup and repair, `open` owns daily launch and routed access, and `health` owns read-only diagnosis. Lower-level lifecycle actions remain available to dashboards, MCP tools, and the helper when precise proof is needed.
 
-For manual lifecycle proof, use the bundled helper:
+For manual lifecycle proof on Windows/Codex App, use the bundled `.cmd` helper wrapper. It avoids direct `.ps1` policy failures without changing system policy.
 
 ```powershell
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action preflight
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action status
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action ensure-manifest -AppId notes -Name "Notes" -Command "npm.cmd run dev" -Cwd .
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action register -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action start -AppId notes
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action url -AppId notes
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action route-check -AppId notes
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action stream-logs -AppId notes
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action verify -AppId notes -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action preflight
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action status
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action ensure-manifest -AppId notes -Name "Notes" -Command "npm.cmd run dev" -Cwd .
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action register -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action start -AppId notes
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action url -AppId notes
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action route-check -AppId notes
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action stream-logs -AppId notes
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action verify -AppId notes -ManifestPath .\relaybase.app.json
 ```
 
 ## Decision Model
@@ -72,14 +72,14 @@ For app-owned infrastructure such as Docker Compose, keep the boundary sharp: th
 The helper now includes Docker-aware diagnostics for Compose-backed apps:
 
 ```powershell
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action docker-preflight -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-detect -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-status -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-health -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-logs -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-cleanup -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-verify-stop -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action docker-diagnose -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action docker-preflight -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-detect -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-status -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-health -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-logs -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-cleanup -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-verify-stop -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action docker-diagnose -ManifestPath .\relaybase.app.json
 ```
 
 These actions read `.relaybase/docker-profile.json`; they are not separate user-facing setup commands.
@@ -92,5 +92,5 @@ The skill now treats these as first-class branches:
 
 - Token mismatch: discovery can be healthy while mutations return `401 Unauthorized`; use `diagnose-token` and compare state dirs.
 - Stale runtime: restart the dashboard when UI and edited dashboard files disagree; restart Relaybase when Relaybase behavior and edited Relaybase files disagree.
-- Windows lifecycle: prefer `npm.cmd`, assume Windows PowerShell unless `pwsh` is verified, treat sandbox `spawn EPERM` as execution context first, and check stale Node processes before blaming product code.
+- Windows lifecycle: prefer `npm.cmd`, use `relaybase-dev.cmd` for helper actions, never recommend `Set-ExecutionPolicy`, treat sandbox `spawn EPERM` as execution context first, and check stale Node processes before blaming product code.
 - Stop correctness: use `check-stop` with a known backend port, and treat an open backend port after stop as failure.

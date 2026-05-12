@@ -60,7 +60,7 @@ x-relaybase-token: <token>
 Discovery can be healthy while mutation calls fail with `401 Unauthorized`. In that case, run:
 
 ```powershell
-.\scripts\relaybase-dev.ps1 -Action diagnose-token
+.\scripts\relaybase-dev.cmd -Action diagnose-token
 ```
 
 Report token path, token presence, state dir, and state-dir mismatch suspicion. Do not print token contents unless explicitly asked.
@@ -147,15 +147,17 @@ Use these gates before claiming a Relaybase-managed app is working:
 Helper actions:
 
 ```powershell
-.\scripts\relaybase-dev.ps1 -Action preflight
-.\scripts\relaybase-dev.ps1 -Action diagnose-token
-.\scripts\relaybase-dev.ps1 -Action route-check -AppId <id>
-.\scripts\relaybase-dev.ps1 -Action stream-logs -AppId <id>
-.\scripts\relaybase-dev.ps1 -Action verify -AppId <id> -ManifestPath .\relaybase.app.json
-.\scripts\relaybase-dev.ps1 -Action check-stop -AppId <id> -BackendPort <port>
+.\scripts\relaybase-dev.cmd -Action preflight
+.\scripts\relaybase-dev.cmd -Action diagnose-token
+.\scripts\relaybase-dev.cmd -Action route-check -AppId <id>
+.\scripts\relaybase-dev.cmd -Action stream-logs -AppId <id>
+.\scripts\relaybase-dev.cmd -Action verify -AppId <id> -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.cmd -Action check-stop -AppId <id> -BackendPort <port>
 ```
 
 `verify` is intentionally strict: it registers, starts, checks routed health, checks logs, stops, and verifies backend-port closure when the assigned port is known.
+
+On Windows/Codex App, use the `.cmd` helper wrapper instead of calling the `.ps1` script directly.
 
 ## Docker Compose Contract
 

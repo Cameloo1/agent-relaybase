@@ -31,7 +31,7 @@ Before starting, previewing, or debugging a local app runtime, check discovery:
 Invoke-RestMethod http://localhost:7777/.well-known/mcp.json
 ```
 
-Prefer MCP tools when available. If MCP tools are unavailable, use Relaybase HTTP/CLI through `scripts/relaybase-dev.ps1`. If the helper is not in the current repo, use the global skill helper at `C:\Users\wamin\.codex\skills\relaybase-dev\scripts\relaybase-dev.ps1` or the repo-local helper at `skills\relaybase-dev\scripts\relaybase-dev.ps1`.
+Prefer MCP tools when available. If MCP tools are unavailable, use Relaybase HTTP/CLI through the helper wrapper. On Windows/Codex App, call `scripts\relaybase-dev.cmd`; on non-Windows PowerShell hosts, call `pwsh -NoProfile -File scripts/relaybase-dev.ps1`.
 
 ## Choose The Owner
 
@@ -62,14 +62,14 @@ Run these gates before claiming the app is working:
 Use the helper proof chain when possible:
 
 ```powershell
-.\scripts\relaybase-dev.ps1 -Action verify -AppId notes -ManifestPath .\relaybase.app.json
-.\scripts\relaybase-dev.ps1 -Action check-stop -AppId notes
-.\scripts\relaybase-dev.ps1 -Action route-check -AppId notes
+.\scripts\relaybase-dev.cmd -Action verify -AppId notes -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.cmd -Action check-stop -AppId notes
+.\scripts\relaybase-dev.cmd -Action route-check -AppId notes
 ```
 
 ## Workflow
 
-1. Run `scripts/relaybase-dev.ps1 -Action preflight`.
+1. Run helper preflight: `scripts\relaybase-dev.cmd -Action preflight` on Windows/Codex App, or `pwsh -NoProfile -File scripts/relaybase-dev.ps1 -Action preflight` on non-Windows PowerShell hosts.
 2. Choose the owner: app repo, Relaybase repo, dashboard repo, or explicit fallback.
 3. Look for an existing `relaybase.app.json` in the app root. Preserve it as the source of truth.
 4. If no manifest exists and the task requires running the app, create the minimum manifest with `ensure-manifest`.
@@ -97,29 +97,29 @@ app_url
 When MCP tools are unavailable, use the bundled helper:
 
 ```powershell
-.\scripts\relaybase-dev.ps1 -Action preflight
-.\scripts\relaybase-dev.ps1 -Action diagnose-token
-.\scripts\relaybase-dev.ps1 -Action status
-.\scripts\relaybase-dev.ps1 -Action register -ManifestPath .\relaybase.app.json
-.\scripts\relaybase-dev.ps1 -Action start -AppId notes
-.\scripts\relaybase-dev.ps1 -Action stream-logs -AppId notes
-.\scripts\relaybase-dev.ps1 -Action url -AppId notes
-.\scripts\relaybase-dev.ps1 -Action verify -AppId notes
-.\scripts\relaybase-dev.ps1 -Action stop -AppId notes
-.\scripts\relaybase-dev.ps1 -Action check-stop -AppId notes
+.\scripts\relaybase-dev.cmd -Action preflight
+.\scripts\relaybase-dev.cmd -Action diagnose-token
+.\scripts\relaybase-dev.cmd -Action status
+.\scripts\relaybase-dev.cmd -Action register -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.cmd -Action start -AppId notes
+.\scripts\relaybase-dev.cmd -Action stream-logs -AppId notes
+.\scripts\relaybase-dev.cmd -Action url -AppId notes
+.\scripts\relaybase-dev.cmd -Action verify -AppId notes
+.\scripts\relaybase-dev.cmd -Action stop -AppId notes
+.\scripts\relaybase-dev.cmd -Action check-stop -AppId notes
 ```
 
 Docker-aware helper actions are available for Compose-backed apps, but they are supporting diagnostics rather than new public app commands:
 
 ```powershell
-.\scripts\relaybase-dev.ps1 -Action docker-preflight -ManifestPath .\relaybase.app.json
-.\scripts\relaybase-dev.ps1 -Action compose-detect -ManifestPath .\relaybase.app.json
-.\scripts\relaybase-dev.ps1 -Action compose-status -ManifestPath .\relaybase.app.json
-.\scripts\relaybase-dev.ps1 -Action compose-health -ManifestPath .\relaybase.app.json
-.\scripts\relaybase-dev.ps1 -Action compose-logs -ManifestPath .\relaybase.app.json
-.\scripts\relaybase-dev.ps1 -Action compose-cleanup -ManifestPath .\relaybase.app.json
-.\scripts\relaybase-dev.ps1 -Action compose-verify-stop -ManifestPath .\relaybase.app.json
-.\scripts\relaybase-dev.ps1 -Action docker-diagnose -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.cmd -Action docker-preflight -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.cmd -Action compose-detect -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.cmd -Action compose-status -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.cmd -Action compose-health -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.cmd -Action compose-logs -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.cmd -Action compose-cleanup -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.cmd -Action compose-verify-stop -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.cmd -Action docker-diagnose -ManifestPath .\relaybase.app.json
 ```
 
 ## Stale Runtime Branch
@@ -143,6 +143,8 @@ Discovery can be healthy while mutations fail with `401 Unauthorized`.
 ## Windows Runtime Branch
 
 - Prefer `npm.cmd` over `npm` or `npm.ps1`.
+- Prefer `relaybase-dev.cmd` over direct `.ps1` helper invocation in Codex App and Windows shells.
+- Do not run or recommend `Set-ExecutionPolicy`; the helper wrapper uses process-local bypass.
 - Assume Windows PowerShell unless `pwsh` is verified.
 - Treat sandbox `spawn EPERM` as likely execution context first, not proof of code failure.
 - `taskkill /t /f` may be needed for process trees.
@@ -182,7 +184,8 @@ When using fallback, say why Relaybase was skipped and what would restore Relayb
 
 ## Resources
 
-- `scripts/relaybase-dev.ps1`: deterministic helper for preflight, token diagnosis, manifest creation, registration, lifecycle, route checks, logs, verification, and stop checks.
+- `scripts/relaybase-dev.cmd`: Windows/Codex App helper wrapper.
+- `scripts/relaybase-dev.ps1`: deterministic helper source of truth for preflight, token diagnosis, manifest creation, registration, lifecycle, route checks, logs, verification, and stop checks.
 - `references/relaybase-contract.md`: endpoints, commands, MCP tools, auth, routing, and verification contract.
 - `references/manifest-patterns.md`: manifest examples and child MCP patterns.
 - `references/fallback-policy.md`: direct-port fallback rules and required reporting.
