@@ -41,6 +41,7 @@ list_apps
 app_status
 health_check
 verify_app
+prove_app
 register_app
 start_app
 stop_app
@@ -52,12 +53,15 @@ app_url
 Token-gated mutation tools:
 
 - `configure_project` when `apply: true`
+- `prove_app` when `lifecycle: true`
 - `register_app`
 - `start_app`
 - `stop_app`
 - `restart_app`
 
-`configure_project` uses the same setup engine as `relaybase configure`. With `apply: false`, it returns a dry-run plan. With `apply: true`, it may write project files, register the app, and optionally start verification.
+`configure_project` uses the same setup engine as `relaybase configure`. With `apply: false`, it returns a dry-run plan. With `apply: true`, it may write project files, register the app, and optionally start verification. Docker Compose callers can pass `profile: "docker-compose"` with `service`, `targetPort`, `healthPath`, timeout fields, `dependencyPortPolicy`, and `dockerStartDesktop`.
+
+`prove_app` returns a proof snapshot. With `lifecycle: false` or omitted, it is read-only. With `lifecycle: true`, it starts the app, checks routed health and logs, stops the app, and verifies cleanup.
 
 `tail_logs` returns a snapshot. Its `follow` argument is accepted for compatibility, but the tool response marks follow as not accepted. Use the HTTP log stream for live logs.
 

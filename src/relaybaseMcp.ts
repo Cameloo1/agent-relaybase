@@ -26,6 +26,7 @@ import type {
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
 import { getAllAppStates, getAppState } from "./appState.ts";
+import type { DockerSetupOptions } from "./dockerProfile.ts";
 import { readManifestFile } from "./registry.ts";
 import { sendJson } from "./responses.ts";
 import { configureProject } from "./setup.ts";
@@ -280,6 +281,41 @@ export class RelaybaseMcpService {
             mcpInstall: {
               type: "boolean",
               description: "Write a Relaybase MCP client config artifact when setup is applied."
+            },
+            service: stringSchema("Docker Compose app-facing service to select when profile is docker-compose."),
+            targetPort: {
+              type: "number",
+              minimum: 1,
+              maximum: 65535,
+              description: "Docker target container port for the selected service."
+            },
+            healthPath: stringSchema("Docker health path to use for readiness, for example /api/health."),
+            startTimeoutMs: {
+              type: "number",
+              minimum: 100,
+              maximum: 3600000,
+              description: "Docker cold-start/build timeout budget."
+            },
+            healthTimeoutMs: {
+              type: "number",
+              minimum: 100,
+              maximum: 3600000,
+              description: "Docker health wait timeout budget."
+            },
+            stopTimeoutMs: {
+              type: "number",
+              minimum: 100,
+              maximum: 3600000,
+              description: "Docker stop/cleanup timeout budget."
+            },
+            dependencyPortPolicy: {
+              type: "string",
+              enum: ["internal-only", "preserve-existing"],
+              description: "Whether generated Docker overrides close dependency host ports."
+            },
+            dockerStartDesktop: {
+              type: "boolean",
+              description: "Allow generated Docker hooks to start Docker Desktop on Windows."
             }
           },
           ["cwd"]
@@ -306,6 +342,22 @@ export class RelaybaseMcpService {
         description:
           "Return the standard Relaybase app state contract with readiness, route, log, and stop verification fields.",
         inputSchema: objectSchema({ id: stringSchema("Relaybase app id.") }, ["id"])
+      },
+      {
+        name: "prove_app",
+        description:
+          "Build a proof snapshot for one app; with lifecycle=true, start, verify routed health/logs, stop, and verify cleanup.",
+        inputSchema: objectSchema(
+          {
+            id: stringSchema("Relaybase app id."),
+            lifecycle: {
+              type: "boolean",
+              description: "When true, run start/stop lifecycle proof and require mutation auth."
+            }
+          },
+          ["id"]
+        ),
+        annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false }
       },
       {
         name: "register_app",
@@ -385,6 +437,11 @@ export class RelaybaseMcpService {
         return structuredToolResult(await this.#healthCheck(requiredArg(args.id, "id")));
       case "verify_app":
         return structuredToolResult({ state: await getAppState(this.runtime, requiredArg(args.id, "id")) });
+      case "prove_app":
+        if (args.lifecycle === true) {
+          this.#requireMutationToken(extra, mutationAuthMode);
+        }
+        return structuredToolResult(await this.#proveApp(requiredArg(args.id, "id"), args.lifecycle === true));
       case "register_app":
         this.#requireMutationToken(extra, mutationAuthMode);
         return structuredToolResult({ app: await this.#registerApp(args) });
@@ -436,7 +493,8 @@ export class RelaybaseMcpService {
       mcpInstall: args.mcpInstall === true,
       startDaemon: false,
       ...(typeof args.profile === "string" ? { profile: args.profile } : {}),
-      ...(typeof args.envStrategy === "string" ? { envStrategy: requiredEnvStrategy(args.envStrategy) } : {})
+      ...(typeof args.envStrategy === "string" ? { envStrategy: requiredEnvStrategy(args.envStrategy) } : {}),
+      docker: dockerSetupOptionsFromArgs(args)
     });
 
     if (args.apply === true) {
@@ -459,6 +517,80 @@ export class RelaybaseMcpService {
       routeReachable: state.routeReachable,
       readiness: state.readiness,
       state
+    };
+  }
+
+  async #proveApp(id: string, lifecycle: boolean): Promise<Record<string, unknown>> {
+    const checks: Array<Record<string, unknown>> = [];
+    const initialState = await getAppState(this.runtime, id);
+    checks.push({
+      name: "registered",
+      ok: initialState.registered,
+      message: initialState.registered ? "App is registered." : "App is not registered."
+    });
+    if (lifecycle) {
+      const runtime = await this.runtime.processes.start(id);
+      const started = runtime.status === "running";
+      const startedState = await getAppState(this.runtime, id);
+      checks.push({
+        name: "start",
+        ok: started,
+        message: started ? "App started." : (runtime.lastError ?? "App did not start."),
+        runtime
+      });
+      checks.push({
+        name: "routed-health",
+        ok: startedState.routeReachable || startedState.readiness.state === "ready",
+        message:
+          startedState.routeReachable || startedState.readiness.state === "ready"
+            ? "Routed health passed."
+            : (startedState.readiness.failureReason ?? "Routed health did not pass.")
+      });
+      const logs = await this.runtime.processes.logs(id);
+      checks.push({ name: "logs", ok: true, message: `Log snapshot has ${logs.length} line(s).` });
+      const stoppedRuntime = await this.runtime.processes.stop(id);
+      const stopped = stoppedRuntime.status === "stopped";
+      const stoppedState = await getAppState(this.runtime, id);
+      checks.push({
+        name: "stop",
+        ok: stopped,
+        message: stopped ? "App stopped." : (stoppedRuntime.lastError ?? "App did not stop."),
+        runtime: stoppedRuntime
+      });
+      checks.push({
+        name: "stop-verification",
+        ok: Boolean(stoppedState.stopVerification?.ok),
+        message: stoppedState.stopVerification?.ok
+          ? "Stop verification passed."
+          : (stoppedState.stopVerification?.failureReason ?? "Stop verification did not pass.")
+      });
+      return {
+        id,
+        ok: checks.every((check) => check.ok),
+        mode: "lifecycle",
+        lifecycleAttempted: true,
+        started,
+        stopped,
+        checks,
+        finalState: stoppedState
+      };
+    }
+
+    checks.push({
+      name: "routed-health",
+      ok: initialState.routeReachable || initialState.readiness.state === "ready",
+      message:
+        initialState.routeReachable || initialState.readiness.state === "ready"
+          ? "Routed health is currently passing."
+          : (initialState.readiness.failureReason ?? "Routed health is not currently passing.")
+    });
+    return {
+      id,
+      ok: checks.every((check) => check.ok),
+      mode: "read-only",
+      lifecycleAttempted: false,
+      checks,
+      state: initialState
     };
   }
 
@@ -756,6 +888,35 @@ function requiredEnvStrategy(value: string): "runtime-injection" | "env-relaybas
   throw new Error(
     "Argument envStrategy must be one of: runtime-injection, env-relaybase-file, guarded-env-block, none."
   );
+}
+
+function dockerSetupOptionsFromArgs(args: Record<string, unknown>): DockerSetupOptions | undefined {
+  const docker: DockerSetupOptions = {};
+  if (typeof args.service === "string") {
+    docker.service = args.service;
+  }
+  if (typeof args.targetPort === "number" && Number.isInteger(args.targetPort)) {
+    docker.targetPort = args.targetPort;
+  }
+  if (typeof args.healthPath === "string") {
+    docker.healthPath = args.healthPath;
+  }
+  if (typeof args.startTimeoutMs === "number" && Number.isInteger(args.startTimeoutMs)) {
+    docker.startTimeoutMs = args.startTimeoutMs;
+  }
+  if (typeof args.healthTimeoutMs === "number" && Number.isInteger(args.healthTimeoutMs)) {
+    docker.healthTimeoutMs = args.healthTimeoutMs;
+  }
+  if (typeof args.stopTimeoutMs === "number" && Number.isInteger(args.stopTimeoutMs)) {
+    docker.stopTimeoutMs = args.stopTimeoutMs;
+  }
+  if (args.dependencyPortPolicy === "internal-only" || args.dependencyPortPolicy === "preserve-existing") {
+    docker.dependencyPortPolicy = args.dependencyPortPolicy;
+  }
+  if (typeof args.dockerStartDesktop === "boolean") {
+    docker.startDockerDesktop = args.dockerStartDesktop;
+  }
+  return Object.values(docker).some((value) => value !== undefined) ? docker : undefined;
 }
 
 function requestHeaders(extra: unknown): http.IncomingHttpHeaders | undefined {

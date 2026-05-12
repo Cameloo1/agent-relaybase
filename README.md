@@ -23,6 +23,8 @@ relaybase health
 
 `relaybase health` is read-only diagnosis. It checks daemon reachability, project configuration, saved launch metadata, app readiness, route state, and Docker profile findings when present.
 
+`relaybase health --prove` writes a proof bundle. Add `--yes` when you want it to run lifecycle proof: register, start, routed health, logs, stop, and cleanup verification.
+
 ## What Relaybase Provides
 
 - Stable human routes: `http://<app-id>.localhost:7777`
@@ -33,6 +35,7 @@ relaybase health
 - App manifests with lifecycle hooks, health routes, protocol selection, and optional child MCP servers
 - Standard app state for dashboards and agents: runtime, readiness, routes, logs, attempts, cleanup, and stop verification
 - Docker Compose setup through generated app-owned profiles and PowerShell lifecycle hooks
+- Conservative Docker service selection with explicit service/port setup for ambiguous Compose projects
 - A TCP tunnel preface for non-HTTP agents: `RELAYBASE-TCP <app-id>\n\n`
 
 ## Minimal Manifest

@@ -156,10 +156,10 @@ The manifest still uses generic hook fields. Docker-specific behavior lives in t
 
 - `preStartCommand` checks Docker daemon access, context output, Compose plugin availability, Compose config, blocked settings, current Compose project status, and assigned-port conflicts.
 - `command` runs `docker compose up --build --remove-orphans` in the foreground so Relaybase owns logs and process state.
-- `stopCommand` runs `docker compose down --remove-orphans --timeout 30` and keeps volumes by default.
+- `stopCommand` runs `docker compose down --remove-orphans` with the profile stop budget and keeps volumes by default.
 - `verifyStoppedCommand` refuses success when Compose still reports project containers or Relaybase-owned ports remain open.
 
-The profile records lifecycle states, retry backoff, default timing budgets, selected service, target container port, dependency services, dependency ports, evidence artifact names, redaction keys, approval gates, and Docker error taxonomy. The current detector is heuristic and the generated prestart script still uses `docker compose config` as the authoritative validation step.
+The profile records lifecycle states, retry backoff, timing budgets, selected service, target container port, dependency services, dependency port policy, evidence artifact names, redaction keys, approval gates, and Docker error taxonomy. Service selection is conservative, and the generated prestart script still uses `docker compose config` as the authoritative validation step.
 
 See `docker-compose-lifecycle.md` for exact generated files, timeouts, diagnostics, risk checks, and current limits.
 

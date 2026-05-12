@@ -184,6 +184,7 @@ Expected proof:
 - Compose config is validated before start.
 - Blocked Compose settings fail prestart unless approved in the generated profile.
 - Relaybase-assigned `PORT` is mapped through `.relaybase/docker-compose.relaybase.yml`.
+- Dependency host ports are reset by default when the profile uses `internal-only`.
 - Docker hook evidence is written under `.relaybase/runs/`.
 - Stop keeps volumes by default and fails if project containers or owned ports survive.
 

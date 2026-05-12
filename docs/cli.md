@@ -29,6 +29,7 @@ relaybase configure
 relaybase configure --yes
 relaybase configure --dry-run
 relaybase configure --profile docker-compose
+relaybase configure --profile docker-compose --service web --target-port 3000 --health-path /api/health --start-timeout-ms 600000
 relaybase configure --repair
 relaybase configure --no-start
 relaybase configure --mcp-install
@@ -38,6 +39,8 @@ relaybase configure --answers .relaybase/setup.answers.json
 `configure` runs the setup engine for the project root. In an interactive terminal, it asks arrow-key questions for the setup architecture, env strategy, and whether to start and verify through Relaybase immediately.
 
 Noninteractive mode uses the recommended plan unless `--profile` or `--answers` selects one. `--dry-run` returns the plan without writing files. `--yes` allows approved repair retries when verification fails and the setup engine has a matching alternate plan. `--repair` re-runs setup as a repair flow.
+
+For Docker Compose projects, `--service`, `--target-port`, `--health-path`, `--start-timeout-ms`, `--health-timeout-ms`, `--stop-timeout-ms`, `--dependency-port-policy`, `--compose-profile`, and `--docker-start-desktop` feed the same setup flow. Ambiguous Compose projects require an explicit service and target port instead of guessing.
 
 Env strategies:
 
@@ -65,9 +68,13 @@ If the project is not configured, it reports that `relaybase configure` must run
 ```powershell
 relaybase health
 relaybase health --json
+relaybase health --prove
+relaybase health --prove --yes
 ```
 
-`health` is read-only. It detects the project, reads launch profile and Docker profile data when present, checks whether the daemon is reachable, reads app state when the daemon and app id are available, and returns findings with repair suggestions.
+`health` is read-only by default. It detects the project, reads launch profile and Docker profile data when present, checks whether the daemon is reachable, reads app state when the daemon and app id are available, and returns findings with repair suggestions.
+
+`health --prove` writes a proof artifact under `.relaybase/runs/` with discovery, manifest, Docker profile, current state, and log checks. `health --prove --yes` also runs a lifecycle proof: register, start, routed health, logs, stop, and stop verification.
 
 Current finding codes include:
 
@@ -79,6 +86,7 @@ Current finding codes include:
 - `DOCKER_PROFILE_MISSING`
 - `COMPOSE_ENV_MISSING`
 - `DANGEROUS_COMPOSE_CONFIG`
+- `PROOF_FAILED`
 
 ## Advanced Commands
 

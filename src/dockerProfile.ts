@@ -20,6 +20,8 @@ export type DockerLifecycleState =
   | "docker_unavailable"
   | "blocked_for_approval";
 
+export type DockerDependencyPortPolicy = "internal-only" | "preserve-existing";
+
 export type DockerErrorCode =
   | "docker_daemon_unavailable"
   | "docker_context_not_local"
@@ -89,10 +91,30 @@ export interface DockerComposeServiceDetection {
   dangerousFindings: DockerDangerFinding[];
 }
 
+export interface DockerServiceCandidate {
+  name: string;
+  score: number;
+  targetPort?: number;
+  eligible: boolean;
+  reasons: string[];
+  rejectionReasons: string[];
+}
+
+export interface DockerServiceSelection {
+  mode: "auto" | "explicit" | "required";
+  confidence: "high" | "medium" | "low";
+  reason: string;
+  selectedService?: string;
+  targetPort?: number;
+  candidates: DockerServiceCandidate[];
+}
+
 export interface DockerComposeDetection {
   composeFiles: string[];
   envFiles: string[];
   services: DockerComposeServiceDetection[];
+  serviceCandidates: DockerServiceCandidate[];
+  selection: DockerServiceSelection;
   selectedService?: string;
   targetPort?: number;
   requiredServices: string[];
@@ -119,6 +141,9 @@ export interface DockerProfile {
   targetContainerPort: number;
   healthPath: string;
   hostPortStrategy: "relaybase-assigned-port";
+  dependencyPortPolicy: DockerDependencyPortPolicy;
+  portExposurePolicy: "selected-service-localhost-only";
+  portExposureVerification: "docker-compose-config";
   buildPolicy: "pull-build-with-approval";
   cleanupPolicy: "down-remove-orphans-keep-volumes";
   volumePolicy: "never-remove-by-default";
@@ -127,6 +152,7 @@ export interface DockerProfile {
   requiredServices: string[];
   optionalServices: string[];
   dependencyPorts: number[];
+  serviceSelection: DockerServiceSelection;
   timingsMs: DockerTimingPolicy;
   retryBackoffMs: number[];
   lifecycleStates: DockerLifecycleState[];
@@ -157,6 +183,7 @@ export interface DockerApprovalPolicy {
   dangerousConfig: false;
   staleCleanup: false;
   pullBuild: false;
+  startDockerDesktop: boolean;
   volumeRemoval: false;
   migrations: false;
 }
@@ -181,6 +208,18 @@ export interface DockerComposeSetup {
   reasons: string[];
   risks: string[];
   recoverySteps: string[];
+}
+
+export interface DockerSetupOptions {
+  service?: string;
+  targetPort?: number;
+  healthPath?: string;
+  startTimeoutMs?: number;
+  healthTimeoutMs?: number;
+  stopTimeoutMs?: number;
+  dependencyPortPolicy?: DockerDependencyPortPolicy;
+  composeProfiles?: string[];
+  startDockerDesktop?: boolean;
 }
 
 export interface DockerFailureClassification {
@@ -264,6 +303,8 @@ export const DOCKER_RETRY_BACKOFF_MS = [1000, 2000, 4000, 8000, 15_000];
 export const DOCKER_ARTIFACTS = [
   "docker-preflight.json",
   "compose-config.redacted.json",
+  "compose-config.effective.json",
+  "compose-port-exposure.json",
   "compose-services.json",
   "compose-ps.before.json",
   "compose-ps.after-start.json",
@@ -328,8 +369,12 @@ export async function detectDockerCompose(
     }
   }
 
-  const selectedService = selectDockerService(services);
-  const targetPort = selectedService ? selectTargetPort(selectedService) : undefined;
+  const serviceCandidates = services.map((service) => serviceCandidate(service));
+  const selection = selectDockerService(serviceCandidates);
+  const selectedService = selection.selectedService
+    ? services.find((service) => service.name === selection.selectedService)
+    : undefined;
+  const targetPort = selection.targetPort;
   const hostPublishedPorts = [
     ...new Set(services.flatMap((service) => service.ports.flatMap((port) => (port.hostPort ? [port.hostPort] : []))))
   ];
@@ -346,6 +391,8 @@ export async function detectDockerCompose(
     composeFiles,
     envFiles,
     services,
+    serviceCandidates,
+    selection,
     ...(selectedService ? { selectedService: selectedService.name } : {}),
     ...(targetPort ? { targetPort } : {}),
     requiredServices: [
@@ -372,12 +419,15 @@ export async function detectDockerCompose(
 export function buildDockerComposeSetup(
   root: string,
   baseManifest: AppManifestInput,
-  docker: DockerComposeDetection
+  docker: DockerComposeDetection,
+  options: DockerSetupOptions = {}
 ): DockerComposeSetup {
   const appId = String(baseManifest.id ?? slug(path.basename(root)));
-  const healthPath = String(baseManifest.healthUrl ?? "/");
-  const selectedService = docker.selectedService ?? "app";
-  const targetContainerPort = docker.targetPort ?? 3000;
+  const resolved = resolveDockerSetup(docker, options);
+  const timings = dockerTimings(options);
+  const healthPath = String(options.healthPath ?? baseManifest.healthUrl ?? "/api/health");
+  const selectedService = resolved.selectedService;
+  const targetContainerPort = resolved.targetPort;
   const composeProjectName = docker.suggestedProjectName || `relaybase-${slug(appId)}`;
   const profile = dockerProfile(
     appId,
@@ -386,7 +436,10 @@ export function buildDockerComposeSetup(
     selectedService,
     targetContainerPort,
     docker,
-    root
+    root,
+    timings,
+    resolved.selection,
+    options
   );
   const manifest: AppManifestInput = {
     ...baseManifest,
@@ -394,10 +447,10 @@ export function buildDockerComposeSetup(
     preStartCommand: psScriptCommand(PRESTART_SCRIPT),
     stopCommand: psScriptCommand(STOP_SCRIPT),
     verifyStoppedCommand: psScriptCommand(VERIFY_STOPPED_SCRIPT),
-    preStartTimeoutMs: DOCKER_TIMINGS_MS.dockerPreflight + DOCKER_TIMINGS_MS.composeConfig,
-    startTimeoutMs: DOCKER_TIMINGS_MS.pullBuild,
-    stopTimeoutMs: DOCKER_TIMINGS_MS.stop,
-    healthTimeoutMs: DOCKER_TIMINGS_MS.healthWait,
+    preStartTimeoutMs: timings.dockerPreflight + timings.composeConfig,
+    startTimeoutMs: timings.pullBuild,
+    stopTimeoutMs: timings.stop,
+    healthTimeoutMs: timings.healthWait,
     healthUrl: healthPath,
     upstreamPort: undefined
   };
@@ -449,6 +502,7 @@ export function buildDockerComposeSetup(
     writes,
     reasons: [
       "Compose files are present; Relaybase can generate app-owned hooks while keeping Docker-specific logic out of the daemon.",
+      resolved.selection.reason,
       "The generated override maps Relaybase's assigned PORT to the selected service and records Docker evidence under .relaybase/runs/.",
       "Stop success is gated on compose down, container cleanup, and owned port closure."
     ],
@@ -461,10 +515,10 @@ export function buildDockerComposeSetup(
             `Compose contains risky settings that generated preflight will block until approved: ${docker.dangerousFindings.map((finding) => finding.code).join(", ")}.`
           ]
         : []),
-      ...(docker.targetPort
+      ...(docker.targetPort || options.targetPort
         ? []
         : [
-            "Relaybase inferred target container port 3000; rerun configure if the user-facing service listens elsewhere."
+            `Relaybase used target container port ${targetContainerPort}; rerun configure with --target-port if the user-facing service listens elsewhere.`
           ]),
       "Docker Desktop, registry auth, image pulls, and long builds can still block launch until the generated preflight evidence explains the failure."
     ],
@@ -650,8 +704,20 @@ function dockerProfile(
   selectedService: string,
   targetContainerPort: number,
   docker: DockerComposeDetection,
-  root: string
+  root: string,
+  timings: DockerTimingPolicy,
+  serviceSelection: DockerServiceSelection,
+  options: DockerSetupOptions
 ): DockerProfile {
+  const dependencyPortPolicy = options.dependencyPortPolicy ?? "internal-only";
+  const detectedDependencyServices = docker.services.filter((service) => service.name !== selectedService);
+  const dependencyPorts = [
+    ...new Set(
+      detectedDependencyServices.flatMap((service) =>
+        service.ports.flatMap((port) => (port.hostPort && port.hostPort > 0 ? [port.hostPort] : []))
+      )
+    )
+  ];
   return {
     version: 1,
     kind: "docker-compose",
@@ -660,20 +726,29 @@ function dockerProfile(
     composeProjectName,
     composeFiles: docker.composeFiles.map((file) => relativePath(root, file)),
     overrideFile: relativePath(root, path.join(root, DOCKER_OVERRIDE_FILE)),
-    profiles: [],
+    profiles: options.composeProfiles ?? [],
     selectedService,
     targetContainerPort,
     healthPath,
     hostPortStrategy: "relaybase-assigned-port",
+    dependencyPortPolicy,
+    portExposurePolicy: "selected-service-localhost-only",
+    portExposureVerification: "docker-compose-config",
     buildPolicy: "pull-build-with-approval",
     cleanupPolicy: "down-remove-orphans-keep-volumes",
     volumePolicy: "never-remove-by-default",
     migrationPolicy: "no-op-unless-approved",
-    dependencyServices: docker.requiredServices.filter((service) => service !== selectedService),
-    requiredServices: docker.requiredServices.length ? docker.requiredServices : [selectedService],
-    optionalServices: docker.optionalServices,
-    dependencyPorts: docker.dependencyPorts,
-    timingsMs: DOCKER_TIMINGS_MS,
+    dependencyServices: detectedDependencyServices.map((service) => service.name),
+    requiredServices: [
+      selectedService,
+      ...detectedDependencyServices.filter((service) => service.healthcheck).map((service) => service.name)
+    ],
+    optionalServices: detectedDependencyServices
+      .filter((service) => !service.healthcheck)
+      .map((service) => service.name),
+    dependencyPorts: dependencyPortPolicy === "internal-only" ? dependencyPorts : [],
+    serviceSelection,
+    timingsMs: timings,
     retryBackoffMs: DOCKER_RETRY_BACKOFF_MS,
     lifecycleStates: DOCKER_LIFECYCLE_STATES,
     errorTaxonomy: DOCKER_ERROR_CODES,
@@ -682,6 +757,7 @@ function dockerProfile(
       dangerousConfig: false,
       staleCleanup: false,
       pullBuild: false,
+      startDockerDesktop: options.startDockerDesktop === true,
       volumeRemoval: false,
       migrations: false
     },
@@ -699,7 +775,7 @@ function dockerProfile(
 }
 
 function dockerComposeOverride(profile: DockerProfile): string {
-  return [
+  const lines = [
     "# Generated by Relaybase. Do not put secrets in this file.",
     "services:",
     `  ${profile.selectedService}:`,
@@ -709,7 +785,21 @@ function dockerComposeOverride(profile: DockerProfile): string {
     "    ports:",
     `      - "127.0.0.1:\${PORT:-0}:${profile.targetContainerPort}"`,
     ""
-  ].join("\n");
+  ];
+
+  if (profile.dependencyPortPolicy === "internal-only") {
+    for (const service of profile.dependencyServices) {
+      lines.push(
+        `  ${service}:`,
+        "    labels:",
+        `      relaybase.dependency: ${quoteYaml("true")}`,
+        "    ports: !reset []",
+        ""
+      );
+    }
+  }
+
+  return lines.join("\n");
 }
 
 function dockerLifecycleScript(kind: "prestart" | "start" | "stop" | "verifyStopped"): string {
@@ -832,6 +922,26 @@ function Invoke-RelaybaseDocker {
   return $result
 }
 
+function Invoke-RelaybaseDockerStream {
+  param(
+    [Parameter(Mandatory = $true)][string[]]$Args
+  )
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    & docker @Args
+    $code = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  if ($null -eq $code) {
+    $code = 1
+  }
+  if ($code -ne 0) {
+    throw "docker $($Args -join ' ') failed with exit code $code."
+  }
+}
+
 function Invoke-RelaybaseCompose {
   param(
     [Parameter(Mandatory = $true)]$Profile,
@@ -840,6 +950,34 @@ function Invoke-RelaybaseCompose {
   )
   $baseArgs = Get-ComposeBaseArgs -Profile $Profile
   return Invoke-RelaybaseDocker -Args (@("compose") + $baseArgs + $Args) -AllowFailure:$AllowFailure
+}
+
+function Invoke-RelaybaseComposeStream {
+  param(
+    [Parameter(Mandatory = $true)]$Profile,
+    [Parameter(Mandatory = $true)][string[]]$Args
+  )
+  $baseArgs = Get-ComposeBaseArgs -Profile $Profile
+  Invoke-RelaybaseDockerStream -Args (@("compose") + $baseArgs + $Args)
+}
+
+function Start-RelaybaseDockerDesktopIfApproved {
+  param(
+    [Parameter(Mandatory = $true)][string]$RunDir,
+    [Parameter(Mandatory = $true)]$Profile
+  )
+  if (-not $IsWindows -and $env:OS -ne "Windows_NT") { return }
+  if (-not [bool]$Profile.approvals.startDockerDesktop) { return }
+  $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+  $candidates = @(
+    "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
+    "$programFilesX86\Docker\Docker\Docker Desktop.exe",
+    "$env:LocalAppData\Docker\Docker Desktop.exe"
+  ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+  $desktop = $candidates | Select-Object -First 1
+  if (-not $desktop) { return }
+  Write-RelaybaseEvent -RunDir $RunDir -Phase "docker_preflight" -Message "Starting Docker Desktop because the profile approved daemon recovery." -Details @{ path = $desktop }
+  Start-Process -FilePath $desktop -WindowStyle Minimized | Out-Null
 }
 
 function Test-RelaybaseDockerDaemon {
@@ -855,6 +993,7 @@ function Test-RelaybaseDockerDaemon {
       Save-RelaybaseJson -RunDir $RunDir -Name "docker-preflight.json" -Value $last
       return $last
     }
+    Start-RelaybaseDockerDesktopIfApproved -RunDir $RunDir -Profile $Profile
     Start-Sleep -Milliseconds 1000
   }
   Save-RelaybaseJson -RunDir $RunDir -Name "docker-preflight.json" -Value $last
@@ -889,7 +1028,74 @@ function Test-RelaybaseComposeConfig {
   if (-not $config.ok) {
     throw "compose_config_invalid: docker compose config failed. $($config.output)"
   }
+  $effective = Invoke-RelaybaseCompose -Profile $Profile -Args @("config", "--format", "json") -AllowFailure
+  Save-RelaybaseJson -RunDir $RunDir -Name "compose-config.effective.json" -Value $effective
+  Test-RelaybasePortExposure -RunDir $RunDir -Profile $Profile -ConfigJson $effective
   return $config
+}
+
+function Test-RelaybasePortExposure {
+  param(
+    [Parameter(Mandatory = $true)][string]$RunDir,
+    [Parameter(Mandatory = $true)]$Profile,
+    [Parameter(Mandatory = $true)]$ConfigJson
+  )
+  $summary = [ordered]@{
+    checked = $false
+    selectedService = $Profile.selectedService
+    targetContainerPort = $Profile.targetContainerPort
+    dependencyPortPolicy = $Profile.dependencyPortPolicy
+    selectedPortMapped = $false
+    dependencyPublishedPorts = @()
+    violations = @()
+  }
+  if (-not $ConfigJson.ok) {
+    $summary.violations += "compose_config_json_unavailable"
+    Save-RelaybaseJson -RunDir $RunDir -Name "compose-port-exposure.json" -Value $summary
+    return
+  }
+  try {
+    $config = $ConfigJson.output | ConvertFrom-Json -Depth 100
+  } catch {
+    $summary.violations += "compose_config_json_parse_failed"
+    Save-RelaybaseJson -RunDir $RunDir -Name "compose-port-exposure.json" -Value $summary
+    return
+  }
+  $summary.checked = $true
+  foreach ($service in @($config.services.PSObject.Properties)) {
+    $serviceName = [string]$service.Name
+    foreach ($port in @($service.Value.ports)) {
+      $target = [string]$port.target
+      $published = [string]$port.published
+      $hostIp = [string]$port.host_ip
+      if ($serviceName -eq [string]$Profile.selectedService) {
+        if ($target -eq [string]$Profile.targetContainerPort) {
+          $summary.selectedPortMapped = $true
+          if ($hostIp -and $hostIp -ne "127.0.0.1") {
+            $summary.violations += "selected_service_not_localhost_bound"
+          }
+        }
+      } elseif ([string]$Profile.dependencyPortPolicy -eq "internal-only" -and $published) {
+        $summary.dependencyPublishedPorts += [pscustomobject]@{ service = $serviceName; target = $target; published = $published; hostIp = $hostIp }
+      }
+    }
+  }
+  if (-not $summary.selectedPortMapped) {
+    $summary.violations += "selected_service_port_mapping_missing"
+  }
+  if (@($summary.dependencyPublishedPorts).Count -gt 0) {
+    $summary.violations += "dependency_ports_published"
+  }
+  Save-RelaybaseJson -RunDir $RunDir -Name "compose-port-exposure.json" -Value $summary
+  if ($summary.violations -contains "selected_service_port_mapping_missing") {
+    throw "port_mapping_missing: selected service $($Profile.selectedService) does not publish target port $($Profile.targetContainerPort) in the effective Compose config."
+  }
+  if ($summary.violations -contains "dependency_ports_published") {
+    throw "dependency_port_open: dependency services still publish host ports in the effective Compose config."
+  }
+  if ($summary.violations -contains "selected_service_not_localhost_bound") {
+    throw "dangerous_compose_config: selected service is not bound to 127.0.0.1 in the effective Compose config."
+  }
 }
 
 function Test-RelaybaseDangerousConfig {
@@ -985,7 +1191,7 @@ function Invoke-RelaybaseDockerStart {
   $runDir = New-RelaybaseRunDir
   Write-RelaybaseEvent -RunDir $runDir -Phase "building" -Message "Starting docker compose up." -Details @{ project = $profile.composeProjectName; service = $profile.selectedService; port = $env:PORT }
   $args = @("up", "--build", "--remove-orphans")
-  Invoke-RelaybaseCompose -Profile $profile -Args $args | Out-Host
+  Invoke-RelaybaseComposeStream -Profile $profile -Args $args
 }
 
 function Invoke-RelaybaseDockerStop {
@@ -994,7 +1200,8 @@ function Invoke-RelaybaseDockerStop {
   Write-RelaybaseEvent -RunDir $runDir -Phase "stopping" -Message "Stopping Docker Compose project." -Details @{ project = $profile.composeProjectName }
   $before = Get-RelaybaseComposePs -Profile $profile -AllowFailure
   Save-RelaybaseJson -RunDir $runDir -Name "compose-ps.before-stop.json" -Value $before
-  Invoke-RelaybaseCompose -Profile $profile -Args @("down", "--remove-orphans", "--timeout", "30") | Out-Host
+  $timeoutSeconds = [Math]::Max(1, [Math]::Ceiling(([double]$profile.timingsMs.stop) / 1000))
+  Invoke-RelaybaseComposeStream -Profile $profile -Args @("down", "--remove-orphans", "--timeout", "$timeoutSeconds")
   Write-RelaybaseEvent -RunDir $runDir -Phase "verifying_cleanup" -Message "Verifying Docker cleanup." -Details $null
   Assert-RelaybaseCleanup -Profile $profile -RunDir $runDir
 }
@@ -1178,8 +1385,135 @@ function parseInlinePorts(value: string): DockerServicePort[] {
   return ports;
 }
 
-function selectDockerService(services: DockerComposeServiceDetection[]): DockerComposeServiceDetection | undefined {
-  return [...services].sort((a, b) => scoreService(b) - scoreService(a) || a.name.localeCompare(b.name))[0];
+function resolveDockerSetup(
+  docker: DockerComposeDetection,
+  options: DockerSetupOptions
+): { selectedService: string; targetPort: number; selection: DockerServiceSelection } {
+  if (options.service) {
+    const service = docker.services.find((candidate) => candidate.name === options.service);
+    if (!service) {
+      throw new Error(
+        `Docker service "${options.service}" was not found. Available services: ${docker.services.map((item) => item.name).join(", ") || "none"}.`
+      );
+    }
+    const targetPort = options.targetPort ?? selectTargetPort(service);
+    if (!targetPort) {
+      throw new Error(
+        `Docker service "${options.service}" needs --target-port because no HTTP target port was detected.`
+      );
+    }
+    return {
+      selectedService: service.name,
+      targetPort,
+      selection: {
+        mode: "explicit",
+        confidence: "high",
+        reason: `Selected ${service.name}:${targetPort} from explicit setup input.`,
+        selectedService: service.name,
+        targetPort,
+        candidates: docker.serviceCandidates
+      }
+    };
+  }
+
+  if (docker.selectedService && docker.targetPort) {
+    return {
+      selectedService: docker.selectedService,
+      targetPort: docker.targetPort,
+      selection: docker.selection
+    };
+  }
+
+  throw new Error(
+    "Docker service selection required. Pass --service <name> and --target-port <port>, or use the interactive configure flow."
+  );
+}
+
+function dockerTimings(options: DockerSetupOptions): DockerTimingPolicy {
+  return {
+    ...DOCKER_TIMINGS_MS,
+    ...(validTimeout(options.startTimeoutMs) ? { pullBuild: Number(options.startTimeoutMs) } : {}),
+    ...(validTimeout(options.healthTimeoutMs) ? { healthWait: Number(options.healthTimeoutMs) } : {}),
+    ...(validTimeout(options.stopTimeoutMs) ? { stop: Number(options.stopTimeoutMs) } : {})
+  };
+}
+
+function validTimeout(value: number | undefined): boolean {
+  return Number.isInteger(value) && Number(value) >= 100 && Number(value) <= 3_600_000;
+}
+
+function selectDockerService(candidates: DockerServiceCandidate[]): DockerServiceSelection {
+  const ranked = [...candidates].sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+  const eligible = ranked.filter((candidate) => candidate.eligible);
+  const top = eligible[0];
+  const second = eligible[1];
+  if (!top) {
+    return {
+      mode: "required",
+      confidence: "low",
+      reason: "No Compose service looked like a safe HTTP app entrypoint; explicit service selection is required.",
+      candidates
+    };
+  }
+  if (top.score < 100) {
+    return {
+      mode: "required",
+      confidence: "medium",
+      reason: `Best candidate ${top.name} scored ${top.score}, below Relaybase's automatic-selection threshold.`,
+      candidates
+    };
+  }
+  if (second && top.score - second.score < 25) {
+    return {
+      mode: "required",
+      confidence: "medium",
+      reason: `Compose service selection is ambiguous between ${top.name} and ${second.name}; explicit service selection is required.`,
+      candidates
+    };
+  }
+  return {
+    mode: "auto",
+    confidence: "high",
+    reason: `Selected ${top.name}:${top.targetPort} because it is the only high-confidence HTTP entrypoint.`,
+    selectedService: top.name,
+    targetPort: top.targetPort,
+    candidates
+  };
+}
+
+function serviceCandidate(service: DockerComposeServiceDetection): DockerServiceCandidate {
+  const reasons: string[] = [];
+  const rejectionReasons: string[] = [];
+  const targetPort = selectTargetPort(service);
+  const score = scoreService(service);
+
+  if (service.ports.length) {
+    reasons.push("publishes at least one port");
+  }
+  if (service.expose.length) {
+    reasons.push("exposes an internal port");
+  }
+  if (service.healthcheck) {
+    reasons.push("declares a Compose healthcheck");
+  }
+  if (/web|app|front|frontend|ui|api|server/i.test(service.name)) {
+    reasons.push("service name looks app-facing");
+  }
+  if (isInfrastructureService(service.name)) {
+    rejectionReasons.push("service name looks like infrastructure, storage, cache, queue, or worker");
+  }
+  if (!targetPort) {
+    rejectionReasons.push("no HTTP target port was detected");
+  }
+
+  return {
+    name: service.name,
+    score,
+    ...(targetPort ? { targetPort } : {}),
+    eligible: Boolean(targetPort) && !isInfrastructureService(service.name),
+    reasons,
+    rejectionReasons
+  };
 }
 
 function scoreService(service: DockerComposeServiceDetection): number {
@@ -1196,10 +1530,16 @@ function scoreService(service: DockerComposeServiceDetection): number {
   if (/web|app|front|frontend|ui|api|server/i.test(service.name)) {
     score += 20;
   }
-  if (/db|postgres|mysql|redis|cache|worker|queue|search/i.test(service.name)) {
+  if (isInfrastructureService(service.name)) {
     score -= 40;
   }
   return score;
+}
+
+function isInfrastructureService(name: string): boolean {
+  return /db|database|postgres|mysql|mariadb|mongo|redis|cache|minio|s3|worker|queue|cron|job|search|elastic|opensearch/i.test(
+    name
+  );
 }
 
 function selectTargetPort(service: DockerComposeServiceDetection): number | undefined {

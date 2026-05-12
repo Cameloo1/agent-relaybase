@@ -80,6 +80,7 @@ The helper now includes Docker-aware diagnostics for Compose-backed apps:
 .\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-cleanup -ManifestPath .\relaybase.app.json
 .\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-verify-stop -ManifestPath .\relaybase.app.json
 .\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action docker-diagnose -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action docker-prove -ManifestPath .\relaybase.app.json
 ```
 
 These actions read `.relaybase/docker-profile.json`; they are not separate user-facing setup commands.

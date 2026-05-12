@@ -303,6 +303,11 @@ test("configure generates a Docker Compose profile, override, lifecycle hooks, a
   assert.equal(profile?.selectedService, "web");
   assert.equal(profile?.targetContainerPort, 3000);
   assert.equal(profile?.hostPortStrategy, "relaybase-assigned-port");
+  assert.equal(profile?.dependencyPortPolicy, "internal-only");
+  assert.equal(profile?.portExposurePolicy, "selected-service-localhost-only");
+  assert.equal(profile?.portExposureVerification, "docker-compose-config");
+  assert.equal(profile?.serviceSelection.mode, "auto");
+  assert.equal(profile?.serviceSelection.confidence, "high");
   assert.deepEqual(profile?.retryBackoffMs, [1000, 2000, 4000, 8000, 15000]);
   assert.equal(profile?.timingsMs.pullBuild, 600000);
   assert.ok(profile?.lifecycleStates.includes("verifying_cleanup"));
@@ -314,10 +319,17 @@ test("configure generates a Docker Compose profile, override, lifecycle hooks, a
   const override = await fs.readFile(path.join(project, ".relaybase", "docker-compose.relaybase.yml"), "utf8");
   assert.match(override, /127\.0\.0\.1:\$\{PORT:-0}:3000/);
   assert.match(override, /relaybase\.compose_project/);
+  assert.match(override, / {2}db:\n {4}labels:\n {6}relaybase\.dependency: "true"\n {4}ports: !reset \[\]/);
 
   const stopScript = await fs.readFile(path.join(project, ".relaybase", "scripts", "relaybase-stop.ps1"), "utf8");
+  const startScript = await fs.readFile(path.join(project, ".relaybase", "scripts", "relaybase-start.ps1"), "utf8");
+  assert.match(startScript, /Invoke-RelaybaseComposeStream/);
+  assert.doesNotMatch(startScript, /Invoke-RelaybaseCompose -Profile \$profile -Args \$args \| Out-Host/);
   assert.match(stopScript, /docker compose/);
   assert.match(stopScript, /down", "--remove-orphans/);
+  assert.match(stopScript, /\$timeoutSeconds = \[Math\]::Max/);
+  assert.match(stopScript, /compose-config\.effective\.json/);
+  assert.match(stopScript, /compose-port-exposure\.json/);
   assert.match(stopScript, /dependency_port_open/);
   assert.match(stopScript, /cleanup_failed/);
   assert.match(stopScript, /\$previousErrorActionPreference = \$ErrorActionPreference/);
@@ -344,6 +356,131 @@ test("Windows helper wrapper uses process-local policy bypass and preserves exit
   assert.doesNotMatch(wrapper, /if "%ERRORLEVEL%"/);
   assert.match(wrapper, /endlocal & exit \/b %RELAYBASE_DEV_EXIT_CODE%/);
   assert.doesNotMatch(wrapper, /Set-ExecutionPolicy/i);
+});
+
+test("Docker setup refuses ambiguous service detection until service and target port are explicit", async () => {
+  const project = await tempProject("relaybase-docker-ambiguous-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-docker-ambiguous-state-"));
+  await fs.writeFile(
+    path.join(project, "compose.yaml"),
+    [
+      "services:",
+      "  web:",
+      "    image: node:24",
+      "    ports:",
+      '      - "3000:3000"',
+      "  api:",
+      "    image: node:24",
+      "    ports:",
+      '      - "8000:8000"',
+      "  redis:",
+      "    image: redis:7",
+      "    ports:",
+      '      - "6379:6379"',
+      ""
+    ].join("\n")
+  );
+
+  const detection = await detectProject(project);
+  assert.equal(detection.docker?.selectedService, undefined);
+  assert.match(detection.docker?.selection.reason ?? "", /ambiguous/);
+  assert.ok(detection.docker?.serviceCandidates.some((candidate) => candidate.name === "redis" && !candidate.eligible));
+
+  const dryRunPlans = await proposeSetupPlans(detection);
+  const dockerDryRun = dryRunPlans.find((plan) => plan.id === "docker-compose");
+  assert.deepEqual(dockerDryRun?.requiresInput, ["docker.service", "docker.targetPort"]);
+
+  await assert.rejects(
+    () =>
+      configureProject({
+        cwd: project,
+        host: "127.0.0.1",
+        port: 17782,
+        stateDir,
+        yes: true,
+        noStart: true,
+        selectedPlanId: "docker-compose"
+      }),
+    /requires explicit input/
+  );
+
+  const configured = await configureProject({
+    cwd: project,
+    host: "127.0.0.1",
+    port: 17782,
+    stateDir,
+    yes: true,
+    noStart: true,
+    selectedPlanId: "docker-compose",
+    docker: {
+      service: "api",
+      targetPort: 8000,
+      healthPath: "/api/health",
+      startTimeoutMs: 600000,
+      healthTimeoutMs: 240000,
+      stopTimeoutMs: 45000,
+      dependencyPortPolicy: "internal-only",
+      composeProfiles: ["dev"],
+      startDockerDesktop: true
+    }
+  });
+
+  assert.equal(configured.selectedPlan.id, "docker-compose");
+  const profile = await readDockerProfile(project);
+  assert.equal(profile?.selectedService, "api");
+  assert.equal(profile?.targetContainerPort, 8000);
+  assert.equal(profile?.healthPath, "/api/health");
+  assert.equal(profile?.timingsMs.healthWait, 240000);
+  assert.equal(profile?.timingsMs.stop, 45000);
+  assert.deepEqual(profile?.profiles, ["dev"]);
+  assert.equal(profile?.approvals.startDockerDesktop, true);
+  assert.equal(profile?.serviceSelection.mode, "explicit");
+  assert.deepEqual(profile?.dependencyServices.sort(), ["redis", "web"]);
+
+  const override = await fs.readFile(path.join(project, ".relaybase", "docker-compose.relaybase.yml"), "utf8");
+  assert.match(override, / {2}api:/);
+  assert.match(override, /127\.0\.0\.1:\$\{PORT:-0}:8000/);
+  assert.match(override, / {2}web:\n {4}labels:\n {6}relaybase\.dependency: "true"\n {4}ports: !reset \[\]/);
+  assert.match(override, / {2}redis:\n {4}labels:\n {6}relaybase\.dependency: "true"\n {4}ports: !reset \[\]/);
+});
+
+test("Docker setup validates explicit service and target port input", async () => {
+  const project = await tempProject("relaybase-docker-invalid-selection-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-docker-invalid-selection-state-"));
+  await fs.writeFile(
+    path.join(project, "compose.yaml"),
+    ["services:", "  worker:", "    image: node:24", ""].join("\n")
+  );
+
+  await assert.rejects(
+    () =>
+      configureProject({
+        cwd: project,
+        host: "127.0.0.1",
+        port: 17783,
+        stateDir,
+        yes: true,
+        noStart: true,
+        selectedPlanId: "docker-compose",
+        docker: { service: "missing", targetPort: 3000 }
+      }),
+    /was not found/
+  );
+
+  await assert.rejects(
+    () =>
+      configureProject({
+        cwd: project,
+        host: "127.0.0.1",
+        port: 17783,
+        stateDir,
+        yes: true,
+        noStart: true,
+        selectedPlanId: "docker-compose",
+        docker: { service: "worker" }
+      }),
+    /needs --target-port/
+  );
 });
 
 test("helper docs prefer the Windows wrapper for direct helper actions", async () => {
@@ -515,6 +652,57 @@ test("open starts a configured app through a running Relaybase daemon and proves
     assert.equal(result.state?.readiness.state, "ready");
   } finally {
     await hub.runtime.processes.stop("opened-app").catch(() => undefined);
+    await hub.close();
+  }
+});
+
+test("health prove writes a lifecycle proof bundle with routed health, logs, stop, and port closure checks", async () => {
+  const project = await tempProject("relaybase-health-prove-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-health-prove-state-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18530, portRangeEnd: 18550 });
+  const fixture = path.join(rootDir, "tests", "fixtures", "fake-managed-app.ts");
+
+  await fs.writeFile(
+    path.join(project, "relaybase.app.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "proved-app",
+        name: "Proved App",
+        command: `"${process.execPath}" --experimental-strip-types "${fixture}"`,
+        cwd: rootDir,
+        protocol: "http",
+        healthUrl: "/health"
+      },
+      null,
+      2
+    )
+  );
+
+  try {
+    await hub.listen();
+    const result = await healthProject({
+      cwd: project,
+      host: "127.0.0.1",
+      port: hub.address().port,
+      stateDir,
+      json: true,
+      prove: true,
+      lifecycleProof: true,
+      startDaemon: false
+    });
+
+    assert.equal(result.proof?.mode, "lifecycle");
+    assert.equal(result.proof?.ok, true);
+    assert.equal(result.proof?.started, true);
+    assert.equal(result.proof?.stopped, true);
+    assert.ok(result.proof?.checks.some((check) => check.name === "routed-health" && check.ok));
+    assert.ok(result.proof?.checks.some((check) => check.name === "logs" && check.ok));
+    assert.ok(result.proof?.checks.some((check) => check.name === "stop-verification" && check.ok));
+    assert.ok(result.proof?.artifactPath);
+    assert.ok(await exists(result.proof?.artifactPath ?? ""));
+  } finally {
+    await hub.runtime.processes.stop("proved-app").catch(() => undefined);
     await hub.close();
   }
 });

@@ -68,6 +68,6 @@ RELAYBASE-TCP <app-id>\n\n
 
 Docker Compose support is generated-profile based. Relaybase generates app-owned files, then executes generic lifecycle hooks.
 
-Relaybase does not guarantee that Docker Desktop is running, image pulls will succeed, builds will succeed, registry auth exists, or Compose profiles are correct. The generated prestart script records evidence and fails with classified errors when it can.
+Relaybase does not guarantee that Docker Desktop is running, image pulls will succeed, builds will succeed, registry auth exists, or Compose profiles are correct. Generated hooks can try Windows Docker Desktop recovery only when the profile approves it; otherwise the prestart script records evidence and fails with classified errors when it can.
 
 Docker volumes are kept by default. Generated stop hooks run `docker compose down --remove-orphans --timeout 30` without `--volumes`.

@@ -1,5 +1,6 @@
 import http from "node:http";
 import readline from "node:readline";
+import type { DockerComposeDetection, DockerSetupOptions } from "./dockerProfile.ts";
 import { createRelaybaseServer } from "./server.ts";
 import { Registry, readManifestFile } from "./registry.ts";
 import { DEFAULT_HOST, DEFAULT_PORT, getDefaultStateDir, getOrCreateSessionToken } from "./state.ts";
@@ -29,8 +30,10 @@ interface CliOptions {
   noBrowser: boolean;
   repair: boolean;
   mcpInstall: boolean;
+  prove: boolean;
   profile?: string;
   answersPath?: string;
+  docker: DockerSetupOptions;
 }
 
 void main().catch((error) => {
@@ -212,7 +215,9 @@ function parseOptions(args: string[]): CliOptions {
     noStart: false,
     noBrowser: false,
     repair: false,
-    mcpInstall: false
+    mcpInstall: false,
+    prove: false,
+    docker: {}
   };
 
   for (let index = 0; index < args.length; index += 1) {
@@ -239,10 +244,41 @@ function parseOptions(args: string[]): CliOptions {
       options.repair = true;
     } else if (arg === "--mcp-install") {
       options.mcpInstall = true;
+    } else if (arg === "--prove") {
+      options.prove = true;
     } else if (arg === "--profile") {
       options.profile = requiredArg(args[++index], "--profile");
     } else if (arg === "--answers") {
       options.answersPath = requiredArg(args[++index], "--answers");
+    } else if (arg === "--service") {
+      options.docker.service = requiredArg(args[++index], "--service");
+    } else if (arg === "--target-port") {
+      options.docker.targetPort = parsePort(requiredArg(args[++index], "--target-port"), "--target-port");
+    } else if (arg === "--health-path") {
+      options.docker.healthPath = requiredArg(args[++index], "--health-path");
+    } else if (arg === "--start-timeout-ms") {
+      options.docker.startTimeoutMs = parseTimeout(
+        requiredArg(args[++index], "--start-timeout-ms"),
+        "--start-timeout-ms"
+      );
+    } else if (arg === "--health-timeout-ms") {
+      options.docker.healthTimeoutMs = parseTimeout(
+        requiredArg(args[++index], "--health-timeout-ms"),
+        "--health-timeout-ms"
+      );
+    } else if (arg === "--stop-timeout-ms") {
+      options.docker.stopTimeoutMs = parseTimeout(requiredArg(args[++index], "--stop-timeout-ms"), "--stop-timeout-ms");
+    } else if (arg === "--dependency-port-policy") {
+      options.docker.dependencyPortPolicy = requiredDependencyPortPolicy(
+        requiredArg(args[++index], "--dependency-port-policy")
+      );
+    } else if (arg === "--compose-profile") {
+      options.docker.composeProfiles = [
+        ...(options.docker.composeProfiles ?? []),
+        requiredArg(args[++index], "--compose-profile")
+      ];
+    } else if (arg === "--docker-start-desktop") {
+      options.docker.startDockerDesktop = true;
     }
   }
 
@@ -253,12 +289,16 @@ async function configure(options: CliOptions): Promise<void> {
   let selectedPlanId = options.profile;
   let envStrategy: EnvStrategy | undefined;
   let noStart = options.noStart ? true : undefined;
+  let docker = hasDockerOptions(options.docker) ? options.docker : undefined;
 
   if (!options.yes && !options.json && process.stdin.isTTY && process.stdout.isTTY) {
     const detection = await detectProject(options.cwd);
-    const plans = await proposeSetupPlans(detection, { mcpInstall: options.mcpInstall });
+    const plans = await proposeSetupPlans(detection, { mcpInstall: options.mcpInstall, docker });
     const selected = await choosePlan(plans);
     selectedPlanId = selected.id;
+    if (selected.architecture === "docker-compose-service" && detection.docker) {
+      docker = { ...docker, ...(await chooseDockerSetup(detection.docker)) };
+    }
     envStrategy = await chooseEnvStrategy();
     noStart = !(await chooseBoolean("Start and verify through Relaybase now?", true));
   }
@@ -277,7 +317,8 @@ async function configure(options: CliOptions): Promise<void> {
     noStart,
     mcpInstall: options.mcpInstall,
     envStrategy,
-    selectedPlanId
+    selectedPlanId,
+    docker
   });
 
   if (options.json) {
@@ -312,7 +353,10 @@ async function health(options: CliOptions): Promise<void> {
     host: options.host,
     port: options.port,
     stateDir: options.stateDir,
-    json: options.json
+    json: options.json,
+    prove: options.prove,
+    lifecycleProof: options.prove && options.yes,
+    startDaemon: options.prove && options.yes
   });
 
   if (options.json) {
@@ -409,6 +453,18 @@ Configure options:
   --repair                       Re-run setup as a repair flow
   --no-start                     Configure files and registry without launching the app
   --mcp-install                  Also write a Relaybase MCP client config artifact
+  --service <name>               Docker Compose app-facing service for the setup flow
+  --target-port <number>         Docker target container port for the selected service
+  --health-path <path>           Health route for readiness checks, for example /api/health
+  --start-timeout-ms <number>    Docker cold-start/build timeout budget
+  --health-timeout-ms <number>   Docker health wait timeout budget
+  --stop-timeout-ms <number>     Docker stop/cleanup timeout budget
+  --dependency-port-policy <policy>
+                                 Docker dependency ports: internal-only or preserve-existing
+  --docker-start-desktop         Allow generated Docker hooks to start Docker Desktop on Windows
+
+Health options:
+  --prove                        Write a proof bundle; add --yes to run lifecycle start/stop proof
 `);
 }
 
@@ -472,6 +528,10 @@ function printHealthResult(result: HealthCheckResult): void {
   for (const finding of result.findings) {
     console.log(`${finding.severity.toUpperCase()} ${finding.code}: ${finding.message}`);
   }
+  if (result.proof) {
+    console.log(`Proof: ${result.proof.ok ? "passed" : "failed"} (${result.proof.mode})`);
+    console.log(`Proof artifact: ${result.proof.artifactPath ?? "not written"}`);
+  }
   if (result.recommendedAction) {
     console.log(`Recommended: ${result.recommendedAction}`);
   }
@@ -496,6 +556,56 @@ async function chooseEnvStrategy(): Promise<EnvStrategy> {
     0
   );
   return choices[index]?.value ?? "runtime-injection";
+}
+
+async function chooseDockerSetup(docker: DockerComposeDetection): Promise<DockerSetupOptions> {
+  const services = docker.services.length ? docker.services : [];
+  if (!services.length) {
+    return {
+      service: await askText("Docker app service", "web"),
+      targetPort: parsePort(await askText("Target container port", "3000"), "target container port"),
+      healthPath: await askText("Health path", "/api/health"),
+      startTimeoutMs: parseTimeout(await askText("Cold start timeout ms", "600000"), "cold start timeout"),
+      healthTimeoutMs: parseTimeout(await askText("Health wait timeout ms", "300000"), "health wait timeout"),
+      stopTimeoutMs: parseTimeout(await askText("Stop timeout ms", "60000"), "stop timeout"),
+      dependencyPortPolicy: "internal-only"
+    };
+  }
+  const candidateLabels = services.map((service) => {
+    const candidate = docker.serviceCandidates.find((item) => item.name === service.name);
+    const target =
+      candidate?.targetPort ?? service.ports.find((port) => port.targetPort)?.targetPort ?? service.expose[0];
+    const suffix = target ? `:${target}` : " (needs target port)";
+    const reason = candidate?.rejectionReasons.length
+      ? ` - ${candidate.rejectionReasons.join(", ")}`
+      : candidate?.reasons.length
+        ? ` - ${candidate.reasons.join(", ")}`
+        : "";
+    return `${service.name}${suffix}${reason}`;
+  });
+  const selectedIndex = await arrowSelect("Choose Docker app service", candidateLabels, 0);
+  const selected = services[selectedIndex] ?? services[0];
+  const inferredPort = selected?.ports.find((port) => port.targetPort)?.targetPort ?? selected?.expose[0] ?? 3000;
+  const targetPort = parsePort(await askText("Target container port", String(inferredPort)), "target container port");
+  const healthPath = await askText("Health path", "/api/health");
+  const startTimeoutMs = parseTimeout(await askText("Cold start timeout ms", "600000"), "cold start timeout");
+  const healthTimeoutMs = parseTimeout(await askText("Health wait timeout ms", "300000"), "health wait timeout");
+  const stopTimeoutMs = parseTimeout(await askText("Stop timeout ms", "60000"), "stop timeout");
+  const policyIndex = await arrowSelect(
+    "Dependency host port policy",
+    ["Close dependency host ports (Recommended)", "Preserve existing dependency host ports"],
+    0
+  );
+
+  return {
+    service: selected?.name,
+    targetPort,
+    healthPath,
+    startTimeoutMs,
+    healthTimeoutMs,
+    stopTimeoutMs,
+    dependencyPortPolicy: policyIndex === 0 ? "internal-only" : "preserve-existing"
+  };
 }
 
 async function chooseBoolean(prompt: string, recommended: boolean): Promise<boolean> {
@@ -541,5 +651,42 @@ async function arrowSelect(prompt: string, choices: string[], initialIndex: numb
       process.stdin.setRawMode?.(false);
     };
     process.stdin.on("keypress", onKeypress);
+  });
+}
+
+function hasDockerOptions(options: DockerSetupOptions): boolean {
+  return Object.values(options).some((value) => value !== undefined);
+}
+
+function parsePort(value: string, label: string): number {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`${label} must be an integer between 1 and 65535.`);
+  }
+  return port;
+}
+
+function parseTimeout(value: string, label: string): number {
+  const timeout = Number(value);
+  if (!Number.isInteger(timeout) || timeout < 100 || timeout > 3_600_000) {
+    throw new Error(`${label} must be an integer between 100 and 3600000 milliseconds.`);
+  }
+  return timeout;
+}
+
+function requiredDependencyPortPolicy(value: string): "internal-only" | "preserve-existing" {
+  if (value === "internal-only" || value === "preserve-existing") {
+    return value;
+  }
+  throw new Error('--dependency-port-policy must be "internal-only" or "preserve-existing".');
+}
+
+function askText(prompt: string, defaultValue: string): Promise<string> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(`${prompt} (${defaultValue}): `, (answer) => {
+      rl.close();
+      resolve(answer.trim() || defaultValue);
+    });
   });
 }

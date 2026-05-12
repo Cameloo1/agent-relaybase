@@ -16,6 +16,7 @@ When `relaybase configure` sees a Compose file in the project root, it can selec
 
 ```powershell
 relaybase configure --profile docker-compose
+relaybase configure --profile docker-compose --service web --target-port 3000 --health-path /api/health --start-timeout-ms 600000
 ```
 
 MCP callers use the same setup engine through `configure_project` with `profile: "docker-compose"`. Dry-run planning is allowed without mutation credentials; applying the configuration is token-gated.
@@ -31,7 +32,7 @@ docker-compose.yaml
 docker-compose.yml
 ```
 
-It reads the Compose text to infer service names, images, `build`, `ports`, `expose`, `depends_on`, `profiles`, and whether a `healthcheck` key is present. Service selection is heuristic: services with ports, exposed ports, health checks, and app-like names score higher; database, cache, worker, queue, and search-like names score lower.
+It reads the Compose text to infer service names, images, `build`, `ports`, `expose`, `depends_on`, `profiles`, and whether a `healthcheck` key is present. Service selection is conservative: services with ports, exposed ports, health checks, and app-like names score higher; database, cache, storage, worker, queue, and search-like names are rejected as app entrypoints. If the top app-facing service is not clearly better than the next candidate, setup requires explicit `--service` and `--target-port` input.
 
 This detection is not a full YAML engine. The generated prestart script still runs `docker compose config` before launch, which is the authoritative Compose validation step.
 
@@ -82,9 +83,13 @@ services:
       relaybase.compose_project: "relaybase-app"
     ports:
       - "127.0.0.1:${PORT:-0}:3000"
+  db:
+    labels:
+      relaybase.dependency: "true"
+    ports: !reset []
 ```
 
-The override does not edit the app's Compose file. If the detector cannot infer a target port, the generated profile uses container port `3000` and records a setup risk telling the user to rerun configure if the app listens elsewhere.
+The override does not edit the app's Compose file. By default, dependency services are given `ports: !reset []` in the Relaybase override so only the selected app service publishes a localhost port. The generated prestart script runs `docker compose config` and, when JSON output is available, verifies the effective port exposure before launch.
 
 ## Runtime Hooks
 
@@ -97,6 +102,7 @@ The override does not edit the app's Compose file. If the detector cannot infer 
 - Fails if the Docker context output appears remote and `approvals.remoteContext` is false.
 - Requires `docker compose version` to succeed.
 - Runs `docker compose config` and records `compose-config.redacted.json`.
+- Runs `docker compose config --format json`, records `compose-config.effective.json`, and records port exposure checks in `compose-port-exposure.json` when the Compose version supports JSON output.
 - Fails on blocked Compose settings unless `approvals.dangerousConfig` is true.
 - Records `compose-ps.before.json`.
 - Fails if Relaybase's assigned `PORT` is already open before start.
@@ -105,12 +111,12 @@ The override does not edit the app's Compose file. If the detector cannot infer 
 `command`:
 
 - Runs `docker compose up --build --remove-orphans` in the foreground.
-- Lets Relaybase own the process handle and process logs.
+- Streams Compose output directly so Relaybase can capture build and container logs as they happen.
 
 `stopCommand`:
 
 - Records `compose-ps.before-stop.json`.
-- Runs `docker compose down --remove-orphans --timeout 30`.
+- Runs `docker compose down --remove-orphans --timeout <profile stop budget>`.
 - Does not pass `--volumes`, so volumes are kept by default.
 - Verifies cleanup after `down`.
 
@@ -133,6 +139,9 @@ The generated scripts temporarily relax PowerShell's error action around native 
 - `targetContainerPort`
 - `healthPath`
 - `hostPortStrategy`
+- `dependencyPortPolicy`
+- `portExposurePolicy`
+- `portExposureVerification`
 - `buildPolicy`
 - `cleanupPolicy`
 - `volumePolicy`
@@ -141,6 +150,7 @@ The generated scripts temporarily relax PowerShell's error action around native 
 - `optionalServices`
 - `dependencyServices`
 - `dependencyPorts`
+- `serviceSelection`
 - `timingsMs`
 - `retryBackoffMs`
 - `lifecycleStates`
@@ -158,6 +168,9 @@ Current generated defaults include:
 ```json
 {
   "hostPortStrategy": "relaybase-assigned-port",
+  "dependencyPortPolicy": "internal-only",
+  "portExposurePolicy": "selected-service-localhost-only",
+  "portExposureVerification": "docker-compose-config",
   "buildPolicy": "pull-build-with-approval",
   "cleanupPolicy": "down-remove-orphans-keep-volumes",
   "volumePolicy": "never-remove-by-default",
@@ -170,13 +183,15 @@ The profile also declares expected artifact names. A run writes the artifacts re
 
 ## Health Diagnostics
 
-`relaybase health` is read-only. For Compose projects it can report:
+`relaybase health` is read-only by default. For Compose projects it can report:
 
 - `DOCKER_PROFILE_MISSING`: Compose files exist but `.relaybase/docker-profile.json` does not.
 - `COMPOSE_ENV_MISSING`: the generated profile found required Compose env variables that were missing during detection.
 - `DANGEROUS_COMPOSE_CONFIG`: the generated profile contains blocked Compose settings.
 
 The Docker profile is included in the machine-readable `health --json` result when present.
+
+`relaybase health --prove` writes a proof artifact under `.relaybase/runs/`. Without `--yes`, it records read-only proof checks. With `--yes`, it runs register/start/routed-health/logs/stop/stop-verification through Relaybase.
 
 ## Helper Diagnostics
 
@@ -191,6 +206,7 @@ The repo-local helper has Docker-aware diagnostics for proof and troubleshooting
 .\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-cleanup -ManifestPath .\relaybase.app.json
 .\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-verify-stop -ManifestPath .\relaybase.app.json
 .\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action docker-diagnose -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action docker-prove -ManifestPath .\relaybase.app.json
 ```
 
 These are supporting diagnostics, not additional public setup commands.

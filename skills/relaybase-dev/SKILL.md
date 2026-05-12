@@ -120,6 +120,7 @@ Docker-aware helper actions are available for Compose-backed apps, but they are 
 .\scripts\relaybase-dev.cmd -Action compose-cleanup -ManifestPath .\relaybase.app.json
 .\scripts\relaybase-dev.cmd -Action compose-verify-stop -ManifestPath .\relaybase.app.json
 .\scripts\relaybase-dev.cmd -Action docker-diagnose -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.cmd -Action docker-prove -ManifestPath .\relaybase.app.json
 ```
 
 ## Stale Runtime Branch

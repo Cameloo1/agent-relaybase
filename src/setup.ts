@@ -11,7 +11,8 @@ import {
   readDockerProfile,
   type DockerComposeDetection,
   type DockerErrorCode,
-  type DockerProfile
+  type DockerProfile,
+  type DockerSetupOptions
 } from "./dockerProfile.ts";
 import { Registry, readManifestFile } from "./registry.ts";
 import { DEFAULT_HOST, DEFAULT_PORT, getDefaultStateDir, getOrCreateSessionToken, isNodeErrno } from "./state.ts";
@@ -50,6 +51,7 @@ export interface ConfigureProjectOptions extends RelaybaseCommandOptions {
   envStrategy?: EnvStrategy;
   selectedPlanId?: string;
   startDaemon?: boolean;
+  docker?: DockerSetupOptions;
 }
 
 export interface OpenProjectOptions extends RelaybaseCommandOptions {
@@ -59,6 +61,9 @@ export interface OpenProjectOptions extends RelaybaseCommandOptions {
 
 export interface HealthProjectOptions extends RelaybaseCommandOptions {
   appId?: string;
+  prove?: boolean;
+  lifecycleProof?: boolean;
+  startDaemon?: boolean;
 }
 
 export interface ProjectDetection {
@@ -99,6 +104,7 @@ export interface SetupPlan {
   manifest: AppManifestInput;
   writes: SetupWrite[];
   recoverySteps: string[];
+  requiresInput?: string[];
 }
 
 export interface AppliedFile {
@@ -166,8 +172,28 @@ export interface HealthCheckResult {
     docker?: DockerProfile;
   };
   state?: AppState;
+  proof?: ProofBundle;
   findings: HealthFinding[];
   recommendedAction?: string;
+}
+
+export interface ProofBundle {
+  ok: boolean;
+  mode: "read-only" | "lifecycle";
+  lifecycleAttempted: boolean;
+  artifactPath?: string;
+  checks: ProofCheck[];
+  logs?: { available: boolean; count: number; streamUrl?: string };
+  started?: boolean;
+  stopped?: boolean;
+}
+
+export interface ProofCheck {
+  name: string;
+  ok: boolean;
+  severity: "info" | "warning" | "error";
+  message: string;
+  details?: Record<string, unknown>;
 }
 
 export interface HealthFinding {
@@ -291,7 +317,7 @@ export async function detectProject(cwd: string): Promise<ProjectDetection> {
 
 export async function proposeSetupPlans(
   detection: ProjectDetection,
-  options: { envStrategy?: EnvStrategy; mcpInstall?: boolean } = {}
+  options: { envStrategy?: EnvStrategy; mcpInstall?: boolean; docker?: DockerSetupOptions } = {}
 ): Promise<SetupPlan[]> {
   const existingManifest = detection.existingManifestPath
     ? await readManifestFile(detection.existingManifestPath).catch(() => undefined)
@@ -393,13 +419,19 @@ export async function proposeSetupPlans(
   }
 
   if (detection.dockerComposeFiles.length) {
-    const dockerSetup = buildDockerComposeSetup(
-      detection.root,
-      baseManifest,
-      detection.docker ?? {
+    const dockerDetection =
+      detection.docker ??
+      ({
         composeFiles: detection.dockerComposeFiles,
         envFiles: detection.envFiles,
         services: [],
+        serviceCandidates: [],
+        selection: {
+          mode: "required",
+          confidence: "low",
+          reason: "Compose files were detected but no service metadata could be parsed.",
+          candidates: []
+        },
         requiredServices: [],
         optionalServices: [],
         dependencyPorts: [],
@@ -409,26 +441,52 @@ export async function proposeSetupPlans(
         hostPublishedPorts: [],
         dynamicPublishedPorts: [],
         suggestedProjectName: `relaybase-${appId}`
-      }
-    );
-    plans.push(
-      plan({
-        id: "docker-compose",
-        label: "Docker Compose service",
-        architecture: "docker-compose-service",
-        score: detection.appKind === "docker" ? 92 : 45,
-        manifest: dockerSetup.manifest,
-        detection,
-        envStrategy,
-        reasons: dockerSetup.reasons,
-        risks: dockerSetup.risks,
-        recoverySteps: dockerSetup.recoverySteps,
-        extraWrites: [
-          ...setupWrites(detection.root, dockerSetup.manifest, envStrategy, options.mcpInstall),
-          ...dockerSetup.writes
-        ]
-      })
-    );
+      } satisfies DockerComposeDetection);
+    try {
+      const dockerSetup = buildDockerComposeSetup(detection.root, baseManifest, dockerDetection, options.docker);
+      plans.push(
+        plan({
+          id: "docker-compose",
+          label: "Docker Compose service",
+          architecture: "docker-compose-service",
+          score: detection.appKind === "docker" ? 92 : 45,
+          manifest: dockerSetup.manifest,
+          detection,
+          envStrategy,
+          reasons: dockerSetup.reasons,
+          risks: dockerSetup.risks,
+          recoverySteps: dockerSetup.recoverySteps,
+          extraWrites: [
+            ...setupWrites(detection.root, dockerSetup.manifest, envStrategy, options.mcpInstall),
+            ...dockerSetup.writes
+          ]
+        })
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Docker service selection is required.";
+      plans.push(
+        plan({
+          id: "docker-compose",
+          label: "Docker Compose service",
+          architecture: "docker-compose-service",
+          score: 5,
+          manifest: baseManifest,
+          detection,
+          envStrategy,
+          reasons: [
+            "Compose files are present, but Relaybase will not guess the app entrypoint when service selection is ambiguous.",
+            dockerDetection.selection.reason
+          ],
+          risks: [message],
+          recoverySteps: [
+            "Run relaybase configure interactively and choose the app-facing service.",
+            "Or pass --service <name> --target-port <port> --health-path /api/health."
+          ],
+          extraWrites: setupWrites(detection.root, baseManifest, envStrategy, options.mcpInstall),
+          requiresInput: ["docker.service", "docker.targetPort"]
+        })
+      );
+    }
   }
 
   if (detection.appKind === "static") {
@@ -496,9 +554,16 @@ export async function configureProject(options: ConfigureProjectOptions): Promis
   const detection = await detectProject(options.cwd);
   const candidates = await proposeSetupPlans(detection, {
     envStrategy,
-    mcpInstall: options.mcpInstall
+    mcpInstall: options.mcpInstall,
+    docker: options.docker ?? answers.docker
   });
   let selectedPlan = selectPlan(candidates, options.selectedPlanId ?? options.profile ?? answers.selectedPlanId);
+  if (!options.dryRun && selectedPlan.requiresInput?.length) {
+    const details = selectedPlan.risks.length ? ` ${selectedPlan.risks.join(" ")}` : "";
+    throw new Error(
+      `Setup plan ${selectedPlan.id} requires explicit input: ${selectedPlan.requiresInput.join(", ")}.${details} Run relaybase configure interactively or pass Docker setup flags.`
+    );
+  }
   const events: Array<Record<string, unknown>> = [
     event("preflight", {
       cwd: detection.root,
@@ -662,6 +727,7 @@ export async function healthProject(options: HealthProjectOptions): Promise<Heal
   const findings: HealthFinding[] = [];
   let appId = options.appId ?? profile?.appId;
   let state: AppState | undefined;
+  let proof: ProofBundle | undefined;
 
   if (!manifestPath) {
     findings.push({
@@ -746,8 +812,25 @@ export async function healthProject(options: HealthProjectOptions): Promise<Heal
     }
   }
 
+  if (options.prove) {
+    proof = await proveProject(options, detection.root, manifestPath, appId, dockerProfile, daemon.reachable);
+    if (!proof.ok) {
+      findings.push({
+        severity: "error",
+        code: "PROOF_FAILED",
+        message: "Relaybase proof checks did not all pass.",
+        repair: proof.lifecycleAttempted
+          ? "Inspect the proof artifact and recent logs."
+          : "Run relaybase health --prove --yes for lifecycle proof."
+      });
+    }
+  }
+
   const ok =
-    findings.every((finding) => finding.severity !== "error") && Boolean(daemon.reachable) && Boolean(manifestPath);
+    findings.every((finding) => finding.severity !== "error") &&
+    Boolean(daemon.reachable) &&
+    Boolean(manifestPath) &&
+    (proof ? proof.ok : true);
   return {
     cwd: detection.root,
     ...(appId ? { appId } : {}),
@@ -766,6 +849,7 @@ export async function healthProject(options: HealthProjectOptions): Promise<Heal
       ...(dockerProfile ? { docker: dockerProfile } : {})
     },
     ...(state ? { state } : {}),
+    ...(proof ? { proof } : {}),
     findings,
     ...(ok ? {} : { recommendedAction: "Run relaybase configure --repair." })
   };
@@ -870,6 +954,187 @@ export function classifyLaunchFailure(input: {
   };
 }
 
+async function proveProject(
+  options: HealthProjectOptions,
+  root: string,
+  manifestPath: string | undefined,
+  appId: string | undefined,
+  dockerProfile: DockerProfile | undefined,
+  daemonReachable: boolean
+): Promise<ProofBundle> {
+  const checks: ProofCheck[] = [];
+  const lifecycle = options.lifecycleProof === true;
+  let effectiveDaemonReachable = daemonReachable;
+  let effectiveAppId = appId;
+  let logs: ProofBundle["logs"];
+  let started = false;
+  let stopped = false;
+
+  checks.push({
+    name: "discovery",
+    ok: daemonReachable,
+    severity: daemonReachable ? "info" : "error",
+    message: daemonReachable ? "Relaybase discovery is reachable." : "Relaybase discovery is not reachable."
+  });
+
+  if (lifecycle && !effectiveDaemonReachable) {
+    const daemon = await ensureDaemon(options, options.startDaemon === true);
+    effectiveDaemonReachable = daemon.reachable;
+    checks.push({
+      name: "daemon-start",
+      ok: daemon.reachable,
+      severity: daemon.reachable ? "info" : "error",
+      message: daemon.reachable
+        ? `Relaybase daemon ${daemon.started ? "started" : "was already reachable"}.`
+        : (daemon.error ?? "Relaybase daemon could not be started."),
+      details: { started: daemon.started }
+    });
+  }
+
+  checks.push({
+    name: "project-config",
+    ok: Boolean(manifestPath),
+    severity: manifestPath ? "info" : "error",
+    message: manifestPath ? "Project has a Relaybase manifest." : "Project is missing relaybase.app.json."
+  });
+
+  if (manifestPath) {
+    const manifest = await readManifestFile(manifestPath).catch(() => undefined);
+    if (manifest?.id && typeof manifest.id === "string") {
+      effectiveAppId = manifest.id;
+    }
+    checks.push({
+      name: "manifest",
+      ok: Boolean(manifest),
+      severity: manifest ? "info" : "error",
+      message: manifest ? `Manifest loaded for ${manifest.id}.` : "Manifest could not be loaded."
+    });
+  }
+
+  if (dockerProfile) {
+    checks.push({
+      name: "docker-service-selection",
+      ok: Boolean(dockerProfile.selectedService && dockerProfile.targetContainerPort),
+      severity: dockerProfile.selectedService && dockerProfile.targetContainerPort ? "info" : "error",
+      message: dockerProfile.selectedService
+        ? `Docker target is ${dockerProfile.selectedService}:${dockerProfile.targetContainerPort}.`
+        : "Docker profile is missing explicit service selection.",
+      details: {
+        selection: dockerProfile.serviceSelection,
+        dependencyPortPolicy: dockerProfile.dependencyPortPolicy,
+        timingsMs: dockerProfile.timingsMs
+      }
+    });
+    checks.push({
+      name: "docker-port-policy",
+      ok: dockerProfile.dependencyPortPolicy === "internal-only",
+      severity: dockerProfile.dependencyPortPolicy === "internal-only" ? "info" : "warning",
+      message:
+        dockerProfile.dependencyPortPolicy === "internal-only"
+          ? "Dependency host ports are configured to be closed by the Relaybase override."
+          : "Dependency host ports are preserved by explicit policy.",
+      details: { dependencyPorts: dockerProfile.dependencyPorts }
+    });
+  }
+
+  if (lifecycle && manifestPath && effectiveAppId && effectiveDaemonReachable) {
+    const register = await registerViaApi(options, manifestPath);
+    checks.push({
+      name: "register",
+      ok: register.ok,
+      severity: register.ok ? "info" : "error",
+      message: register.ok ? "Manifest registered through Relaybase API." : register.body,
+      details: { statusCode: register.statusCode }
+    });
+    if (register.ok) {
+      const start = await mutateAppViaApi(options, effectiveAppId, "start");
+      started = start.ok;
+      checks.push({
+        name: "start",
+        ok: start.ok,
+        severity: start.ok ? "info" : "error",
+        message: start.ok ? "App start completed through Relaybase." : start.body,
+        details: { statusCode: start.statusCode }
+      });
+      const state = await getAppStateViaApi(options, effectiveAppId);
+      checks.push({
+        name: "routed-health",
+        ok: Boolean(state.state?.readiness.state === "ready" || state.state?.routeReachable),
+        severity: state.state?.readiness.state === "ready" || state.state?.routeReachable ? "info" : "error",
+        message:
+          state.state?.readiness.state === "ready" || state.state?.routeReachable
+            ? "Routed readiness passed."
+            : (state.state?.readiness.failureReason ?? state.error ?? "Routed readiness did not pass."),
+        details: state.state
+          ? {
+              readiness: state.state.readiness,
+              backendPortOpen: state.state.backendPortOpen,
+              routeReachable: state.state.routeReachable
+            }
+          : undefined
+      });
+      const logResponse = await getLogsViaApi(options, effectiveAppId);
+      logs = {
+        available: logResponse.ok,
+        count: logResponse.logs.length,
+        ...(logResponse.streamUrl ? { streamUrl: logResponse.streamUrl } : {})
+      };
+      checks.push({
+        name: "logs",
+        ok: logResponse.ok,
+        severity: logResponse.ok ? "info" : "warning",
+        message: logResponse.ok
+          ? `Log snapshot is available with ${logResponse.logs.length} line(s).`
+          : (logResponse.error ?? "Log snapshot is unavailable.")
+      });
+      const stop = await mutateAppViaApi(options, effectiveAppId, "stop");
+      stopped = stop.ok;
+      checks.push({
+        name: "stop",
+        ok: stop.ok,
+        severity: stop.ok ? "info" : "error",
+        message: stop.ok ? "App stop completed through Relaybase." : stop.body,
+        details: { statusCode: stop.statusCode }
+      });
+      const stoppedState = await getAppStateViaApi(options, effectiveAppId);
+      checks.push({
+        name: "stop-verification",
+        ok: Boolean(stoppedState.state?.stopVerification?.ok),
+        severity: stoppedState.state?.stopVerification?.ok ? "info" : "error",
+        message: stoppedState.state?.stopVerification?.ok
+          ? "Stop verification passed."
+          : (stoppedState.state?.stopVerification?.failureReason ??
+            stoppedState.error ??
+            "Stop verification did not pass."),
+        details: stoppedState.state
+          ? {
+              stopVerification: stoppedState.state.stopVerification,
+              backendPortOpen: stoppedState.state.backendPortOpen
+            }
+          : undefined
+      });
+    }
+  } else if (!lifecycle) {
+    checks.push({
+      name: "lifecycle-proof",
+      ok: true,
+      severity: "warning",
+      message: "Lifecycle start/stop proof was skipped. Pass --yes with --prove to run it."
+    });
+  }
+
+  const proof: ProofBundle = {
+    ok: checks.every((check) => check.severity !== "error" || check.ok),
+    mode: lifecycle ? "lifecycle" : "read-only",
+    lifecycleAttempted: lifecycle,
+    checks,
+    ...(logs ? { logs } : {}),
+    ...(lifecycle ? { started, stopped } : {})
+  };
+  const artifactPath = await writeProofArtifact(root, proof);
+  return { ...proof, ...(artifactPath ? { artifactPath } : {}) };
+}
+
 async function applySetupPlan(selectedPlan: SetupPlan, options: { writeEnv: boolean }): Promise<AppliedFile[]> {
   const applied: AppliedFile[] = [];
   const rollback: Array<{ path: string; existed: boolean; content?: string }> = [];
@@ -916,7 +1181,18 @@ async function applySetupPlan(selectedPlan: SetupPlan, options: { writeEnv: bool
   );
   await writeTextAtomic(
     path.join(root, SETUP_DIR, ANSWERS_FILE),
-    `${JSON.stringify({ version: 1, selectedPlanId: selectedPlan.id, envStrategy: selectedPlan.envStrategy }, null, 2)}\n`
+    `${JSON.stringify(
+      {
+        version: 1,
+        selectedPlanId: selectedPlan.id,
+        envStrategy: selectedPlan.envStrategy,
+        ...(selectedPlan.architecture === "docker-compose-service"
+          ? { docker: dockerAnswersFromPlan(selectedPlan) }
+          : {})
+      },
+      null,
+      2
+    )}\n`
   );
   return applied;
 }
@@ -1121,6 +1397,35 @@ async function getAppStateViaApi(
   return { ok: Boolean(body.state), ...(body.state ? { state: body.state } : { error: "Missing state body." }) };
 }
 
+async function getLogsViaApi(
+  options: RelaybaseCommandOptions,
+  id: string
+): Promise<{ ok: boolean; logs: string[]; events: unknown[]; streamUrl?: string; error?: string }> {
+  const response = await httpRequest(options, "GET", `/__hub/api/apps/${encodeURIComponent(id)}/logs`);
+  if (!response.ok) {
+    return { ok: false, logs: [], events: [], error: response.body };
+  }
+  const body = safeJson(response.body) as { logs?: string[]; events?: unknown[]; streamUrl?: string };
+  return {
+    ok: true,
+    logs: Array.isArray(body.logs) ? body.logs : [],
+    events: Array.isArray(body.events) ? body.events : [],
+    ...(typeof body.streamUrl === "string" ? { streamUrl: body.streamUrl } : {})
+  };
+}
+
+async function writeProofArtifact(root: string, proof: ProofBundle): Promise<string | undefined> {
+  try {
+    const runsDir = path.join(root, SETUP_DIR, EVENTS_DIR);
+    await ensureDir(runsDir);
+    const artifactPath = path.join(runsDir, `${safeTimestamp()}.proof.json`);
+    await writeTextAtomic(artifactPath, `${JSON.stringify(proof, null, 2)}\n`);
+    return artifactPath;
+  } catch {
+    return undefined;
+  }
+}
+
 function httpRequest(
   options: RelaybaseCommandOptions,
   method: string,
@@ -1181,6 +1486,7 @@ function plan(input: {
   risks: string[];
   recoverySteps: string[];
   extraWrites: SetupWrite[];
+  requiresInput?: string[];
 }): SetupPlan {
   return {
     id: input.id,
@@ -1192,7 +1498,8 @@ function plan(input: {
     envStrategy: input.envStrategy,
     manifest: input.manifest,
     writes: input.extraWrites,
-    recoverySteps: input.recoverySteps
+    recoverySteps: input.recoverySteps,
+    ...(input.requiresInput ? { requiresInput: input.requiresInput } : {})
   };
 }
 
@@ -1408,6 +1715,31 @@ function launchProfile(selectedPlan: SetupPlan): LaunchProfile {
   };
 }
 
+function dockerAnswersFromPlan(selectedPlan: SetupPlan): DockerSetupOptions | undefined {
+  const profileWrite = selectedPlan.writes.find((write) =>
+    write.path.endsWith(path.join(".relaybase", "docker-profile.json"))
+  );
+  if (!profileWrite) {
+    return undefined;
+  }
+  try {
+    const profile = JSON.parse(profileWrite.preview) as DockerProfile;
+    return {
+      service: profile.selectedService,
+      targetPort: profile.targetContainerPort,
+      healthPath: profile.healthPath,
+      startTimeoutMs: profile.timingsMs.pullBuild,
+      healthTimeoutMs: profile.timingsMs.healthWait,
+      stopTimeoutMs: profile.timingsMs.stop,
+      dependencyPortPolicy: profile.dependencyPortPolicy,
+      composeProfiles: profile.profiles,
+      startDockerDesktop: profile.approvals.startDockerDesktop
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 async function readLaunchProfile(cwd: string): Promise<LaunchProfile | undefined> {
   const profilePath = path.join(cwd, SETUP_DIR, PROFILE_FILE);
   try {
@@ -1423,7 +1755,7 @@ async function readLaunchProfile(cwd: string): Promise<LaunchProfile | undefined
 async function readSetupAnswers(
   answersPath: string | undefined,
   cwd: string
-): Promise<{ selectedPlanId?: string; envStrategy?: EnvStrategy; noStart?: boolean }> {
+): Promise<{ selectedPlanId?: string; envStrategy?: EnvStrategy; noStart?: boolean; docker?: DockerSetupOptions }> {
   if (!answersPath) {
     return {};
   }
@@ -1432,7 +1764,8 @@ async function readSetupAnswers(
   return {
     ...(typeof parsed.selectedPlanId === "string" ? { selectedPlanId: parsed.selectedPlanId } : {}),
     ...(isEnvStrategy(parsed.envStrategy) ? { envStrategy: parsed.envStrategy } : {}),
-    ...(typeof parsed.noStart === "boolean" ? { noStart: parsed.noStart } : {})
+    ...(typeof parsed.noStart === "boolean" ? { noStart: parsed.noStart } : {}),
+    ...(isDockerSetupOptions(parsed.docker) ? { docker: parsed.docker } : {})
   };
 }
 
@@ -1440,6 +1773,36 @@ function isEnvStrategy(value: unknown): value is EnvStrategy {
   return (
     value === "runtime-injection" || value === "env-relaybase-file" || value === "guarded-env-block" || value === "none"
   );
+}
+
+function isDockerSetupOptions(value: unknown): value is DockerSetupOptions {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  return (
+    (candidate.service === undefined || typeof candidate.service === "string") &&
+    (candidate.targetPort === undefined || validPort(candidate.targetPort)) &&
+    (candidate.healthPath === undefined || typeof candidate.healthPath === "string") &&
+    (candidate.startTimeoutMs === undefined || validTimeout(candidate.startTimeoutMs)) &&
+    (candidate.healthTimeoutMs === undefined || validTimeout(candidate.healthTimeoutMs)) &&
+    (candidate.stopTimeoutMs === undefined || validTimeout(candidate.stopTimeoutMs)) &&
+    (candidate.dependencyPortPolicy === undefined ||
+      candidate.dependencyPortPolicy === "internal-only" ||
+      candidate.dependencyPortPolicy === "preserve-existing") &&
+    (candidate.composeProfiles === undefined ||
+      (Array.isArray(candidate.composeProfiles) &&
+        candidate.composeProfiles.every((item) => typeof item === "string"))) &&
+    (candidate.startDockerDesktop === undefined || typeof candidate.startDockerDesktop === "boolean")
+  );
+}
+
+function validPort(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) > 0 && Number(value) <= 65535;
+}
+
+function validTimeout(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 100 && Number(value) <= 3_600_000;
 }
 
 function setupRootFromPlan(selectedPlan: SetupPlan): string {
@@ -1648,6 +2011,9 @@ function detectMonorepoHints(files: string[], packageJson?: PackageJson): string
 }
 
 function healthCandidates(framework: string, appKind: ProjectDetection["appKind"]): string[] {
+  if (appKind === "docker") {
+    return ["/api/health", "/health", "/"];
+  }
   if (appKind === "api") {
     return ["/health", "/api/health", "/"];
   }

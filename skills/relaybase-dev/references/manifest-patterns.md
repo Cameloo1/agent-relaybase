@@ -83,7 +83,7 @@ For Compose-backed apps, `relaybase configure` can write:
 .relaybase/scripts/relaybase-verify-stopped.ps1
 ```
 
-The profile records selected service, target container port, required/optional services, dependency ports, timing budgets, retry backoff, lifecycle states, Docker error taxonomy, evidence artifact names, redaction keys, dangerous Compose settings, and approval gates. The override maps Relaybase's assigned `PORT` to the selected service on `127.0.0.1` without editing the app Compose file.
+The profile records selected service, target container port, required/optional services, dependency port policy, timing budgets, retry backoff, lifecycle states, Docker error taxonomy, evidence artifact names, redaction keys, dangerous Compose settings, and approval gates. The override maps Relaybase's assigned `PORT` to the selected service on `127.0.0.1` without editing the app Compose file.
 
 Generated stop hooks run `docker compose down --remove-orphans` without `--volumes` and then verify containers and owned ports are gone. If cleanup verification fails, Relaybase must report `cleanup_failed`.
 

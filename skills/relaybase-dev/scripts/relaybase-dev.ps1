@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("preflight", "status", "register", "start", "stop", "restart", "logs", "url", "ensure-manifest", "verify", "diagnose-token", "check-stop", "route-check", "stream-logs", "docker-preflight", "compose-detect", "compose-status", "compose-health", "compose-logs", "compose-cleanup", "compose-verify-stop", "docker-diagnose")]
+  [ValidateSet("preflight", "status", "register", "start", "stop", "restart", "logs", "url", "ensure-manifest", "verify", "diagnose-token", "check-stop", "route-check", "stream-logs", "docker-preflight", "compose-detect", "compose-status", "compose-health", "compose-logs", "compose-cleanup", "compose-verify-stop", "docker-diagnose", "docker-prove")]
   [string]$Action,
 
   [string]$AppId,
@@ -912,6 +912,25 @@ function Invoke-DockerDiagnose {
   }
 }
 
+function Invoke-DockerProve {
+  $preflight = Invoke-DockerPreflight
+  $detect = Invoke-ComposeDetect
+  $status = Invoke-ComposeStatus
+  $health = Invoke-ComposeHealth
+  $logs = Invoke-ComposeLogs
+  $stopProof = Invoke-ComposeVerifyStop
+  [pscustomobject]@{
+    action = "docker-prove"
+    ok = ($preflight.ok -and $detect.ok -and $status.ok -and $health.ok -and $logs.ok -and $stopProof.ok)
+    preflight = $preflight
+    detect = $detect
+    status = $status
+    health = $health
+    logs = $logs
+    stopProof = $stopProof
+  }
+}
+
 try {
   switch ($Action) {
     "preflight" {
@@ -1066,6 +1085,11 @@ try {
     }
     "docker-diagnose" {
       $result = Invoke-DockerDiagnose
+      Write-Result $result
+      if (-not $result.ok) { exit 1 }
+    }
+    "docker-prove" {
+      $result = Invoke-DockerProve
       Write-Result $result
       if (-not $result.ok) { exit 1 }
     }

@@ -70,9 +70,44 @@ test("HTTP MCP rejects unauthorized mutation and accepts token auth", async () =
     const verified = await authorized.callTool({ name: "verify_app", arguments: { id: "managed-auth" } });
     assert.equal(verified.structuredContent?.state.routeReachable, true);
 
+    const readOnlyProof = await authorized.callTool({ name: "prove_app", arguments: { id: "managed-auth" } });
+    assert.equal(readOnlyProof.structuredContent?.mode, "read-only");
+    assert.equal(readOnlyProof.structuredContent?.lifecycleAttempted, false);
+
     const stopped = await authorized.callTool({ name: "stop_app", arguments: { id: "managed-auth" } });
     assert.equal(stopped.structuredContent?.runtime.status, "stopped");
     assert.equal(stopped.structuredContent?.state.stopVerification.ok, true);
+    await authorized.close();
+  } finally {
+    await hub.close();
+  }
+});
+
+test("MCP prove_app lifecycle proof is token-gated and verifies start logs stop cleanup", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-mcp-prove-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18230, portRangeEnd: 18240 });
+
+  try {
+    await hub.listen();
+    await registerManagedApp(hub.runtime.registry, "managed-prove");
+    const unauthenticated = await createHttpMcpClient(hub.address().port);
+    await assert.rejects(
+      () => unauthenticated.callTool({ name: "prove_app", arguments: { id: "managed-prove", lifecycle: true } }),
+      /UNAUTHORIZED_MUTATION/
+    );
+    await unauthenticated.close();
+
+    const authorized = await createHttpMcpClient(hub.address().port, hub.runtime.token);
+    const proof = await authorized.callTool({ name: "prove_app", arguments: { id: "managed-prove", lifecycle: true } });
+    assert.equal(proof.structuredContent?.mode, "lifecycle");
+    assert.equal(proof.structuredContent?.ok, true);
+    assert.equal(proof.structuredContent?.started, true);
+    assert.equal(proof.structuredContent?.stopped, true);
+    assert.ok(
+      (proof.structuredContent?.checks as Array<{ name: string; ok: boolean }>).some(
+        (check) => check.name === "stop-verification" && check.ok
+      )
+    );
     await authorized.close();
   } finally {
     await hub.close();
