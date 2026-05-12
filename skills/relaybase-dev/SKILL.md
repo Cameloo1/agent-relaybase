@@ -109,6 +109,19 @@ When MCP tools are unavailable, use the bundled helper:
 .\scripts\relaybase-dev.ps1 -Action check-stop -AppId notes
 ```
 
+Docker-aware helper actions are available for Compose-backed apps, but they are supporting diagnostics rather than new public app commands:
+
+```powershell
+.\scripts\relaybase-dev.ps1 -Action docker-preflight -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.ps1 -Action compose-detect -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.ps1 -Action compose-status -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.ps1 -Action compose-health -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.ps1 -Action compose-logs -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.ps1 -Action compose-cleanup -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.ps1 -Action compose-verify-stop -ManifestPath .\relaybase.app.json
+.\scripts\relaybase-dev.ps1 -Action docker-diagnose -ManifestPath .\relaybase.app.json
+```
+
 ## Stale Runtime Branch
 
 Treat stale processes as a first-class diagnosis branch:
@@ -154,6 +167,8 @@ Prefer a minimal manifest over ad hoc port selection:
 
 For agent-facing tools and data, prefer a child MCP `stdio` block instead of opening another app port. Read `references/manifest-patterns.md` when creating or modifying manifests.
 
+For Docker Compose apps, prefer the generated `.relaybase/docker-profile.json` plus app-owned PowerShell hook scripts. Relaybase should not parse Compose inside the daemon or remove volumes by default. The detailed current contract is in `docs/docker-compose-lifecycle.md`.
+
 ## Fallback Policy
 
 Direct ports are allowed only when:
@@ -172,3 +187,4 @@ When using fallback, say why Relaybase was skipped and what would restore Relayb
 - `references/manifest-patterns.md`: manifest examples and child MCP patterns.
 - `references/fallback-policy.md`: direct-port fallback rules and required reporting.
 - `references/windows-runtime.md`: Windows process, token, stale-runtime, and port troubleshooting.
+- `../../docs/docker-compose-lifecycle.md`: Docker Compose profile, generated hooks, diagnostics, and limits.

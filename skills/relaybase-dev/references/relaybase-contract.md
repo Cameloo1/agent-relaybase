@@ -156,3 +156,33 @@ Helper actions:
 ```
 
 `verify` is intentionally strict: it registers, starts, checks routed health, checks logs, stops, and verifies backend-port closure when the assigned port is known.
+
+## Docker Compose Contract
+
+Compose support is profile/script based. Relaybase core executes generic hooks; generated Docker scripts own Compose-specific commands.
+
+Docker profile path:
+
+```text
+.relaybase/docker-profile.json
+```
+
+Generated scripts:
+
+```text
+.relaybase/scripts/relaybase-prestart.ps1
+.relaybase/scripts/relaybase-start.ps1
+.relaybase/scripts/relaybase-stop.ps1
+.relaybase/scripts/relaybase-verify-stopped.ps1
+```
+
+Expected proof:
+
+- Docker daemon access and context output are checked before start.
+- Compose config is validated before start.
+- Blocked Compose settings fail prestart unless approved in the generated profile.
+- Relaybase-assigned `PORT` is mapped through `.relaybase/docker-compose.relaybase.yml`.
+- Docker hook evidence is written under `.relaybase/runs/`.
+- Stop keeps volumes by default and fails if project containers or owned ports survive.
+
+The current generated Docker hooks are PowerShell scripts. See `../../../docs/docker-compose-lifecycle.md` for the exact generated files, timing defaults, diagnostics, and current limits.

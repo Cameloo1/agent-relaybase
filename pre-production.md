@@ -1,7 +1,7 @@
 # Pre-Production Readiness Tracker
 
 Review timestamp: 2026-05-06 11:44:41 -05:00
-Last updated: 2026-05-11 12:05:30 -05:00
+Last updated: 2026-05-11 20:38:51 -05:00
 Baseline commit reviewed: `19bfbaf`
 Baseline verification: `npm.cmd test` passed 12/12 tests on 2026-05-06 11:44:41 -05:00
 Current milestone verification: `npm.cmd run verify` is the local/CI release gate and covers formatting, lint, typecheck, Node tests, Jest tests, and CLI smoke.
@@ -40,30 +40,32 @@ Primary references checked during this review:
 
 ## What Is Already Done
 
-| Logged                     | Area                      | Status | Evidence                                                                                                                                                  |
-| -------------------------- | ------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-05-06 11:42:18 -05:00 | GitHub baseline           | Done   | Initial commit `19bfbaf` pushed to `main`.                                                                                                                |
-| 2026-05-06 11:44:41 -05:00 | Local routing daemon      | Done   | `src/server.ts` creates one local hub listener and routes hub/app traffic.                                                                                |
-| 2026-05-06 11:44:41 -05:00 | Localhost default         | Done   | `src/state.ts` defaults to `127.0.0.1` and port `7777`.                                                                                                   |
-| 2026-05-06 11:44:41 -05:00 | Header routing            | Done   | `src/router.ts` resolves `X-Relaybase-App` before host routing.                                                                                           |
-| 2026-05-06 11:44:41 -05:00 | Human host routing        | Done   | `src/router.ts` maps `<app>.localhost` to app ids.                                                                                                        |
-| 2026-05-06 11:44:41 -05:00 | Reserved hub surface      | Done   | `/__hub` and `/__hub/api/*` are reserved before app routing.                                                                                              |
-| 2026-05-06 11:44:41 -05:00 | HTTP proxy                | Done   | `src/proxy.ts` proxies HTTP requests to app upstream ports.                                                                                               |
-| 2026-05-06 11:44:41 -05:00 | WebSocket-style upgrades  | Done   | `src/server.ts` and `src/proxy.ts` route upgrade sockets; tests cover a basic 101 upgrade.                                                                |
-| 2026-05-06 11:44:41 -05:00 | Basic TCP tunnel          | Done   | `src/tcpTunnel.ts` supports `RELAYBASE-TCP <app-id>` handshakes.                                                                                          |
-| 2026-05-06 11:44:41 -05:00 | App manifest validation   | Done   | `src/validation.ts` validates id, command, cwd, protocol, env, health URL, and fixed upstream port.                                                       |
-| 2026-05-06 11:44:41 -05:00 | Registry persistence      | Done   | `src/registry.ts` persists `registry.json` in the Relaybase state directory.                                                                              |
-| 2026-05-06 11:44:41 -05:00 | Managed process lifecycle | Done   | `src/processManager.ts` supports start, stop, restart, logs, health, and assigned ports.                                                                  |
-| 2026-05-06 11:44:41 -05:00 | CLI                       | Done   | `src/cli.ts` supports serve, register, start, stop, restart, status, and logs.                                                                            |
-| 2026-05-06 11:44:41 -05:00 | Dashboard                 | Done   | `src/dashboard.ts` renders registered apps and start/stop controls.                                                                                       |
-| 2026-05-06 11:44:41 -05:00 | Baseline tests            | Done   | 12 tests cover routing, dashboard smoke, WebSocket upgrade, lifecycle, conflicts, TCP tunnel, validation, and registry.                                   |
-| 2026-05-06 11:44:41 -05:00 | CI skeleton               | Done   | GitHub Actions runs tests with Node 24.                                                                                                                   |
-| 2026-05-11 12:05:30 -05:00 | Three-command CLI         | Done   | `relaybase configure`, `relaybase open`, and `relaybase health` are the public setup/launch/diagnosis flow.                                               |
-| 2026-05-11 12:05:30 -05:00 | Smart setup engine        | Done   | `src/setup.ts` detects project type, proposes launch architectures, writes guarded artifacts, saves setup reports, and supports MCP-driven configuration. |
-| 2026-05-11 12:05:30 -05:00 | Generic lifecycle hooks   | Done   | Manifests can define `preStartCommand`, `stopCommand`, `verifyStoppedCommand`, and lifecycle timeouts without making Relaybase Docker-specific.           |
-| 2026-05-11 12:05:30 -05:00 | Stop correctness          | Done   | Cleanup and stop-verification failures keep runtime state errored instead of reporting fake `stopped`.                                                    |
-| 2026-05-11 12:05:30 -05:00 | Expanded lifecycle tests  | Done   | Node tests cover setup planning, guarded writes, lifecycle hooks, stop failure, cleanup, serialization, MCP auth, and app state fields.                   |
-| 2026-05-11 12:05:30 -05:00 | Release verification gate | Done   | `npm.cmd run verify` runs format, lint, typecheck, Node tests, Jest, and CLI smoke locally and in CI.                                                     |
+| Logged                     | Area                      | Status | Evidence                                                                                                                                                             |
+| -------------------------- | ------------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-05-06 11:42:18 -05:00 | GitHub baseline           | Done   | Initial commit `19bfbaf` pushed to `main`.                                                                                                                           |
+| 2026-05-06 11:44:41 -05:00 | Local routing daemon      | Done   | `src/server.ts` creates one local hub listener and routes hub/app traffic.                                                                                           |
+| 2026-05-06 11:44:41 -05:00 | Localhost default         | Done   | `src/state.ts` defaults to `127.0.0.1` and port `7777`.                                                                                                              |
+| 2026-05-06 11:44:41 -05:00 | Header routing            | Done   | `src/router.ts` resolves `X-Relaybase-App` before host routing.                                                                                                      |
+| 2026-05-06 11:44:41 -05:00 | Human host routing        | Done   | `src/router.ts` maps `<app>.localhost` to app ids.                                                                                                                   |
+| 2026-05-06 11:44:41 -05:00 | Reserved hub surface      | Done   | `/__hub` and `/__hub/api/*` are reserved before app routing.                                                                                                         |
+| 2026-05-06 11:44:41 -05:00 | HTTP proxy                | Done   | `src/proxy.ts` proxies HTTP requests to app upstream ports.                                                                                                          |
+| 2026-05-06 11:44:41 -05:00 | WebSocket-style upgrades  | Done   | `src/server.ts` and `src/proxy.ts` route upgrade sockets; tests cover a basic 101 upgrade.                                                                           |
+| 2026-05-06 11:44:41 -05:00 | Basic TCP tunnel          | Done   | `src/tcpTunnel.ts` supports `RELAYBASE-TCP <app-id>` handshakes.                                                                                                     |
+| 2026-05-06 11:44:41 -05:00 | App manifest validation   | Done   | `src/validation.ts` validates id, command, cwd, protocol, env, health URL, and fixed upstream port.                                                                  |
+| 2026-05-06 11:44:41 -05:00 | Registry persistence      | Done   | `src/registry.ts` persists `registry.json` in the Relaybase state directory.                                                                                         |
+| 2026-05-06 11:44:41 -05:00 | Managed process lifecycle | Done   | `src/processManager.ts` supports start, stop, restart, logs, health, and assigned ports.                                                                             |
+| 2026-05-06 11:44:41 -05:00 | CLI                       | Done   | `src/cli.ts` supports serve, register, start, stop, restart, status, and logs.                                                                                       |
+| 2026-05-06 11:44:41 -05:00 | Dashboard                 | Done   | `src/dashboard.ts` renders registered apps and start/stop controls.                                                                                                  |
+| 2026-05-06 11:44:41 -05:00 | Baseline tests            | Done   | 12 tests cover routing, dashboard smoke, WebSocket upgrade, lifecycle, conflicts, TCP tunnel, validation, and registry.                                              |
+| 2026-05-06 11:44:41 -05:00 | CI skeleton               | Done   | GitHub Actions runs tests with Node 24.                                                                                                                              |
+| 2026-05-11 12:05:30 -05:00 | Three-command CLI         | Done   | `relaybase configure`, `relaybase open`, and `relaybase health` are the public setup/launch/diagnosis flow.                                                          |
+| 2026-05-11 12:05:30 -05:00 | Smart setup engine        | Done   | `src/setup.ts` detects project type, proposes launch architectures, writes guarded artifacts, saves setup reports, and supports MCP-driven configuration.            |
+| 2026-05-11 12:05:30 -05:00 | Generic lifecycle hooks   | Done   | Manifests can define `preStartCommand`, `stopCommand`, `verifyStoppedCommand`, and lifecycle timeouts without making Relaybase Docker-specific.                      |
+| 2026-05-11 12:05:30 -05:00 | Stop correctness          | Done   | Cleanup and stop-verification failures keep runtime state errored instead of reporting fake `stopped`.                                                               |
+| 2026-05-11 12:05:30 -05:00 | Expanded lifecycle tests  | Done   | Node tests cover setup planning, guarded writes, lifecycle hooks, stop failure, cleanup, serialization, MCP auth, and app state fields.                              |
+| 2026-05-11 12:05:30 -05:00 | Release verification gate | Done   | `npm.cmd run verify` runs format, lint, typecheck, Node tests, Jest, and CLI smoke locally and in CI.                                                                |
+| 2026-05-11 20:38:51 -05:00 | Docker Compose profile    | Done   | `relaybase configure --profile docker-compose` generates a Docker profile, Compose override, PowerShell lifecycle hooks, health diagnostics, and evidence artifacts. |
+| 2026-05-11 20:38:51 -05:00 | Docker stop verification  | Done   | Real Docker smoke verified generated prestart, foreground Compose start, host port reachability, `compose down`, verify-stopped, port closure, and cleanup.          |
 
 ## Current Production Blockers
 

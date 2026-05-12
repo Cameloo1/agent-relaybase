@@ -139,6 +139,30 @@ Apps can declare app-owned lifecycle hooks:
 
 Relaybase runs these as generic local commands. Docker, Compose, database, and service-specific details remain in the app repo scripts. Relaybase records hook output, exit codes, timeouts, and cleanup status, then refuses to report `stopped` when cleanup or stop verification fails.
 
+## Docker Compose Profile
+
+`relaybase configure` can generate an app-owned Docker profile for Compose-backed apps:
+
+```text
+.relaybase/docker-profile.json
+.relaybase/docker-compose.relaybase.yml
+.relaybase/scripts/relaybase-prestart.ps1
+.relaybase/scripts/relaybase-start.ps1
+.relaybase/scripts/relaybase-stop.ps1
+.relaybase/scripts/relaybase-verify-stopped.ps1
+```
+
+The manifest still uses generic hook fields. Docker-specific behavior lives in the generated profile and scripts:
+
+- `preStartCommand` checks Docker daemon access, context output, Compose plugin availability, Compose config, blocked settings, current Compose project status, and assigned-port conflicts.
+- `command` runs `docker compose up --build --remove-orphans` in the foreground so Relaybase owns logs and process state.
+- `stopCommand` runs `docker compose down --remove-orphans --timeout 30` and keeps volumes by default.
+- `verifyStoppedCommand` refuses success when Compose still reports project containers or Relaybase-owned ports remain open.
+
+The profile records lifecycle states, retry backoff, default timing budgets, selected service, target container port, dependency services, dependency ports, evidence artifact names, redaction keys, approval gates, and Docker error taxonomy. The current detector is heuristic and the generated prestart script still uses `docker compose config` as the authoritative validation step.
+
+See `docker-compose-lifecycle.md` for exact generated files, timeouts, diagnostics, risk checks, and current limits.
+
 ## App State Contract
 
 Relaybase exposes standard app state for dashboards and agents. Consumers should use this contract instead of rebuilding lifecycle, readiness, log, and access logic for each app.

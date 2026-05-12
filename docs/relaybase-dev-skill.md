@@ -69,6 +69,23 @@ Success means the Relaybase route works, routed health works, logs are available
 
 For app-owned infrastructure such as Docker Compose, keep the boundary sharp: the app repo owns Compose files and wrapper scripts; Relaybase owns lifecycle state, hook execution, logs, readiness proof, and refusal to report `stopped` when cleanup or stop verification fails.
 
+The helper now includes Docker-aware diagnostics for Compose-backed apps:
+
+```powershell
+.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action docker-preflight -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-detect -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-status -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-health -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-logs -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-cleanup -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action compose-verify-stop -ManifestPath .\relaybase.app.json
+.\skills\relaybase-dev\scripts\relaybase-dev.ps1 -Action docker-diagnose -ManifestPath .\relaybase.app.json
+```
+
+These actions read `.relaybase/docker-profile.json`; they are not separate user-facing setup commands.
+
+The exact Docker Compose behavior is documented in `docker-compose-lifecycle.md`.
+
 ## Troubleshooting Model
 
 The skill now treats these as first-class branches:

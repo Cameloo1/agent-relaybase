@@ -117,7 +117,7 @@ x-relaybase-token: <token>
 }
 ```
 
-Apps that own heavier local infrastructure, such as Docker Compose wrappers, can add app-owned lifecycle hooks without making Relaybase parse Compose files:
+Apps that own heavier local infrastructure can add app-owned lifecycle hooks:
 
 ```json
 {
@@ -138,7 +138,13 @@ Apps that own heavier local infrastructure, such as Docker Compose wrappers, can
 }
 ```
 
-Relaybase treats these hooks as generic app-owned commands. The app repo owns Docker/Compose details; Relaybase owns lifecycle state, logs, health proof, hook execution, and stop correctness.
+Relaybase treats these hooks as generic app-owned commands. The app repo owns domain-specific details; Relaybase owns lifecycle state, logs, health proof, hook execution, and stop correctness.
+
+## Docker Compose Apps
+
+When `relaybase configure` detects root-level Compose files, it can generate a Docker Compose profile and PowerShell hooks under `.relaybase/`. The generated override maps Relaybase's assigned `PORT` to the selected service on `127.0.0.1` without editing the app's Compose file.
+
+Docker support is profile/script based, not Docker SDK based. Stop is strict: generated hooks run `docker compose down --remove-orphans --timeout 30` without `--volumes`, then verify that Compose containers and Relaybase-owned ports are gone. See `docs/docker-compose-lifecycle.md` for the exact generated files, timeouts, diagnostics, risk checks, and current limits.
 
 Apps can also declare child MCP servers:
 

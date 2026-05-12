@@ -251,8 +251,8 @@ function parseOptions(args: string[]): CliOptions {
 
 async function configure(options: CliOptions): Promise<void> {
   let selectedPlanId = options.profile;
-  let envStrategy: EnvStrategy = "runtime-injection";
-  let noStart = options.noStart;
+  let envStrategy: EnvStrategy | undefined;
+  let noStart = options.noStart ? true : undefined;
 
   if (!options.yes && !options.json && process.stdin.isTTY && process.stdout.isTTY) {
     const detection = await detectProject(options.cwd);

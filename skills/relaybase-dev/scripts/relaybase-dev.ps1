@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("preflight", "status", "register", "start", "stop", "restart", "logs", "url", "ensure-manifest", "verify", "diagnose-token", "check-stop", "route-check", "stream-logs")]
+  [ValidateSet("preflight", "status", "register", "start", "stop", "restart", "logs", "url", "ensure-manifest", "verify", "diagnose-token", "check-stop", "route-check", "stream-logs", "docker-preflight", "compose-detect", "compose-status", "compose-health", "compose-logs", "compose-cleanup", "compose-verify-stop", "docker-diagnose")]
   [string]$Action,
 
   [string]$AppId,
@@ -741,6 +741,177 @@ function Invoke-Verify {
   }
 }
 
+function Get-DockerProfilePath {
+  $root = [System.IO.Path]::GetFullPath((Split-Path -Parent (Resolve-ManifestPath)))
+  return Join-Path $root ".relaybase\docker-profile.json"
+}
+
+function Get-DockerProfile {
+  $path = Get-DockerProfilePath
+  if (-not (Test-Path -LiteralPath $path)) {
+    return $null
+  }
+  (Get-Content -LiteralPath $path -Raw) | ConvertFrom-Json
+}
+
+function Invoke-DockerJson {
+  param([Parameter(Mandatory = $true)][string[]]$DockerArgs)
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $output = & docker @DockerArgs 2>&1
+    $code = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  if ($null -eq $code) {
+    $code = 1
+  }
+  [pscustomobject]@{
+    ok = ($code -eq 0)
+    exitCode = $code
+    command = "docker $($DockerArgs -join ' ')"
+    output = ($output -join "`n")
+  }
+}
+
+function Get-ComposeArgs {
+  param([Parameter(Mandatory = $true)]$Profile)
+  $args = @()
+  $root = [System.IO.Path]::GetFullPath((Split-Path -Parent (Resolve-ManifestPath)))
+  foreach ($file in @($Profile.composeFiles)) {
+    $args += @("-f", (Join-Path $root ([string]$file)))
+  }
+  if ($Profile.overrideFile) {
+    $args += @("-f", (Join-Path $root ([string]$Profile.overrideFile)))
+  }
+  foreach ($profileName in @($Profile.profiles)) {
+    $args += @("--profile", ([string]$profileName))
+  }
+  $args += @("-p", ([string]$Profile.composeProjectName))
+  return $args
+}
+
+function Invoke-ComposeJson {
+  param(
+    [Parameter(Mandatory = $true)]$Profile,
+    [Parameter(Mandatory = $true)][string[]]$ComposeArgs
+  )
+  Invoke-DockerJson -DockerArgs (@("compose") + (Get-ComposeArgs -Profile $Profile) + $ComposeArgs)
+}
+
+function Invoke-DockerPreflight {
+  $profile = Get-DockerProfile
+  $dockerVersion = Invoke-DockerJson -DockerArgs @("--version")
+  $dockerInfo = Invoke-DockerJson -DockerArgs @("info", "--format", "{{json .}}")
+  $context = Invoke-DockerJson -DockerArgs @("context", "show")
+  $composeVersion = Invoke-DockerJson -DockerArgs @("compose", "version")
+  [pscustomobject]@{
+    action = "docker-preflight"
+    ok = ($dockerVersion.ok -and $dockerInfo.ok -and $composeVersion.ok -and [bool]$profile)
+    profilePath = (Get-DockerProfilePath)
+    profile = $profile
+    dockerVersion = $dockerVersion
+    dockerInfo = $dockerInfo
+    context = $context
+    composeVersion = $composeVersion
+    remoteContextBlocked = [bool]($context.output -match "ssh://|tcp://|remote")
+  }
+}
+
+function Invoke-ComposeDetect {
+  $root = [System.IO.Path]::GetFullPath((Split-Path -Parent (Resolve-ManifestPath)))
+  $files = Get-ChildItem -LiteralPath $root -File | Where-Object { $_.Name -match "^(compose|docker-compose)\.ya?ml$" }
+  [pscustomobject]@{
+    action = "compose-detect"
+    ok = ($files.Count -gt 0)
+    root = $root
+    composeFiles = @($files | ForEach-Object { $_.FullName })
+    dockerProfile = Get-DockerProfile
+  }
+}
+
+function Invoke-ComposeStatus {
+  $profile = Get-DockerProfile
+  if (-not $profile) {
+    return [pscustomobject]@{ action = "compose-status"; ok = $false; error = "Docker profile not found." }
+  }
+  $ps = Invoke-ComposeJson -Profile $profile -ComposeArgs @("ps", "--format", "json")
+  [pscustomobject]@{ action = "compose-status"; ok = $ps.ok; profile = $profile; ps = $ps }
+}
+
+function Invoke-ComposeHealth {
+  $profile = Get-DockerProfile
+  if (-not $profile) {
+    return [pscustomobject]@{ action = "compose-health"; ok = $false; error = "Docker profile not found." }
+  }
+  $ps = Invoke-ComposeJson -Profile $profile -ComposeArgs @("ps", "--format", "json")
+  $config = Invoke-ComposeJson -Profile $profile -ComposeArgs @("config")
+  [pscustomobject]@{
+    action = "compose-health"
+    ok = ($ps.ok -and $config.ok)
+    selectedService = $profile.selectedService
+    requiredServices = $profile.requiredServices
+    optionalServices = $profile.optionalServices
+    ps = $ps
+    config = $config
+  }
+}
+
+function Invoke-ComposeLogs {
+  $profile = Get-DockerProfile
+  if (-not $profile) {
+    return [pscustomobject]@{ action = "compose-logs"; ok = $false; error = "Docker profile not found." }
+  }
+  $logs = Invoke-ComposeJson -Profile $profile -ComposeArgs @("logs", "--no-color", "--tail", "$Lines")
+  [pscustomobject]@{ action = "compose-logs"; ok = $logs.ok; logs = $logs }
+}
+
+function Invoke-ComposeCleanup {
+  $profile = Get-DockerProfile
+  if (-not $profile) {
+    return [pscustomobject]@{ action = "compose-cleanup"; ok = $false; error = "Docker profile not found." }
+  }
+  $down = Invoke-ComposeJson -Profile $profile -ComposeArgs @("down", "--remove-orphans", "--timeout", "30")
+  $verify = Invoke-ComposeVerifyStop
+  [pscustomobject]@{ action = "compose-cleanup"; ok = ($down.ok -and $verify.ok); down = $down; verify = $verify }
+}
+
+function Invoke-ComposeVerifyStop {
+  $profile = Get-DockerProfile
+  if (-not $profile) {
+    return [pscustomobject]@{ action = "compose-verify-stop"; ok = $false; error = "Docker profile not found." }
+  }
+  $ps = Invoke-ComposeJson -Profile $profile -ComposeArgs @("ps", "--format", "json")
+  $portChecks = @()
+  if ($BackendPort) {
+    $portChecks += [pscustomobject]@{ port = $BackendPort; open = (Test-TcpPortOpen -CheckPort $BackendPort) }
+  }
+  foreach ($port in @($profile.dependencyPorts)) {
+    $portChecks += [pscustomobject]@{ port = [int]$port; open = (Test-TcpPortOpen -CheckPort ([int]$port)) }
+  }
+  $survivingPort = $portChecks | Where-Object { $_.open } | Select-Object -First 1
+  $survivingContainers = ($ps.ok -and $ps.output.Trim().Length -gt 2)
+  [pscustomobject]@{
+    action = "compose-verify-stop"
+    ok = (-not $survivingContainers -and -not $survivingPort)
+    ps = $ps
+    portChecks = $portChecks
+    cleanupStatus = $(if ($survivingContainers -or $survivingPort) { "cleanup_failed" } else { "succeeded" })
+  }
+}
+
+function Invoke-DockerDiagnose {
+  [pscustomobject]@{
+    action = "docker-diagnose"
+    ok = $true
+    preflight = Invoke-DockerPreflight
+    detect = Invoke-ComposeDetect
+    status = Invoke-ComposeStatus
+    health = Invoke-ComposeHealth
+  }
+}
+
 try {
   switch ($Action) {
     "preflight" {
@@ -855,6 +1026,46 @@ try {
     }
     "verify" {
       $result = Invoke-Verify
+      Write-Result $result
+      if (-not $result.ok) { exit 1 }
+    }
+    "docker-preflight" {
+      $result = Invoke-DockerPreflight
+      Write-Result $result
+      if (-not $result.ok) { exit 1 }
+    }
+    "compose-detect" {
+      $result = Invoke-ComposeDetect
+      Write-Result $result
+      if (-not $result.ok) { exit 1 }
+    }
+    "compose-status" {
+      $result = Invoke-ComposeStatus
+      Write-Result $result
+      if (-not $result.ok) { exit 1 }
+    }
+    "compose-health" {
+      $result = Invoke-ComposeHealth
+      Write-Result $result
+      if (-not $result.ok) { exit 1 }
+    }
+    "compose-logs" {
+      $result = Invoke-ComposeLogs
+      Write-Result $result
+      if (-not $result.ok) { exit 1 }
+    }
+    "compose-cleanup" {
+      $result = Invoke-ComposeCleanup
+      Write-Result $result
+      if (-not $result.ok) { exit 1 }
+    }
+    "compose-verify-stop" {
+      $result = Invoke-ComposeVerifyStop
+      Write-Result $result
+      if (-not $result.ok) { exit 1 }
+    }
+    "docker-diagnose" {
+      $result = Invoke-DockerDiagnose
       Write-Result $result
       if (-not $result.ok) { exit 1 }
     }

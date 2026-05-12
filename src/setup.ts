@@ -4,6 +4,15 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  buildDockerComposeSetup,
+  classifyDockerFailure,
+  detectDockerCompose,
+  readDockerProfile,
+  type DockerComposeDetection,
+  type DockerErrorCode,
+  type DockerProfile
+} from "./dockerProfile.ts";
 import { Registry, readManifestFile } from "./registry.ts";
 import { DEFAULT_HOST, DEFAULT_PORT, getDefaultStateDir, getOrCreateSessionToken, isNodeErrno } from "./state.ts";
 import type { AppManifestInput, AppRecord, AppState } from "./types.ts";
@@ -66,6 +75,7 @@ export interface ProjectDetection {
   detectedPorts: number[];
   existingManifestPath?: string;
   dockerComposeFiles: string[];
+  docker?: DockerComposeDetection;
   mcpHints: string[];
   monorepoHints: string[];
   healthCandidates: string[];
@@ -153,6 +163,7 @@ export interface HealthCheckResult {
     launchProfilePath?: string;
     packageManager: string;
     framework: string;
+    docker?: DockerProfile;
   };
   state?: AppState;
   findings: HealthFinding[];
@@ -177,7 +188,7 @@ export interface LaunchFailureClassification {
     | "dependency-missing"
     | "crash-loop"
     | "stale-process"
-    | "unknown";
+    | DockerErrorCode;
   message: string;
   nextArchitectures: SetupArchitecture[];
   requiresApproval: boolean;
@@ -253,6 +264,7 @@ export async function detectProject(cwd: string): Promise<ProjectDetection> {
   const dockerComposeFiles = files
     .filter((file) => /^docker-compose\.(?:ya?ml)$|^compose\.(?:ya?ml)$/.test(file))
     .map((file) => path.join(root, file));
+  const docker = dockerComposeFiles.length ? await detectDockerCompose(root, dockerComposeFiles, envFiles) : undefined;
   const mcpHints = detectMcpHints(files, scripts, deps);
   const monorepoHints = detectMonorepoHints(files, packageJson);
 
@@ -270,6 +282,7 @@ export async function detectProject(cwd: string): Promise<ProjectDetection> {
     detectedPorts,
     ...(existingManifestPath ? { existingManifestPath } : {}),
     dockerComposeFiles,
+    ...(docker ? { docker } : {}),
     mcpHints,
     monorepoHints,
     healthCandidates: healthCandidates(framework, appKind)
@@ -380,30 +393,40 @@ export async function proposeSetupPlans(
   }
 
   if (detection.dockerComposeFiles.length) {
+    const dockerSetup = buildDockerComposeSetup(
+      detection.root,
+      baseManifest,
+      detection.docker ?? {
+        composeFiles: detection.dockerComposeFiles,
+        envFiles: detection.envFiles,
+        services: [],
+        requiredServices: [],
+        optionalServices: [],
+        dependencyPorts: [],
+        dangerousFindings: [],
+        missingEnvVars: [],
+        privateImages: [],
+        hostPublishedPorts: [],
+        dynamicPublishedPorts: [],
+        suggestedProjectName: `relaybase-${appId}`
+      }
+    );
     plans.push(
       plan({
         id: "docker-compose",
         label: "Docker Compose service",
         architecture: "docker-compose-service",
-        score: 45,
-        manifest: {
-          ...baseManifest,
-          command: "docker compose up --build",
-          healthUrl: String(baseManifest.healthUrl ?? "/")
-        },
+        score: detection.appKind === "docker" ? 92 : 45,
+        manifest: dockerSetup.manifest,
         detection,
         envStrategy,
-        reasons: [
-          "Compose files are present; Relaybase can supervise the compose command and route to the exposed service."
-        ],
-        risks: ["Requires Docker to be installed and service ports to be explicit."],
-        recoverySteps: ["If Docker is unavailable, retry with a package-manager launch profile."],
-        extraWrites: setupWrites(
-          detection.root,
-          { ...baseManifest, command: "docker compose up --build" },
-          envStrategy,
-          options.mcpInstall
-        )
+        reasons: dockerSetup.reasons,
+        risks: dockerSetup.risks,
+        recoverySteps: dockerSetup.recoverySteps,
+        extraWrites: [
+          ...setupWrites(detection.root, dockerSetup.manifest, envStrategy, options.mcpInstall),
+          ...dockerSetup.writes
+        ]
       })
     );
   }
@@ -633,6 +656,7 @@ export async function openProject(options: OpenProjectOptions): Promise<OpenProj
 export async function healthProject(options: HealthProjectOptions): Promise<HealthCheckResult> {
   const detection = await detectProject(options.cwd);
   const profile = await readLaunchProfile(options.cwd);
+  const dockerProfile = await readDockerProfile(detection.root);
   const manifestPath = detection.existingManifestPath ?? profile?.manifestPath;
   const daemon = await discovery(options);
   const findings: HealthFinding[] = [];
@@ -693,6 +717,35 @@ export async function healthProject(options: HealthProjectOptions): Promise<Heal
     });
   }
 
+  if (detection.dockerComposeFiles.length && !dockerProfile) {
+    findings.push({
+      severity: "warning",
+      code: "DOCKER_PROFILE_MISSING",
+      message: "Compose files were detected but no Relaybase Docker profile exists.",
+      repair: "Run relaybase configure and select the Docker Compose service profile."
+    });
+  }
+
+  if (dockerProfile) {
+    if (dockerProfile.missingEnvVars.length) {
+      findings.push({
+        severity: "error",
+        code: "COMPOSE_ENV_MISSING",
+        message: `Docker profile requires Compose env values: ${dockerProfile.missingEnvVars.join(", ")}.`,
+        repair: "Set the missing env values or configure an env-file profile before launch."
+      });
+    }
+    const blocked = dockerProfile.securityFindings.filter((finding) => finding.severity === "blocked");
+    if (blocked.length) {
+      findings.push({
+        severity: "error",
+        code: "DANGEROUS_COMPOSE_CONFIG",
+        message: `Docker profile contains blocked Compose settings: ${blocked.map((finding) => finding.code).join(", ")}.`,
+        repair: "Review the Compose file and approve or remove risky settings before launch."
+      });
+    }
+  }
+
   const ok =
     findings.every((finding) => finding.severity !== "error") && Boolean(daemon.reachable) && Boolean(manifestPath);
   return {
@@ -709,7 +762,8 @@ export async function healthProject(options: HealthProjectOptions): Promise<Heal
       ...(manifestPath ? { manifestPath } : {}),
       ...(profile ? { launchProfilePath: path.join(detection.root, SETUP_DIR, PROFILE_FILE) } : {}),
       packageManager: detection.packageManager,
-      framework: detection.framework
+      framework: detection.framework,
+      ...(dockerProfile ? { docker: dockerProfile } : {})
     },
     ...(state ? { state } : {}),
     findings,
@@ -724,6 +778,18 @@ export function classifyLaunchFailure(input: {
   runtimeStatus?: string;
 }): LaunchFailureClassification {
   const text = [input.error, input.lastError, ...(input.logs ?? [])].filter(Boolean).join("\n").toLowerCase();
+  const dockerFailure = classifyDockerFailure(text);
+  if (dockerFailure.code !== "unknown") {
+    return {
+      code: dockerFailure.code,
+      message: dockerFailure.message,
+      nextArchitectures: dockerFailure.retryable
+        ? ["docker-compose-service", "managed-dynamic-port"]
+        : ["managed-dynamic-port", "framework-port-flag"],
+      requiresApproval: dockerFailure.requiresApproval
+    };
+  }
+
   if (/corepack.*enoent|spawn corepack|corepack.*einval/.test(text)) {
     return {
       code: "corepack-spawn",
