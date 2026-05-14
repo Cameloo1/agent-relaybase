@@ -89,6 +89,8 @@ errored
 conflict
 ```
 
+The CLI and MCP `attention` list filter is a derived operator grouping, not a separate app-state value. It includes unhealthy or failed readiness, `errored` or `conflict` runtime status, cleanup or stop-verification failure phases, failed stop verification, or a recorded last error.
+
 Runtime health values:
 
 ```text

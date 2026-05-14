@@ -8,7 +8,7 @@ relaybase open
 relaybase health
 ```
 
-Advanced commands still exist for daemon work, dashboards, tests, and direct lifecycle control.
+`relaybase list` is the read-only app inventory view. Advanced commands still exist for daemon work, dashboards, tests, and direct lifecycle control.
 
 ## Shared Options
 
@@ -20,6 +20,17 @@ These options are parsed by the CLI:
 --state-dir <path>   Relaybase state directory.
 --cwd <path>         Project root. Default: current directory.
 --json               Print machine-readable output for supported commands.
+--verbose            Include expanded detail for supported commands.
+```
+
+List filters:
+
+```text
+--running            Apps with runtime status running.
+--active             Apps with runtime status starting, running, or stopping.
+--stopped            Apps with runtime status stopped.
+--ready              Apps with readiness state ready.
+--attention          Apps that need operator review.
 ```
 
 ## configure
@@ -88,6 +99,25 @@ Current finding codes include:
 - `DANGEROUS_COMPOSE_CONFIG`
 - `PROOF_FAILED`
 
+## list
+
+```powershell
+relaybase list
+relaybase list --running
+relaybase list --active
+relaybase list --stopped
+relaybase list --ready
+relaybase list --attention
+relaybase list --verbose
+relaybase list --json
+```
+
+`list` shows registered apps with their readiness, runtime status, health, route reachability, backend port, and next action. When the daemon is reachable, it reads `/__hub/api/state` so the CLI matches dashboard and MCP state. When the daemon is offline, it falls back to the registry and marks runtime, readiness, health, and route as `unknown`.
+
+Runtime filters require the daemon because Relaybase cannot prove running state from the registry alone. If the daemon is offline, filtered forms such as `relaybase list --running` fail with a clear message instead of pretending the registry is live state.
+
+`--attention` shows apps that need operator review: unhealthy or failed readiness, `errored` or `conflict` runtime status, cleanup or stop-verification failure phases, failed stop verification, or a recorded last error.
+
 ## Advanced Commands
 
 ```powershell
@@ -101,6 +131,6 @@ relaybase status
 relaybase logs <app-id>
 ```
 
-`serve` starts the localhost daemon. `mcp` runs Relaybase as a stdio MCP server. `register` writes a manifest into the state registry. `start`, `stop`, and `restart` call the daemon HTTP API and require the local mutation token. `status` lists apps from the daemon when it is reachable and falls back to the registry when it is not. `logs` prints the daemon's recent in-memory log snapshot for one app.
+`serve` starts the localhost daemon. `mcp` runs Relaybase as a stdio MCP server. `register` writes a manifest into the state registry. `start`, `stop`, and `restart` call the daemon HTTP API and require the local mutation token. `status` is a compatibility alias for `list`. `logs` prints the daemon's recent in-memory log snapshot for one app.
 
 The three-command flow remains the intended user path. These lower-level commands are useful for dashboards, tests, debugging, and automation.

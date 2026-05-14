@@ -25,6 +25,7 @@ import type {
   Resource,
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
+import { buildAppListResult, requireAppListFilter } from "./appListing.ts";
 import { getAllAppStates, getAppState } from "./appState.ts";
 import type { DockerSetupOptions } from "./dockerProfile.ts";
 import { readManifestFile } from "./registry.ts";
@@ -325,7 +326,13 @@ export class RelaybaseMcpService {
       {
         name: "list_apps",
         description: "List registered Relaybase apps and runtime state.",
-        inputSchema: objectSchema()
+        inputSchema: objectSchema({
+          filter: {
+            type: "string",
+            enum: ["all", "running", "active", "stopped", "ready", "attention"],
+            description: "Optional app list filter. Defaults to all."
+          }
+        })
       },
       {
         name: "app_status",
@@ -422,10 +429,7 @@ export class RelaybaseMcpService {
   ): Promise<CallToolResult> {
     switch (name) {
       case "list_apps":
-        return structuredToolResult({
-          apps: await this.runtime.processes.listStatuses(),
-          states: await getAllAppStates(this.runtime)
-        });
+        return structuredToolResult(await this.#listApps(args));
       case "configure_project":
         if (args.apply === true) {
           this.#requireMutationToken(extra, mutationAuthMode);
@@ -478,6 +482,27 @@ export class RelaybaseMcpService {
     }
 
     return this.runtime.registry.upsertManifest(args.manifest as Record<string, unknown>);
+  }
+
+  async #listApps(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const filter = requireAppListFilter(args.filter);
+    const apps = await this.runtime.processes.listStatuses();
+    const states = await getAllAppStates(this.runtime);
+    const listing = buildAppListResult({
+      states,
+      statuses: apps,
+      filter,
+      daemonReachable: true,
+      runtimeKnown: true
+    });
+
+    return {
+      apps,
+      states,
+      filter: listing.filter,
+      summary: listing.summary,
+      items: listing.items
+    };
   }
 
   async #configureProject(args: Record<string, unknown>): Promise<Record<string, unknown>> {

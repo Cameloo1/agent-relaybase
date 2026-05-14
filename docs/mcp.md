@@ -61,6 +61,8 @@ Token-gated mutation tools:
 
 `configure_project` uses the same setup engine as `relaybase configure`. With `apply: false`, it returns a dry-run plan. With `apply: true`, it may write project files, register the app, and optionally start verification. Docker Compose callers can pass `profile: "docker-compose"` with `service`, `targetPort`, `healthPath`, timeout fields, `dependencyPortPolicy`, and `dockerStartDesktop`.
 
+`list_apps` is read-only and does not require mutation auth. It accepts an optional `filter` value: `all`, `running`, `active`, `stopped`, `ready`, or `attention`. The response preserves the existing `apps` and `states` keys and also includes `filter`, `summary`, and `items`. `summary` counts registered, shown, running, active, ready, stopped, and attention apps. `items` is the compact list shape used by the CLI, with id, name, readiness, runtime, health, route, port, action, attention, and optional verbose fields such as cwd, manifest path, phase, logs, child MCP summary, stop verification, and last error.
+
 `prove_app` returns a proof snapshot. With `lifecycle: false` or omitted, it is read-only. With `lifecycle: true`, it starts the app, checks routed health and logs, stops the app, and verifies cleanup.
 
 `tail_logs` returns a snapshot. Its `follow` argument is accepted for compatibility, but the tool response marks follow as not accepted. Use the HTTP log stream for live logs.

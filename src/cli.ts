@@ -1,9 +1,18 @@
 import http from "node:http";
 import readline from "node:readline";
+import {
+  buildAppListResult,
+  buildOfflineAppListResult,
+  listFilterNeedsRuntime,
+  type AppListFilter,
+  type AppListItem,
+  type AppListResult
+} from "./appListing.ts";
 import type { DockerComposeDetection, DockerSetupOptions } from "./dockerProfile.ts";
 import { createRelaybaseServer } from "./server.ts";
 import { Registry, readManifestFile } from "./registry.ts";
 import { DEFAULT_HOST, DEFAULT_PORT, getDefaultStateDir, getOrCreateSessionToken } from "./state.ts";
+import type { AppState, AppStatusView } from "./types.ts";
 import {
   configureProject,
   defaultCommandOptions,
@@ -31,6 +40,8 @@ interface CliOptions {
   repair: boolean;
   mcpInstall: boolean;
   prove: boolean;
+  verbose: boolean;
+  listFilter: AppListFilter;
   profile?: string;
   answersPath?: string;
   docker: DockerSetupOptions;
@@ -56,6 +67,9 @@ async function main(): Promise<void> {
     case "health":
       await health(options);
       return;
+    case "list":
+      await listApps(options);
+      return;
     case "serve":
       await serve(options);
       return;
@@ -71,7 +85,7 @@ async function main(): Promise<void> {
       await mutateApp(command, requiredArg(args[0], command), options);
       return;
     case "status":
-      await status(options);
+      await listApps(options);
       return;
     case "logs":
       await logs(requiredArg(args[0], "logs"), options);
@@ -127,46 +141,52 @@ async function register(manifestPath: string | undefined, options: CliOptions): 
   console.log(`Registered ${app.id} (${app.name})`);
 }
 
-async function status(options: CliOptions): Promise<void> {
-  const response = await apiRequest(options, "GET", "/__hub/api/apps");
-  if (!response.ok) {
+async function listApps(options: CliOptions): Promise<void> {
+  const stateResponse = await apiRequest(options, "GET", "/__hub/api/state");
+  if (!stateResponse.ok) {
+    if (listFilterNeedsRuntime(options.listFilter)) {
+      throw new Error(
+        `Relaybase server is not reachable, so --${options.listFilter} cannot be proven. Run relaybase serve or use relaybase list without runtime filters.`
+      );
+    }
+
     const registry = new Registry(options.stateDir);
     await registry.load();
     const apps = await registry.list();
+    const result = buildOfflineAppListResult({ apps, filter: options.listFilter });
+
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
     if (!apps.length) {
       console.log("No apps registered. Relaybase server is not running.");
       return;
     }
 
-    console.table(
-      apps.map((app) => ({
-        id: app.id,
-        name: app.name,
-        status: "offline",
-        port: app.upstreamPort ?? ""
-      }))
-    );
-    console.log("Relaybase server is not running.");
+    printAppList(result, options);
+    console.log(`Relaybase server is not running. Showing registry only (${result.summary.registered} registered).`);
     return;
   }
 
-  const body = JSON.parse(response.body) as {
-    apps: Array<{
-      id: string;
-      name: string;
-      runtime: { status: string; health: string; assignedPort?: number };
-      upstreamPort?: number;
-    }>;
-  };
-  console.table(
-    body.apps.map((app) => ({
-      id: app.id,
-      name: app.name,
-      status: app.runtime.status,
-      health: app.runtime.health,
-      port: app.runtime.assignedPort ?? app.upstreamPort ?? ""
-    }))
-  );
+  const stateBody = JSON.parse(stateResponse.body) as { apps: AppState[] };
+  const appsResponse = await apiRequest(options, "GET", "/__hub/api/apps");
+  const appsBody = appsResponse.ok ? (JSON.parse(appsResponse.body) as { apps: AppStatusView[] }) : { apps: [] };
+  const result = buildAppListResult({
+    states: stateBody.apps,
+    statuses: appsBody.apps,
+    filter: options.listFilter,
+    daemonReachable: true,
+    runtimeKnown: true
+  });
+
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  printAppList(result, options);
 }
 
 async function mutateApp(action: string, id: string, options: CliOptions): Promise<void> {
@@ -202,6 +222,68 @@ async function logs(id: string, options: CliOptions): Promise<void> {
   console.log(body.logs.join("\n"));
 }
 
+function printAppList(result: AppListResult, options: CliOptions): void {
+  if (!result.items.length) {
+    if (result.summary.registered === 0) {
+      console.log("No apps registered.");
+    } else {
+      console.log(`No apps match filter: ${result.filter}.`);
+    }
+    console.log(appListSummaryLine(result));
+    return;
+  }
+
+  console.table(result.items.map((item) => (options.verbose ? verboseAppRow(item) : compactAppRow(item))));
+  console.log(appListSummaryLine(result));
+}
+
+function compactAppRow(item: AppListItem): Record<string, string | number> {
+  return {
+    id: item.id,
+    name: item.name,
+    readiness: item.readiness,
+    runtime: item.runtime,
+    health: item.health,
+    route: item.route,
+    port: item.port ?? "",
+    action: item.action
+  };
+}
+
+function verboseAppRow(item: AppListItem): Record<string, string | number> {
+  return {
+    ...compactAppRow(item),
+    phase: item.phase ?? "",
+    pid: item.pid ?? "",
+    logs: item.logs ?? "",
+    cwd: item.cwd ?? "",
+    manifest: item.manifestPath ?? "",
+    mcp: item.childMcp
+      ? `${item.childMcp.total} total, ${item.childMcp.connected} connected, ${item.childMcp.errored} errored`
+      : "",
+    stop: item.stopVerification
+      ? `${item.stopVerification.ok ? "ok" : "failed"}${
+          item.stopVerification.cleanupStatus ? `/${item.stopVerification.cleanupStatus}` : ""
+        }`
+      : "",
+    error: item.lastError ?? item.attentionReason ?? ""
+  };
+}
+
+function appListSummaryLine(result: AppListResult): string {
+  const source = result.daemonReachable ? "daemon" : "registry";
+  return [
+    `${result.summary.shown}/${result.summary.registered} shown`,
+    `${result.summary.running} running`,
+    `${result.summary.active} active`,
+    `${result.summary.ready} ready`,
+    `${result.summary.stopped} stopped`,
+    `${result.summary.attention} attention`,
+    `filter=${result.filter}`,
+    `source=${source}`
+  ].join(", ");
+}
+
 function parseOptions(args: string[]): CliOptions {
   const defaults = defaultCommandOptions();
   const options: CliOptions = {
@@ -217,6 +299,8 @@ function parseOptions(args: string[]): CliOptions {
     repair: false,
     mcpInstall: false,
     prove: false,
+    verbose: false,
+    listFilter: "all",
     docker: {}
   };
 
@@ -232,6 +316,18 @@ function parseOptions(args: string[]): CliOptions {
       options.cwd = requiredArg(args[++index], "--cwd");
     } else if (arg === "--json") {
       options.json = true;
+    } else if (arg === "--verbose") {
+      options.verbose = true;
+    } else if (arg === "--running") {
+      setListFilter(options, "running");
+    } else if (arg === "--active") {
+      setListFilter(options, "active");
+    } else if (arg === "--stopped") {
+      setListFilter(options, "stopped");
+    } else if (arg === "--ready") {
+      setListFilter(options, "ready");
+    } else if (arg === "--attention") {
+      setListFilter(options, "attention");
     } else if (arg === "--yes" || arg === "-y") {
       options.yes = true;
     } else if (arg === "--dry-run") {
@@ -283,6 +379,13 @@ function parseOptions(args: string[]): CliOptions {
   }
 
   return options;
+}
+
+function setListFilter(options: CliOptions, filter: AppListFilter): void {
+  if (options.listFilter !== "all" && options.listFilter !== filter) {
+    throw new Error("Use only one app list filter.");
+  }
+  options.listFilter = filter;
 }
 
 async function configure(options: CliOptions): Promise<void> {
@@ -434,10 +537,17 @@ Commands:
   configure                     Set up or repair the current project for Relaybase
   open                          Start the configured app and open its Relaybase route
   health                        Inspect Relaybase, project config, route, logs, and readiness
+  list                          List registered apps and runtime state
 
 Advanced:
   serve                         Start the localhost hub daemon
   mcp                           Run Relaybase as a stdio MCP server
+  register <manifest>           Register or update an app manifest
+  start <app-id>                 Start an app through the daemon
+  stop <app-id>                  Stop an app through the daemon
+  restart <app-id>               Restart an app through the daemon
+  status                        Alias for list
+  logs <app-id>                  Print recent in-memory logs for one app
 
 Options:
   --port <number>                Hub port, default 7777
@@ -445,6 +555,14 @@ Options:
   --state-dir <path>             Relaybase state directory
   --cwd <path>                   Project root, default current directory
   --json                         Print machine-readable output
+  --verbose                      Include expanded detail for supported commands
+
+List options:
+  --running                      Show apps with runtime status running
+  --active                       Show apps with runtime status starting, running, or stopping
+  --stopped                      Show apps with runtime status stopped
+  --ready                        Show apps with readiness state ready
+  --attention                    Show apps with unhealthy, failed, errored, conflicted, or cleanup-failed state
 
 Configure options:
   --yes                          Use the recommended setup without interactive questions

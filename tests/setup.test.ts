@@ -16,6 +16,7 @@ import {
   openProject,
   proposeSetupPlans
 } from "../src/setup.ts";
+import type { AppManifestInput } from "../src/types.ts";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -232,6 +233,111 @@ test("CLI configure replays saved answers for env strategy and launch verificati
   assert.equal(result.verification.attempted, false);
   assert.ok(await exists(path.join(project, ".env.relaybase")));
   assert.ok(await exists(path.join(project, ".relaybase", "launch.cjs")));
+});
+
+test("CLI list reports empty and offline registry state honestly", async () => {
+  const emptyStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-list-empty-"));
+  const empty = await runRelaybaseCli(["list", "--state-dir", emptyStateDir, "--port", "1"]);
+  assert.equal(empty.code, 0);
+  assert.match(empty.stdout, /No apps registered/);
+
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-list-offline-"));
+  const registry = new Registry(stateDir);
+  await registry.load();
+  await registry.upsertManifest({
+    id: "offline-app",
+    name: "Offline App",
+    command: "external",
+    cwd: rootDir,
+    protocol: "http",
+    upstreamPort: 34567
+  });
+
+  const listed = await runRelaybaseCli(["list", "--json", "--state-dir", stateDir, "--port", "1"]);
+  assert.equal(listed.code, 0);
+  const body = JSON.parse(listed.stdout);
+  assert.equal(body.daemonReachable, false);
+  assert.equal(body.runtimeKnown, false);
+  assert.equal(body.summary.registered, 1);
+  assert.equal(body.items[0].id, "offline-app");
+  assert.equal(body.items[0].runtime, "unknown");
+  assert.equal(body.items[0].readiness, "unknown");
+
+  const filtered = await runRelaybaseCli(["list", "--running", "--state-dir", stateDir, "--port", "1"]);
+  assert.notEqual(filtered.code, 0);
+  assert.match(filtered.stderr, /cannot be proven/);
+});
+
+test("CLI list filters online daemon state and keeps status as an alias", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-list-online-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18600, portRangeEnd: 18630 });
+
+  try {
+    await hub.listen();
+    await registerCliListApp(hub.runtime.registry, "running-app", "Running App");
+    await registerCliListApp(hub.runtime.registry, "stopped-app", "Stopped App");
+    await registerCliListApp(hub.runtime.registry, "attention-app", "Attention App", {
+      preStartCommand: `"${process.execPath}" -e "process.exit(1)"`
+    });
+
+    await hub.runtime.processes.start("running-app");
+    await hub.runtime.processes.start("attention-app");
+
+    const commonArgs = ["--json", "--state-dir", stateDir, "--port", String(hub.address().port)];
+    const all = await runRelaybaseCliJson(["list", ...commonArgs]);
+    assert.equal(all.summary.registered, 3);
+    assert.equal(all.summary.running, 1);
+    assert.equal(all.summary.ready, 1);
+    assert.equal(all.summary.stopped, 1);
+    assert.equal(all.summary.attention, 1);
+    assert.deepEqual(all.items.map((item: { id: string }) => item.id).sort(), [
+      "attention-app",
+      "running-app",
+      "stopped-app"
+    ]);
+
+    const running = await runRelaybaseCliJson(["list", "--running", ...commonArgs]);
+    assert.deepEqual(
+      running.items.map((item: { id: string }) => item.id),
+      ["running-app"]
+    );
+
+    const active = await runRelaybaseCliJson(["list", "--active", ...commonArgs]);
+    assert.deepEqual(
+      active.items.map((item: { id: string }) => item.id),
+      ["running-app"]
+    );
+
+    const ready = await runRelaybaseCliJson(["list", "--ready", ...commonArgs]);
+    assert.deepEqual(
+      ready.items.map((item: { id: string }) => item.id),
+      ["running-app"]
+    );
+
+    const attention = await runRelaybaseCliJson(["list", "--attention", ...commonArgs]);
+    assert.equal(attention.items.length, 1);
+    assert.equal(attention.items[0].id, "attention-app");
+    assert.match(String(attention.items[0].attentionReason), /preStart hook exited/);
+
+    const statusAlias = await runRelaybaseCliJson(["status", ...commonArgs]);
+    assert.equal(statusAlias.summary.registered, all.summary.registered);
+    assert.equal(statusAlias.items.length, all.items.length);
+
+    const verbose = await runRelaybaseCli([
+      "list",
+      "--verbose",
+      "--state-dir",
+      stateDir,
+      "--port",
+      String(hub.address().port)
+    ]);
+    assert.equal(verbose.code, 0);
+    assert.match(verbose.stdout, /cwd/);
+    assert.match(verbose.stdout, /running-app/);
+  } finally {
+    await hub.runtime.processes.stop("running-app").catch(() => undefined);
+    await hub.close();
+  }
 });
 
 test("configure generates a Docker Compose profile, override, lifecycle hooks, and evidence contract", async () => {
@@ -719,8 +825,35 @@ test("classifies launch failures into actionable recovery architectures", () => 
   );
 });
 
+async function registerCliListApp(
+  registry: Registry,
+  id: string,
+  name: string,
+  overrides: Partial<AppManifestInput> = {}
+): Promise<void> {
+  const fixture = path.join(rootDir, "tests", "fixtures", "fake-managed-app.ts");
+  await registry.upsertManifest({
+    id,
+    name,
+    command: `"${process.execPath}" --experimental-strip-types "${fixture}"`,
+    cwd: rootDir,
+    protocol: "http",
+    healthUrl: "/health",
+    ...overrides
+  });
+}
+
 async function runRelaybaseCliJson(args: string[]): Promise<Record<string, any>> {
-  const result = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+  const result = await runRelaybaseCli(args);
+  if (result.code !== 0) {
+    throw new Error(`relaybase CLI exited ${result.code}\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`);
+  }
+
+  return JSON.parse(result.stdout) as Record<string, any>;
+}
+
+function runRelaybaseCli(args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
       ["--experimental-strip-types", path.join(rootDir, "src", "cli.ts"), ...args],
@@ -748,15 +881,9 @@ async function runRelaybaseCliJson(args: string[]): Promise<Record<string, any>>
     });
     child.once("close", (code) => {
       clearTimeout(timer);
-      if (code !== 0) {
-        reject(new Error(`relaybase CLI exited ${code}\nSTDOUT:\n${stdout}\nSTDERR:\n${stderr}`));
-        return;
-      }
-      resolve({ stdout, stderr });
+      resolve({ code, stdout, stderr });
     });
   });
-
-  return JSON.parse(result.stdout) as Record<string, any>;
 }
 
 function runCommand(

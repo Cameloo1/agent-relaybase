@@ -43,6 +43,15 @@ test("HTTP MCP rejects unauthorized mutation and accepts token auth", async () =
     await registerManagedApp(hub.runtime.registry, "managed-auth");
 
     const unauthorized = await createHttpMcpClient(hub.address().port);
+    const readOnlyList = await unauthorized.callTool({ name: "list_apps", arguments: { filter: "stopped" } });
+    assert.equal(readOnlyList.structuredContent?.summary.stopped, 1);
+    assert.equal((readOnlyList.structuredContent?.items as Array<{ id: string }>)[0].id, "managed-auth");
+    assert.equal((readOnlyList.structuredContent?.apps as Array<{ id: string }>)[0].id, "managed-auth");
+    assert.equal((readOnlyList.structuredContent?.states as Array<{ id: string }>)[0].id, "managed-auth");
+    await assert.rejects(
+      () => unauthorized.callTool({ name: "list_apps", arguments: { filter: "bogus" } }),
+      /App list filter/
+    );
     await assert.rejects(
       () => unauthorized.callTool({ name: "start_app", arguments: { id: "managed-auth" } }),
       /UNAUTHORIZED_MUTATION/
@@ -53,6 +62,10 @@ test("HTTP MCP rejects unauthorized mutation and accepts token auth", async () =
     const started = await authorized.callTool({ name: "start_app", arguments: { id: "managed-auth" } });
     assert.equal(started.structuredContent?.runtime.status, "running");
     assert.equal(started.structuredContent?.state.routeReachable, true);
+
+    const runningList = await authorized.callTool({ name: "list_apps", arguments: { filter: "running" } });
+    assert.equal(runningList.structuredContent?.summary.running, 1);
+    assert.equal((runningList.structuredContent?.items as Array<{ id: string }>)[0].id, "managed-auth");
 
     const appStatus = await authorized.callTool({ name: "app_status", arguments: { id: "managed-auth" } });
     assert.equal(appStatus.structuredContent?.app.registered, true);

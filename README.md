@@ -25,6 +25,8 @@ relaybase health
 
 `relaybase health --prove` writes a proof bundle. Add `--yes` when you want it to run lifecycle proof: register, start, routed health, logs, stop, and cleanup verification.
 
+`relaybase list` is the read-only operator view for all registered apps. It shows runtime state from the daemon when available, falls back to registry-only state when the daemon is offline, and supports filters such as `--running`, `--ready`, and `--attention`.
+
 ## What Relaybase Provides
 
 - Stable human routes: `http://<app-id>.localhost:7777`
