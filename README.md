@@ -78,6 +78,7 @@ Read-only MCP calls do not require mutation auth. HTTP mutation tools require th
 | Manifest fields and validation                    | [docs/app-manifest.md](docs/app-manifest.md)                         |
 | MCP endpoints, tools, resources, prompts, auth    | [docs/mcp.md](docs/mcp.md)                                           |
 | App state, readiness, routes, logs, stop checks   | [docs/app-state.md](docs/app-state.md)                               |
+| Codex workflow and repo-local Relaybase skill     | [docs/relaybase-dev-skill.md](docs/relaybase-dev-skill.md)           |
 | Docker Compose setup and limits                   | [docs/docker-compose-lifecycle.md](docs/docker-compose-lifecycle.md) |
 | Local security defaults and current product scope | [docs/security-and-limits.md](docs/security-and-limits.md)           |
 

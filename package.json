@@ -10,7 +10,8 @@
     "bin/",
     "src/",
     "docs/",
-    "examples/"
+    "examples/",
+    "skills/"
   ],
   "scripts": {
     "serve": "node --experimental-strip-types src/cli.ts serve",

@@ -647,7 +647,8 @@ test("skill docs prefer the Windows wrapper for direct helper actions", async ()
   const docs = [
     "skills/relaybase-dev/SKILL.md",
     "skills/relaybase-dev/references/windows-runtime.md",
-    "skills/relaybase-dev/references/relaybase-contract.md"
+    "skills/relaybase-dev/references/relaybase-contract.md",
+    "docs/relaybase-dev-skill.md"
   ];
 
   for (const relativePath of docs) {
