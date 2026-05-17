@@ -1,6 +1,6 @@
 # CLI
 
-Relaybase keeps the normal operator surface to three commands:
+Relaybase's normal operator surface is intentionally small:
 
 ```powershell
 relaybase configure
@@ -8,11 +8,9 @@ relaybase open
 relaybase health
 ```
 
-`relaybase list` is the read-only app inventory view. Advanced commands still exist for daemon work, dashboards, tests, and direct lifecycle control.
+Use `relaybase list` for the read-only app inventory. Lower-level commands remain available for automation and direct lifecycle control.
 
 ## Shared Options
-
-These options are parsed by the CLI:
 
 ```text
 --port <number>      Hub port. Default: 7777 or RELAYBASE_PORT.
@@ -23,15 +21,7 @@ These options are parsed by the CLI:
 --verbose            Include expanded detail for supported commands.
 ```
 
-List filters:
-
-```text
---running            Apps with runtime status running.
---active             Apps with runtime status starting, running, or stopping.
---stopped            Apps with runtime status stopped.
---ready              Apps with readiness state ready.
---attention          Apps that need operator review.
-```
+`--json` results can include `nextActions`: concrete follow-up actions with an owner, command when available, and evidence when Relaybase can name the failing boundary.
 
 ## configure
 
@@ -39,28 +29,24 @@ List filters:
 relaybase configure
 relaybase configure --yes
 relaybase configure --dry-run
-relaybase configure --profile docker-compose
-relaybase configure --profile docker-compose --service web --target-port 3000 --health-path /api/health --start-timeout-ms 600000
 relaybase configure --repair
 relaybase configure --no-start
 relaybase configure --mcp-install
 relaybase configure --answers .relaybase/setup.answers.json
 ```
 
-`configure` runs the setup engine for the project root. In an interactive terminal, it asks arrow-key questions for the setup architecture, env strategy, and whether to start and verify through Relaybase immediately.
+`configure` detects the project, chooses a setup plan, writes guarded Relaybase files, registers the app, and can start verification through Relaybase.
 
-Noninteractive mode uses the recommended plan unless `--profile` or `--answers` selects one. `--dry-run` returns the plan without writing files. `--yes` allows approved repair retries when verification fails and the setup engine has a matching alternate plan. `--repair` re-runs setup as a repair flow.
+`--dry-run` returns the selected plan and the manifest that would be written without changing files. `--repair` reruns setup as a repair flow. `--yes` allows approved repair retries when verification fails and the setup engine has a matching alternate plan.
 
-For Docker Compose projects, `--service`, `--target-port`, `--health-path`, `--start-timeout-ms`, `--health-timeout-ms`, `--stop-timeout-ms`, `--dependency-port-policy`, `--compose-profile`, and `--docker-start-desktop` feed the same setup flow. Ambiguous Compose projects require an explicit service and target port instead of guessing.
+Docker Compose projects can use:
 
-Env strategies:
+```powershell
+relaybase configure --profile docker-compose
+relaybase configure --profile docker-compose --service web --target-port 3000 --health-path /api/health
+```
 
-- `runtime-injection`: do not write env files; Relaybase injects runtime variables when it starts the app.
-- `env-relaybase-file`: write `.env.relaybase` with Relaybase-owned hints.
-- `guarded-env-block`: update only the guarded `# relaybase:start` to `# relaybase:end` block in `.env`.
-- `none`: do not write Relaybase env values.
-
-Applied setup can write `relaybase.app.json`, `.relaybase/launch-profile.json`, `.relaybase/setup.answers.json`, `.relaybase/rollback.json`, `.relaybase/setup-report.json`, and `.relaybase/runs/<timestamp>.jsonl`. Some setup plans write additional helper files.
+Ambiguous Compose projects require explicit service and target-port input instead of guessing.
 
 ## open
 
@@ -70,9 +56,11 @@ relaybase open --no-browser
 relaybase open --json
 ```
 
-`open` loads `.relaybase/launch-profile.json` when present, otherwise it uses `relaybase.app.json` in the project root. It registers the manifest, starts the daemon when needed, asks the daemon to start the app, reads app state, and opens `http://<app-id>.localhost:<port>` only when the app is ready unless `--no-browser` is set.
+`open` is the daily launch command. It reads the launch profile or root manifest, ensures the daemon, registers through the daemon when it is reachable, starts the app, checks readiness, and opens the stable human route when ready.
 
-If the project is not configured, it reports that `relaybase configure` must run first.
+If daemon registration is possible, `open` uses that path before local registry mutation. Local registry writes are fallback behavior for offline daemon cases.
+
+When launch fails, `open --json` returns the failing owner when Relaybase can identify it, such as daemon, manifest, token, app command, backend port, health URL, route, or permissions.
 
 ## health
 
@@ -83,16 +71,17 @@ relaybase health --prove
 relaybase health --prove --yes
 ```
 
-`health` is read-only by default. It detects the project, reads launch profile and Docker profile data when present, checks whether the daemon is reachable, reads app state when the daemon and app id are available, and returns findings with repair suggestions.
+`health` is read-only by default. It checks project configuration, daemon reachability, app state, route health, Docker profile findings, and repair suggestions.
 
-`health --prove` writes a proof artifact under `.relaybase/runs/` with discovery, manifest, Docker profile, current state, and log checks. `health --prove --yes` also runs a lifecycle proof: register, start, routed health, logs, stop, and stop verification.
+`health --prove` writes a proof artifact under `.relaybase/runs/` with discovery, manifest, Docker profile, state, and log checks. `health --prove --yes` also runs a lifecycle proof: register, start, routed health, logs, stop, and stop verification.
 
-Current finding codes include:
+Current finding codes:
 
 - `PROJECT_NOT_CONFIGURED`
 - `DAEMON_UNREACHABLE`
 - `APP_NOT_READY`
 - `APP_STATE_UNAVAILABLE`
+- `ROUTE_DEGRADED`
 - `PROFILE_MANIFEST_MISMATCH`
 - `DOCKER_PROFILE_MISSING`
 - `COMPOSE_ENV_MISSING`
@@ -112,11 +101,13 @@ relaybase list --verbose
 relaybase list --json
 ```
 
-`list` shows registered apps with their readiness, runtime status, health, route reachability, backend port, and next action. When the daemon is reachable, it reads `/__hub/api/state` so the CLI matches dashboard and MCP state. When the daemon is offline, it falls back to the registry and marks runtime, readiness, health, and route as `unknown`.
+`list` shows registered apps with readiness, runtime status, health, route reachability, backend port, and next action.
 
-Runtime filters require the daemon because Relaybase cannot prove running state from the registry alone. If the daemon is offline, filtered forms such as `relaybase list --running` fail with a clear message instead of pretending the registry is live state.
+When the daemon is reachable, `list` reads live daemon state. When the daemon is offline, it falls back to the registry and marks runtime, readiness, health, and route as `unknown`.
 
-`--attention` shows apps that need operator review: unhealthy or failed readiness, `errored` or `conflict` runtime status, cleanup or stop-verification failure phases, failed stop verification, or a recorded last error.
+Runtime filters require the daemon because Relaybase cannot prove running state from the registry alone. If the daemon is offline, filtered forms fail with a clear message instead of treating registry data as live state.
+
+`--attention` shows apps that need operator review: unhealthy or failed readiness, `errored` or `conflict` runtime status, cleanup or stop-verification failure, failed stop verification, or a recorded last error.
 
 ## Advanced Commands
 
@@ -131,6 +122,4 @@ relaybase status
 relaybase logs <app-id>
 ```
 
-`serve` starts the localhost daemon. `mcp` runs Relaybase as a stdio MCP server. `register` writes a manifest into the state registry. `start`, `stop`, and `restart` call the daemon HTTP API and require the local mutation token. `status` is a compatibility alias for `list`. `logs` prints the daemon's recent in-memory log snapshot for one app.
-
-The three-command flow remains the intended user path. These lower-level commands are useful for dashboards, tests, debugging, and automation.
+`serve` starts the localhost daemon. `mcp` runs Relaybase as a stdio MCP server. `register` writes a manifest into Relaybase state. `start`, `stop`, and `restart` call the daemon API and require the local mutation token. `status` is a compatibility alias for `list`. `logs` prints the daemon's recent in-memory log snapshot for one app.

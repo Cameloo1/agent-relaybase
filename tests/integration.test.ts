@@ -51,6 +51,86 @@ test("proxies HTTP by agent header and host header", async () => {
   }
 });
 
+test("reports degraded route health when only the agent header route reaches the app", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-route-degraded-"));
+  const upstream = await createConditionalHttpUpstream((request) => {
+    const forwardedHost = String(request.headers["x-forwarded-host"] ?? "");
+    return {
+      statusCode: forwardedHost.startsWith("degraded.localhost") ? 500 : 200,
+      body: JSON.stringify({ forwardedHost })
+    };
+  });
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
+
+  try {
+    await hub.runtime.registry.upsertManifest({
+      id: "degraded",
+      name: "Degraded",
+      command: "external",
+      cwd: ".",
+      protocol: "http",
+      healthUrl: "/health",
+      upstreamPort: upstream.port
+    });
+    await hub.listen();
+
+    const response = await httpRequest(hub.address().port, "/__hub/api/apps/degraded/state", { host: "localhost" });
+    assert.equal(response.statusCode, 200);
+    const state = JSON.parse(response.body).state;
+    assert.equal(state.routeReachable, true);
+    assert.equal(state.routeHealth.status, "degraded");
+    assert.equal(state.routeHealth.humanRoute.ok, false);
+    assert.equal(state.routeHealth.humanRoute.statusCode, 500);
+    assert.equal(state.routeHealth.agentRoute.ok, true);
+    assert.equal(state.readiness.state, "ready");
+    assert.ok(
+      state.readiness.checks.some((check: { name: string; ok: boolean }) => check.name === "human-route" && !check.ok)
+    );
+  } finally {
+    await hub.close();
+    await upstream.close();
+  }
+});
+
+test("reports failed route health when both routed paths return server errors", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-route-failed-"));
+  const upstream = await createConditionalHttpUpstream((request) => {
+    const routedApp = request.headers["x-relaybase-routed-app"];
+    return {
+      statusCode: routedApp ? 503 : 200,
+      body: JSON.stringify({ routedApp: routedApp ?? null })
+    };
+  });
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
+
+  try {
+    await hub.runtime.registry.upsertManifest({
+      id: "route-failed",
+      name: "Route Failed",
+      command: "external",
+      cwd: ".",
+      protocol: "http",
+      healthUrl: "/health",
+      upstreamPort: upstream.port
+    });
+    await hub.listen();
+
+    const response = await httpRequest(hub.address().port, "/__hub/api/apps/route-failed/state", { host: "localhost" });
+    assert.equal(response.statusCode, 200);
+    const state = JSON.parse(response.body).state;
+    assert.equal(state.backendPortOpen, true);
+    assert.equal(state.routeReachable, false);
+    assert.equal(state.routeHealth.status, "failed");
+    assert.equal(state.routeHealth.humanRoute.statusCode, 503);
+    assert.equal(state.routeHealth.agentRoute.statusCode, 503);
+    assert.equal(state.readiness.state, "unhealthy");
+    assert.match(state.readiness.failureReason, /route is not reachable/i);
+  } finally {
+    await hub.close();
+    await upstream.close();
+  }
+});
+
 test("keeps reserved hub routes on the dashboard/API", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-dashboard-"));
   const hub = await createRelaybaseServer({ port: 0, stateDir });
@@ -532,6 +612,21 @@ async function createHttpUpstream(
   const server = http.createServer((request, response) => {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(handler(request));
+  });
+  await listen(server);
+  return {
+    port: (server.address() as net.AddressInfo).port,
+    close: () => closeServer(server)
+  };
+}
+
+async function createConditionalHttpUpstream(
+  handler: (request: http.IncomingMessage) => { statusCode: number; body: string }
+): Promise<{ port: number; close(): Promise<void> }> {
+  const server = http.createServer((request, response) => {
+    const result = handler(request);
+    response.writeHead(result.statusCode, { "content-type": "application/json" });
+    response.end(result.body);
   });
   await listen(server);
   return {

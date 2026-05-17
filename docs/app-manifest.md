@@ -45,15 +45,15 @@ mcp
 
 `healthUrl` may be an absolute `http` or `https` URL, or a path beginning with `/`. If no `healthUrl` is present, Relaybase checks whether the backend port is open.
 
-`env` must be an object with valid environment-variable names and string values. It is merged into the process environment when Relaybase starts the app. Relaybase also injects `PORT`, `HOST`, `RELAYBASE_APP_ID`, and `RELAYBASE_BASE_URL`.
+`env` must be an object with valid environment-variable names and string values. Relaybase merges it into the app process environment and also injects `PORT`, `HOST`, `RELAYBASE_APP_ID`, and `RELAYBASE_BASE_URL`.
 
-`upstreamPort` pins the app to a fixed backend port. If present, it must be an integer between `1` and `65535`. Without it, Relaybase chooses a port from its runtime range.
+`upstreamPort` pins the app to a fixed backend port. Without it, Relaybase chooses a runtime port.
 
-Lifecycle timeout fields must be integers between `100` and `3600000` milliseconds.
+Lifecycle timeout fields are milliseconds and must be between `100` and `3600000`.
 
 ## Lifecycle Hooks
 
-Apps can add app-owned hooks:
+Apps can declare app-owned hooks:
 
 ```json
 {
@@ -68,15 +68,11 @@ Apps can add app-owned hooks:
 }
 ```
 
-Relaybase treats hooks as generic commands. It records stdout, stderr, exit codes, timeout status, start/end timestamps, cleanup status, and lifecycle attempts.
+Relaybase treats hooks as generic local commands. It records stdout, stderr, exit codes, timeout status, start and end timestamps, cleanup status, and lifecycle attempts.
 
-On Windows, `.ps1` commands are run through:
+On Windows, Relaybase invokes PowerShell hook scripts automatically for the app process. Users do not need to change system execution-policy settings.
 
-```text
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File <script>
-```
-
-If a stop hook or stop verification hook fails, Relaybase does not report the app as stopped.
+If a stop hook or stop-verification hook fails, Relaybase does not report the app as stopped.
 
 ## Child MCP Servers
 
@@ -117,14 +113,12 @@ Supported child transports:
 - `streamable-http`: requires `url`.
 - `sse`: requires `url` or `legacySseUrl`.
 
-Child ids use the same validation rule as app ids.
+Child ids follow the same validation rule as app ids. Child `cwd` is resolved relative to the parent app `cwd`.
 
 `expose.tools`, `expose.resources`, and `expose.prompts` are exact allowlists. Wildcard exposure is rejected.
 
-Child `cwd` is resolved relative to the parent app `cwd`.
-
 ## Docker Manifests
 
-When `relaybase configure` selects the Docker Compose setup plan, the manifest still uses generic hook fields. Docker-specific details go into `.relaybase/docker-profile.json`, `.relaybase/docker-compose.relaybase.yml`, and generated PowerShell scripts.
+Docker Compose setup still uses the same generic manifest hook fields. Docker-specific details live in `.relaybase/docker-profile.json`, `.relaybase/docker-compose.relaybase.yml`, and generated hook scripts.
 
-The Docker guide has the exact generated files, timings, evidence, and limits: [docker-compose-lifecycle.md](docker-compose-lifecycle.md).
+See [docker-compose-lifecycle.md](docker-compose-lifecycle.md) for the Compose contract and current limits.

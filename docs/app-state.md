@@ -1,8 +1,10 @@
 # App State
 
-Relaybase app state is the shared contract for dashboards, agents, and diagnostics. Consumers should read this state instead of rebuilding lifecycle rules for each app.
+Relaybase app state is the shared contract for dashboards, agents, and diagnostics. Consumers should read this state instead of rebuilding lifecycle and readiness rules.
 
 ## HTTP Endpoints
+
+Read-only endpoints:
 
 ```text
 GET /__hub/api/state
@@ -35,6 +37,7 @@ runtime
 backendPort
 backendPortOpen
 routeReachable
+routeHealth
 humanUrl
 agentUrl
 agentHeaders
@@ -89,8 +92,6 @@ errored
 conflict
 ```
 
-The CLI and MCP `attention` list filter is a derived operator grouping, not a separate app-state value. It includes unhealthy or failed readiness, `errored` or `conflict` runtime status, cleanup or stop-verification failure phases, failed stop verification, or a recorded last error.
-
 Runtime health values:
 
 ```text
@@ -128,15 +129,7 @@ unhealthy
 failed
 ```
 
-Readiness is bounded. The app-state builder uses a default timeout budget of 8000 ms for its own readiness snapshot. A ready app must be running, have healthy runtime state, have an open backend port, and be reachable through the Relaybase route.
-
-Readiness checks include:
-
-- manifest registration
-- runtime status
-- runtime health
-- backend port openness
-- route reachability
+A ready app must be running, have healthy runtime state, have an open backend port, and be reachable through Relaybase routing. The app-state builder uses a bounded readiness snapshot so clients do not hang indefinitely.
 
 If Relaybase cannot prove readiness, the state includes a failure reason.
 
@@ -160,13 +153,25 @@ Agent header:
 X-Relaybase-App: <app-id>
 ```
 
-Route reachability is checked through Relaybase routing. A route response with status `200` through `499` counts as reachable because it proves the router reached the app.
+`routeReachable` is true when Relaybase proves at least one route path reaches the app. `routeHealth` gives the stronger route diagnosis:
+
+```text
+routeHealth.status       full | degraded | failed | unknown
+routeHealth.ok           true when at least one route path works
+routeHealth.policy       human-or-agent
+routeHealth.humanRoute   status for the .localhost route
+routeHealth.agentRoute   status for the X-Relaybase-App route
+```
+
+`full` means both human and agent routes worked. `degraded` means exactly one route worked. `failed` means neither route worked.
+
+A route response with status `200` through `499` counts as reachable because it proves Relaybase reached the app.
 
 ## Logs
 
 `GET /__hub/api/apps/<id>/logs` returns the in-memory log snapshot.
 
-`GET /__hub/api/apps/<id>/logs/stream` returns an SSE stream. Events include:
+`GET /__hub/api/apps/<id>/logs/stream` returns an SSE stream with these event types:
 
 ```text
 status
@@ -177,26 +182,12 @@ ping
 
 Log events include app id, line, stream, source, sequence number, and timestamp. Stream values are `stdout`, `stderr`, and `system`.
 
-Relaybase exposes process channels. Dashboard-specific labels such as frontend/backend grouping belong in the dashboard layer.
-
-The process manager keeps the most recent 500 log lines and 500 structured log events per running entry.
+Relaybase keeps the most recent 500 log lines and 500 structured log events per running entry.
 
 ## Stop Verification
 
-Stop is successful only when Relaybase can finish the app's stop path. That can include child MCP drain, process termination, `stopCommand`, `verifyStoppedCommand`, and backend port closure when Relaybase owns the port.
+Stop succeeds only when Relaybase finishes the app's stop path. That can include child MCP drain, process termination, `stopCommand`, `verifyStoppedCommand`, and backend port closure when Relaybase owns the port.
 
-`stopVerification` records:
-
-- whether verification was attempted
-- check timestamp
-- backend port checked
-- whether that port remained open
-- whether port closure was verified
-- overall success
-- failure reason when present
-- cleanup status
-- stop hook attempt
-- verify-stopped hook attempt
-- child MCP drain results
+`stopVerification` records whether verification ran, the checked backend port, whether that port remained open, overall success, failure reason, cleanup status, hook attempts, and child MCP drain results.
 
 An open owned backend port after stop is a failed stop, not a successful stopped state.

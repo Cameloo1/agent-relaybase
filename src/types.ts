@@ -230,6 +230,23 @@ export interface AppReadiness {
   failureReason?: string;
 }
 
+export type RouteHealthStatus = "full" | "degraded" | "failed" | "unknown";
+
+export interface RouteProbe {
+  ok: boolean;
+  url: string;
+  statusCode?: number;
+  error?: string;
+}
+
+export interface RouteHealth {
+  status: RouteHealthStatus;
+  ok: boolean;
+  policy: "human-or-agent";
+  humanRoute: RouteProbe;
+  agentRoute: RouteProbe;
+}
+
 export interface AppState {
   id: string;
   name: string;
@@ -238,6 +255,7 @@ export interface AppState {
   backendPort?: number;
   backendPortOpen: boolean;
   routeReachable: boolean;
+  routeHealth?: RouteHealth;
   humanUrl: string;
   agentUrl: string;
   agentHeaders: Record<string, string>;

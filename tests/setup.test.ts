@@ -135,6 +135,46 @@ test("configure guarded env writes preserve existing secrets and remain idempote
   assert.equal((env.match(/# relaybase:end/g) ?? []).length, 1);
 });
 
+test("configure dry-run uses one canonical manifest for selected plan and write preview", async () => {
+  const project = await tempProject("relaybase-dry-run-canonical-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-dry-run-canonical-state-"));
+  await fs.writeFile(
+    path.join(project, "package.json"),
+    JSON.stringify({ name: "canonical-app", scripts: { start: "node server.js" } }, null, 2)
+  );
+  await fs.writeFile(
+    path.join(project, "relaybase.app.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "canonical-app",
+        name: "Canonical App",
+        command: "node server.js",
+        cwd: ".",
+        protocol: "http",
+        healthUrl: "/health",
+        upstreamPort: 4321
+      },
+      null,
+      2
+    )
+  );
+
+  const result = await configureProject({
+    cwd: project,
+    host: "127.0.0.1",
+    port: 17781,
+    stateDir,
+    dryRun: true,
+    selectedPlanId: "managed-web"
+  });
+
+  const manifestWrite = result.selectedPlan.writes.find((write) => write.path.endsWith("relaybase.app.json"));
+  assert.equal(result.selectedPlan.manifest.upstreamPort, undefined);
+  assert.ok(manifestWrite);
+  assert.equal(JSON.parse(manifestWrite.preview).upstreamPort, undefined);
+});
+
 test("configure can replay saved answers for noninteractive setup", async () => {
   const project = await tempProject("relaybase-answers-");
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-answers-state-"));
@@ -464,6 +504,20 @@ test("Windows helper wrapper uses process-local policy bypass and preserves exit
   assert.doesNotMatch(wrapper, /Set-ExecutionPolicy/i);
 });
 
+test("Windows helper wires backend ports into manifests and reports degraded routes", async () => {
+  const helperScript = await fs.readFile(
+    path.join(rootDir, "skills", "relaybase-dev", "scripts", "relaybase-dev.ps1"),
+    "utf8"
+  );
+
+  assert.match(helperScript, /\$manifest\["upstreamPort"\] = \$BackendPort/);
+  assert.match(helperScript, /routeHealth = \$routeHealth/);
+  assert.match(helperScript, /degraded = \(\$routeHealth -eq "degraded"\)/);
+  assert.match(helperScript, /humanRoute = \$human/);
+  assert.match(helperScript, /agentRoute = \$agent/);
+  assert.match(helperScript, /full requires both humanRoute and agentRoute/);
+});
+
 test("Docker setup refuses ambiguous service detection until service and target port are explicit", async () => {
   const project = await tempProject("relaybase-docker-ambiguous-");
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-docker-ambiguous-state-"));
@@ -589,14 +643,11 @@ test("Docker setup validates explicit service and target port input", async () =
   );
 });
 
-test("helper docs prefer the Windows wrapper for direct helper actions", async () => {
+test("skill docs prefer the Windows wrapper for direct helper actions", async () => {
   const docs = [
     "skills/relaybase-dev/SKILL.md",
     "skills/relaybase-dev/references/windows-runtime.md",
-    "skills/relaybase-dev/references/relaybase-contract.md",
-    "docs/relaybase-dev-skill.md",
-    "docs/docker-compose-lifecycle.md",
-    "docs/development.md"
+    "skills/relaybase-dev/references/relaybase-contract.md"
   ];
 
   for (const relativePath of docs) {
@@ -712,7 +763,119 @@ test("health is read-only and recommends configure for an unconfigured project",
   assert.equal(result.ok, false);
   assert.equal(result.project.configured, false);
   assert.ok(result.findings.some((finding) => finding.code === "PROJECT_NOT_CONFIGURED"));
+  assert.ok(
+    result.nextActions?.some((action) => action.owner === "manifest" && action.command === "relaybase configure")
+  );
+  assert.ok(result.nextActions?.some((action) => action.owner === "daemon"));
   assert.equal(await exists(path.join(project, ".relaybase")), false);
+});
+
+test("open reports invalid manifests as manifest-owned next actions", async () => {
+  const project = await tempProject("relaybase-open-invalid-manifest-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-open-invalid-manifest-state-"));
+  await fs.writeFile(path.join(project, "relaybase.app.json"), "{ not-json", "utf8");
+
+  const result = await openProject({
+    cwd: project,
+    host: "127.0.0.1",
+    port: 17996,
+    stateDir,
+    json: true,
+    noBrowser: true,
+    startDaemon: false
+  });
+
+  assert.equal(result.registered, false);
+  assert.equal(result.started, false);
+  assert.match(result.error ?? "", /manifest could not be loaded/i);
+  assert.equal(result.nextActions?.[0]?.owner, "manifest");
+});
+
+test("open reports daemon token mismatch without falling back to local registry writes", async () => {
+  const project = await tempProject("relaybase-open-token-mismatch-");
+  const daemonStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-open-token-daemon-state-"));
+  const cliStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-open-token-cli-state-"));
+  const hub = await createRelaybaseServer({
+    port: 0,
+    stateDir: daemonStateDir,
+    portRangeStart: 18590,
+    portRangeEnd: 18600
+  });
+
+  await fs.writeFile(
+    path.join(project, "relaybase.app.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "token-mismatch-app",
+        name: "Token Mismatch App",
+        command: "node missing.js",
+        cwd: rootDir,
+        protocol: "http",
+        healthUrl: "/health"
+      },
+      null,
+      2
+    )
+  );
+
+  try {
+    await hub.listen();
+    const result = await openProject({
+      cwd: project,
+      host: "127.0.0.1",
+      port: hub.address().port,
+      stateDir: cliStateDir,
+      json: true,
+      noBrowser: true,
+      startDaemon: false
+    });
+
+    assert.equal(result.registered, false);
+    assert.equal(result.started, false);
+    assert.match(result.error ?? "", /401/);
+    assert.equal(result.nextActions?.[0]?.owner, "token");
+    assert.equal(await exists(path.join(cliStateDir, "registry.json")), false);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("open reports daemon and permission evidence when offline registry fallback cannot write", async () => {
+  const project = await tempProject("relaybase-open-state-blocked-");
+  const stateDir = path.join(project, "relaybase-state-file");
+  await fs.writeFile(stateDir, "not a directory", "utf8");
+  await fs.writeFile(
+    path.join(project, "relaybase.app.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "blocked-state-app",
+        name: "Blocked State App",
+        command: "node missing.js",
+        cwd: rootDir,
+        protocol: "http",
+        healthUrl: "/health"
+      },
+      null,
+      2
+    )
+  );
+
+  const result = await openProject({
+    cwd: project,
+    host: "127.0.0.1",
+    port: 17996,
+    stateDir,
+    json: true,
+    noBrowser: true
+  });
+
+  assert.equal(result.ready, false);
+  assert.equal(result.registered, false);
+  assert.match(result.daemon?.error ?? "", /state\/log setup failed/i);
+  assert.match(result.error ?? "", /Offline registry fallback failed/);
+  assert.ok(result.nextActions?.some((action) => action.owner === "permissions"));
 });
 
 test("open starts a configured app through a running Relaybase daemon and proves the routed URL", async () => {
@@ -758,6 +921,99 @@ test("open starts a configured app through a running Relaybase daemon and proves
     assert.equal(result.state?.readiness.state, "ready");
   } finally {
     await hub.runtime.processes.stop("opened-app").catch(() => undefined);
+    await hub.close();
+  }
+});
+
+test("open registers through a reachable daemon before reading local registry state", async () => {
+  const project = await tempProject("relaybase-open-daemon-first-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-open-daemon-first-state-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18560, portRangeEnd: 18580 });
+  const fixture = path.join(rootDir, "tests", "fixtures", "fake-managed-app.ts");
+
+  await fs.writeFile(
+    path.join(project, "relaybase.app.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "daemon-first-app",
+        name: "Daemon First App",
+        command: `"${process.execPath}" --experimental-strip-types "${fixture}"`,
+        cwd: rootDir,
+        protocol: "http",
+        healthUrl: "/health"
+      },
+      null,
+      2
+    )
+  );
+
+  try {
+    await hub.listen();
+    await fs.writeFile(path.join(stateDir, "registry.json"), "{ this is not readable registry json", "utf8");
+    const result = await openProject({
+      cwd: project,
+      host: "127.0.0.1",
+      port: hub.address().port,
+      stateDir,
+      json: true,
+      noBrowser: true,
+      startDaemon: false
+    });
+
+    assert.equal(result.appId, "daemon-first-app");
+    assert.equal(result.registered, true);
+    assert.equal(result.started, true);
+    assert.equal(result.ready, true);
+    assert.equal(result.daemon?.started, false);
+    assert.equal(result.state?.routeHealth?.status, "full");
+  } finally {
+    await hub.runtime.processes.stop("daemon-first-app").catch(() => undefined);
+    await hub.close();
+  }
+});
+
+test("open returns app-command next actions when the launch command is missing", async () => {
+  const project = await tempProject("relaybase-open-missing-command-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-open-missing-command-state-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18610, portRangeEnd: 18620 });
+
+  await fs.writeFile(
+    path.join(project, "relaybase.app.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "missing-command-app",
+        name: "Missing Command App",
+        command: "definitely-not-a-real-relaybase-command",
+        cwd: rootDir,
+        protocol: "http",
+        healthUrl: "/health"
+      },
+      null,
+      2
+    )
+  );
+
+  try {
+    await hub.listen();
+    const result = await openProject({
+      cwd: project,
+      host: "127.0.0.1",
+      port: hub.address().port,
+      stateDir,
+      json: true,
+      noBrowser: true,
+      startDaemon: false
+    });
+
+    assert.equal(result.registered, true);
+    assert.equal(result.started, false);
+    assert.equal(result.ready, false);
+    assert.equal(result.recoveryHint?.code, "command-not-found");
+    assert.ok(result.nextActions?.some((action) => action.owner === "app-command"));
+  } finally {
+    await hub.runtime.processes.stop("missing-command-app").catch(() => undefined);
     await hub.close();
   }
 });

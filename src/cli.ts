@@ -621,6 +621,7 @@ function printConfigureResult(result: ConfigureProjectResult): void {
 function printOpenResult(result: OpenProjectResult): void {
   if (result.error) {
     console.log(result.error);
+    printNextActions(result.nextActions);
     return;
   }
   console.log(`Relaybase open`);
@@ -629,6 +630,7 @@ function printOpenResult(result: OpenProjectResult): void {
   console.log(`started: ${result.started ? "yes" : "no"}`);
   console.log(`ready: ${result.ready ? "yes" : "no"}`);
   console.log(`browser: ${result.openedBrowser ? "opened" : "not opened"}`);
+  printNextActions(result.nextActions);
 }
 
 function printHealthResult(result: HealthCheckResult): void {
@@ -641,7 +643,9 @@ function printHealthResult(result: HealthCheckResult): void {
   }
   if (result.state) {
     console.log(`Readiness: ${result.state.readiness.state}`);
-    console.log(`Route: ${result.state.routeReachable ? "reachable" : "unreachable"}`);
+    console.log(
+      `Route: ${result.state.routeHealth?.status ?? (result.state.routeReachable ? "reachable" : "unreachable")}`
+    );
   }
   for (const finding of result.findings) {
     console.log(`${finding.severity.toUpperCase()} ${finding.code}: ${finding.message}`);
@@ -652,6 +656,19 @@ function printHealthResult(result: HealthCheckResult): void {
   }
   if (result.recommendedAction) {
     console.log(`Recommended: ${result.recommendedAction}`);
+  }
+  printNextActions(result.nextActions);
+}
+
+function printNextActions(nextActions: OpenProjectResult["nextActions"] | HealthCheckResult["nextActions"]): void {
+  if (!nextActions?.length) {
+    return;
+  }
+  console.log("Next actions:");
+  for (const action of nextActions) {
+    const command = action.command ? ` command: ${action.command}` : "";
+    const evidence = action.evidence ? ` evidence: ${action.evidence}` : "";
+    console.log(`- ${action.owner}: ${action.action}${command}${evidence}`);
   }
 }
 

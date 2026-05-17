@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { closeSync, openSync, promises as fs } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -38,6 +38,38 @@ export interface RelaybaseCommandOptions {
   port: number;
   stateDir: string;
   json?: boolean;
+}
+
+export type NextActionOwner =
+  | "daemon"
+  | "manifest"
+  | "app-command"
+  | "backend-port"
+  | "health-url"
+  | "token"
+  | "route"
+  | "permissions";
+
+export interface NextAction {
+  owner: NextActionOwner;
+  action: string;
+  command?: string;
+  evidence?: string;
+}
+
+export interface DaemonEnsureResult {
+  reachable: boolean;
+  started: boolean;
+  pid?: number;
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  logPath?: string;
+  pidPath?: string;
+  metadataPath?: string;
+  exitCode?: number | null;
+  signal?: NodeJS.Signals | null;
+  error?: string;
 }
 
 export interface ConfigureProjectOptions extends RelaybaseCommandOptions {
@@ -118,10 +150,12 @@ export interface VerificationResult {
   registered: boolean;
   started: boolean;
   ready: boolean;
+  daemon?: DaemonEnsureResult;
   state?: AppState;
   url?: string;
   error?: string;
   recoveryHint?: LaunchFailureClassification;
+  nextActions?: NextAction[];
 }
 
 export interface ConfigureProjectResult {
@@ -150,8 +184,11 @@ export interface OpenProjectResult {
   registered: boolean;
   started: boolean;
   ready: boolean;
+  daemon?: DaemonEnsureResult;
   state?: AppState;
   error?: string;
+  recoveryHint?: LaunchFailureClassification;
+  nextActions?: NextAction[];
 }
 
 export interface HealthCheckResult {
@@ -174,6 +211,7 @@ export interface HealthCheckResult {
   state?: AppState;
   proof?: ProofBundle;
   findings: HealthFinding[];
+  nextActions?: NextAction[];
   recommendedAction?: string;
 }
 
@@ -337,13 +375,18 @@ export async function proposeSetupPlans(
   };
   const plans: SetupPlan[] = [];
 
+  const managedManifest = {
+    ...baseManifest,
+    command: String(baseManifest.command ?? startCommand),
+    upstreamPort: undefined
+  };
   plans.push(
     plan({
       id: "managed-web",
       label: "Managed dynamic port",
       architecture: "managed-dynamic-port",
       score: scoreManagedDynamic(detection, existingManifest),
-      manifest: { ...baseManifest, command: String(baseManifest.command ?? startCommand), upstreamPort: undefined },
+      manifest: managedManifest,
       detection,
       envStrategy,
       reasons: [
@@ -357,7 +400,7 @@ export async function proposeSetupPlans(
         "If the app ignores PORT, retry with a generated launch wrapper that passes framework port flags.",
         "If the health route is wrong, retry with a safer route candidate."
       ],
-      extraWrites: setupWrites(detection.root, baseManifest, envStrategy, options.mcpInstall)
+      extraWrites: setupWrites(detection.root, managedManifest, envStrategy, options.mcpInstall)
     })
   );
 
@@ -680,41 +723,132 @@ export async function openProject(options: OpenProjectOptions): Promise<OpenProj
       registered: false,
       started: false,
       ready: false,
-      error: "This project is not configured for Relaybase. Run relaybase configure first."
+      error: "This project is not configured for Relaybase. Run relaybase configure first.",
+      nextActions: [
+        {
+          owner: "manifest",
+          action: "Create or repair relaybase.app.json before opening this project.",
+          command: "relaybase configure"
+        }
+      ]
     };
   }
 
-  const app = await registerManifestPath(manifestPath, options.stateDir);
+  let app: AppRecord;
+  try {
+    app = normalizeManifest(await readManifestFile(manifestPath), { manifestPath });
+  } catch (error) {
+    return {
+      appId: "",
+      url: "",
+      openedBrowser: false,
+      registered: false,
+      started: false,
+      ready: false,
+      error: `Relaybase manifest could not be loaded: ${errorMessage(error)}`,
+      nextActions: [
+        {
+          owner: "manifest",
+          action:
+            "Fix relaybase.app.json so Relaybase can load a valid app id, command, cwd, protocol, and health route.",
+          evidence: manifestPath
+        }
+      ]
+    };
+  }
+
   const daemonStarted = await ensureDaemon(options, options.startDaemon !== false);
   if (!daemonStarted.reachable) {
+    let localRegistryError: string | undefined;
+    let registered = false;
+    try {
+      await registerManifestPath(manifestPath, options.stateDir);
+      registered = true;
+    } catch (error) {
+      localRegistryError = errorMessage(error);
+    }
+    const error = [
+      daemonStarted.error ?? "Relaybase daemon is not reachable.",
+      localRegistryError ? `Offline registry fallback failed: ${localRegistryError}` : undefined
+    ]
+      .filter(Boolean)
+      .join(" ");
     return {
       appId: app.id,
       url: humanUrl(app.id, options.port),
       openedBrowser: false,
-      registered: true,
+      registered,
       started: false,
       ready: false,
-      error: daemonStarted.error ?? "Relaybase daemon is not reachable."
+      daemon: daemonStarted,
+      error,
+      nextActions: nextActionsForOpenFailure(options, {
+        owner: localRegistryError ? "permissions" : "daemon",
+        daemon: daemonStarted,
+        localRegistryError
+      })
     };
   }
 
-  await registerViaApi(options, manifestPath).catch(() => undefined);
-  const started = await mutateAppViaApi(options, app.id, "start");
+  const registerResponse = await registerViaApi(options, manifestPath).catch((error: unknown) => ({
+    ok: false,
+    statusCode: 0,
+    body: errorMessage(error)
+  }));
+  if (!registerResponse.ok) {
+    return {
+      appId: app.id,
+      url: humanUrl(app.id, options.port),
+      openedBrowser: false,
+      registered: false,
+      started: false,
+      ready: false,
+      daemon: daemonStarted,
+      error: `Relaybase daemon registration failed (${registerResponse.statusCode}): ${registerResponse.body}`,
+      nextActions: nextActionsForOpenFailure(options, {
+        owner: registerResponse.statusCode === 401 ? "token" : "daemon",
+        daemon: daemonStarted,
+        registerResponse
+      })
+    };
+  }
+
+  const started = await mutateAppViaApi(options, app.id, "start").catch((error: unknown) => ({
+    ok: false,
+    statusCode: 0,
+    body: errorMessage(error)
+  }));
   const stateResponse = await getAppStateViaApi(options, app.id);
   const state = stateResponse.state;
   const url = humanUrl(app.id, options.port);
   const ready = Boolean(state?.readiness.state === "ready" || state?.routeReachable);
   const openedBrowser = !options.noBrowser && ready ? await openBrowser(url) : false;
+  const recoveryHint = ready
+    ? undefined
+    : classifyLaunchFailure({
+        error: started.body || stateResponse.error,
+        lastError: state?.lastError ?? undefined,
+        logs: state?.recentLogs,
+        runtimeStatus: state?.runtime.status
+      });
+  const error = ready
+    ? undefined
+    : (state?.readiness.failureReason ??
+      stateResponse.error ??
+      started.body ??
+      "Relaybase start did not prove readiness.");
 
   return {
     appId: app.id,
     url,
     openedBrowser,
+    daemon: daemonStarted,
     registered: true,
     started: started.ok,
     ready,
     ...(state ? { state } : {}),
-    ...(!started.ok ? { error: started.body || "Relaybase start failed." } : {})
+    ...(error ? { error } : {}),
+    ...(recoveryHint ? { recoveryHint, nextActions: nextActionsFromLaunchFailure(options, recoveryHint, state) } : {})
   };
 }
 
@@ -762,6 +896,15 @@ export async function healthProject(options: HealthProjectOptions): Promise<Heal
           code: "APP_NOT_READY",
           message: state.readiness.failureReason ?? `App readiness is ${state.readiness.state}.`,
           repair: "Run relaybase configure --repair."
+        });
+      }
+      if (state.routeHealth?.status === "degraded") {
+        findings.push({
+          severity: "warning",
+          code: "ROUTE_DEGRADED",
+          message: "Only one Relaybase route path is reachable; human and agent routes should both be inspectable.",
+          repair:
+            "Check the human .localhost route and the X-Relaybase-App header route before treating the app as fully proven."
         });
       }
     } else {
@@ -831,6 +974,7 @@ export async function healthProject(options: HealthProjectOptions): Promise<Heal
     Boolean(daemon.reachable) &&
     Boolean(manifestPath) &&
     (proof ? proof.ok : true);
+  const nextActions = nextActionsFromHealthFindings(options, findings, state);
   return {
     cwd: detection.root,
     ...(appId ? { appId } : {}),
@@ -851,6 +995,7 @@ export async function healthProject(options: HealthProjectOptions): Promise<Heal
     ...(state ? { state } : {}),
     ...(proof ? { proof } : {}),
     findings,
+    ...(nextActions.length ? { nextActions } : {}),
     ...(ok ? {} : { recommendedAction: "Run relaybase configure --repair." })
   };
 }
@@ -954,6 +1099,205 @@ export function classifyLaunchFailure(input: {
   };
 }
 
+function nextActionsForOpenFailure(
+  options: RelaybaseCommandOptions,
+  input: {
+    owner: NextActionOwner;
+    daemon?: DaemonEnsureResult;
+    localRegistryError?: string;
+    registerResponse?: { statusCode: number; body: string };
+  }
+): NextAction[] {
+  const actions: NextAction[] = [];
+  if (input.owner === "token") {
+    actions.push({
+      owner: "token",
+      action:
+        "Use the same Relaybase state directory and session token as the running daemon, or restart the daemon with this state directory.",
+      command: `relaybase open --state-dir ${quoteArg(options.stateDir)} --json`,
+      evidence: input.registerResponse?.body
+    });
+  } else if (input.owner === "permissions") {
+    actions.push({
+      owner: "permissions",
+      action:
+        "Fix write access to the Relaybase state directory or choose a writable state directory for offline fallback.",
+      command: `relaybase open --state-dir ${quoteArg(options.stateDir)} --json`,
+      evidence: input.localRegistryError
+    });
+  } else {
+    actions.push({
+      owner: "daemon",
+      action: "Start or inspect the Relaybase daemon before retrying app launch.",
+      command: `relaybase serve --host ${options.host} --port ${options.port} --state-dir ${quoteArg(options.stateDir)}`,
+      evidence: input.daemon?.error
+    });
+  }
+
+  if (input.daemon?.logPath) {
+    actions.push({
+      owner: "daemon",
+      action: "Inspect the daemon log captured by the launcher.",
+      evidence: input.daemon.logPath
+    });
+  }
+  if (input.daemon?.pidPath) {
+    actions.push({
+      owner: "daemon",
+      action: "Check the recorded daemon pid and metadata before killing or restarting anything.",
+      evidence: input.daemon.pidPath
+    });
+  }
+  if (input.registerResponse && input.owner !== "token") {
+    actions.push({
+      owner: "daemon",
+      action:
+        "Inspect the daemon registration response; local registry writes will not repair a live daemon that rejected registration.",
+      evidence: input.registerResponse.body
+    });
+  }
+
+  return uniqueNextActions(actions);
+}
+
+function nextActionsFromLaunchFailure(
+  options: RelaybaseCommandOptions,
+  recoveryHint: LaunchFailureClassification,
+  state?: AppState
+): NextAction[] {
+  const owner = ownerForLaunchFailure(recoveryHint);
+  const actions: NextAction[] = [
+    {
+      owner,
+      action: recoveryHint.message,
+      command: recoveryHint.requiresApproval
+        ? `relaybase configure --repair --yes --cwd ${quoteArg(options.cwd)}`
+        : `relaybase configure --repair --cwd ${quoteArg(options.cwd)}`
+    }
+  ];
+
+  if (state?.routeHealth && state.routeHealth.status !== "full") {
+    actions.push({
+      owner: "route",
+      action: `Route health is ${state.routeHealth.status}; verify both the human .localhost URL and the X-Relaybase-App header route.`,
+      evidence: JSON.stringify({
+        humanRoute: state.routeHealth.humanRoute,
+        agentRoute: state.routeHealth.agentRoute
+      })
+    });
+  }
+  if (state?.backendPort && !state.backendPortOpen) {
+    actions.push({
+      owner: "backend-port",
+      action: "Verify the configured backend port is open and owned by this app before retrying route checks.",
+      evidence: String(state.backendPort)
+    });
+  }
+
+  return uniqueNextActions(actions);
+}
+
+function nextActionsFromHealthFindings(
+  options: RelaybaseCommandOptions,
+  findings: HealthFinding[],
+  state?: AppState
+): NextAction[] {
+  const actions = findings.flatMap((finding): NextAction[] => {
+    if (!finding.repair) {
+      return [];
+    }
+    return [
+      {
+        owner: ownerForFinding(finding),
+        action: finding.repair,
+        command: commandFromRepair(finding.repair),
+        evidence: `${finding.code}: ${finding.message}`
+      }
+    ];
+  });
+
+  if (state?.routeHealth && state.routeHealth.status !== "full") {
+    actions.push({
+      owner: "route",
+      action: "Treat this as degraded until both route paths pass.",
+      command: `relaybase health --json --cwd ${quoteArg(options.cwd)}`,
+      evidence: JSON.stringify({
+        status: state.routeHealth.status,
+        humanRoute: state.routeHealth.humanRoute,
+        agentRoute: state.routeHealth.agentRoute
+      })
+    });
+  }
+
+  return uniqueNextActions(actions);
+}
+
+function ownerForLaunchFailure(recoveryHint: LaunchFailureClassification): NextActionOwner {
+  if (recoveryHint.code === "health-route") {
+    return "health-url";
+  }
+  if (
+    recoveryHint.code === "ignored-port" ||
+    recoveryHint.code === "port-conflict" ||
+    recoveryHint.code === "stale-process"
+  ) {
+    return "backend-port";
+  }
+  if (
+    recoveryHint.code === "command-not-found" ||
+    recoveryHint.code === "powershell-policy" ||
+    recoveryHint.code === "corepack-spawn" ||
+    recoveryHint.code === "dependency-missing" ||
+    recoveryHint.code === "crash-loop"
+  ) {
+    return "app-command";
+  }
+  return "app-command";
+}
+
+function ownerForFinding(finding: HealthFinding): NextActionOwner {
+  if (finding.code.includes("DAEMON")) {
+    return "daemon";
+  }
+  if (finding.code.includes("MANIFEST") || finding.code.includes("CONFIGURED") || finding.code.includes("PROFILE")) {
+    return "manifest";
+  }
+  if (finding.code.includes("ROUTE")) {
+    return "route";
+  }
+  if (finding.code.includes("ENV") || finding.code.includes("COMPOSE") || finding.code.includes("DOCKER")) {
+    return "app-command";
+  }
+  return "app-command";
+}
+
+function uniqueNextActions(actions: NextAction[]): NextAction[] {
+  const seen = new Set<string>();
+  return actions.filter((action) => {
+    const key = `${action.owner}\0${action.action}\0${action.command ?? ""}\0${action.evidence ?? ""}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function daemonDetails(daemon: DaemonEnsureResult): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(daemon).filter(([, value]) => value !== undefined));
+}
+
+function commandFromRepair(repair: string): string | undefined {
+  if (!repair.startsWith("Run relaybase ")) {
+    return undefined;
+  }
+  return repair.replace(/^Run /, "").replace(/\.$/, "");
+}
+
+function quoteArg(value: string): string {
+  return /\s/.test(value) ? JSON.stringify(value) : value;
+}
+
 async function proveProject(
   options: HealthProjectOptions,
   root: string,
@@ -987,7 +1331,7 @@ async function proveProject(
       message: daemon.reachable
         ? `Relaybase daemon ${daemon.started ? "started" : "was already reachable"}.`
         : (daemon.error ?? "Relaybase daemon could not be started."),
-      details: { started: daemon.started }
+      details: daemonDetails(daemon)
     });
   }
 
@@ -1218,34 +1562,50 @@ async function verifyConfiguredApp(
   const manifestPath = path.join(root, MANIFEST_FILE);
   const appId = String(selectedPlan.manifest.id);
   const daemon = await ensureDaemon(options, options.startDaemon !== false);
-  events.push(event("daemon", daemon));
+  events.push(event("daemon", daemonDetails(daemon)));
   if (!daemon.reachable) {
     return {
       attempted: true,
       daemonStarted: daemon.started,
+      daemon,
       registered: true,
       started: false,
       ready: false,
       error: daemon.error,
-      recoveryHint: classifyLaunchFailure({ error: daemon.error })
+      recoveryHint: classifyLaunchFailure({ error: daemon.error }),
+      nextActions: nextActionsForOpenFailure(options, { owner: "daemon", daemon })
     };
   }
 
-  const registerResponse = await registerViaApi(options, manifestPath);
+  const registerResponse = await registerViaApi(options, manifestPath).catch((error: unknown) => ({
+    ok: false,
+    statusCode: 0,
+    body: errorMessage(error)
+  }));
   events.push(event("api_register", { ok: registerResponse.ok, statusCode: registerResponse.statusCode }));
   if (!registerResponse.ok) {
     return {
       attempted: true,
       daemonStarted: daemon.started,
+      daemon,
       registered: false,
       started: false,
       ready: false,
       error: registerResponse.body,
-      recoveryHint: classifyLaunchFailure({ error: registerResponse.body })
+      recoveryHint: classifyLaunchFailure({ error: registerResponse.body }),
+      nextActions: nextActionsForOpenFailure(options, {
+        owner: registerResponse.statusCode === 401 ? "token" : "daemon",
+        daemon,
+        registerResponse
+      })
     };
   }
 
-  const startResponse = await mutateAppViaApi(options, appId, "start");
+  const startResponse = await mutateAppViaApi(options, appId, "start").catch((error: unknown) => ({
+    ok: false,
+    statusCode: 0,
+    body: errorMessage(error)
+  }));
   events.push(
     event("api_start", {
       ok: startResponse.ok,
@@ -1256,9 +1616,18 @@ async function verifyConfiguredApp(
   const stateResponse = await getAppStateViaApi(options, appId);
   const state = stateResponse.state;
   const ready = Boolean(startResponse.ok && state && (state.readiness.state === "ready" || state.routeReachable));
+  const recoveryHint = !ready
+    ? classifyLaunchFailure({
+        error: startResponse.body,
+        lastError: state?.lastError ?? undefined,
+        logs: state?.recentLogs,
+        runtimeStatus: state?.runtime.status
+      })
+    : undefined;
   return {
     attempted: true,
     daemonStarted: daemon.started,
+    daemon,
     registered: true,
     started: startResponse.ok,
     ready,
@@ -1267,12 +1636,8 @@ async function verifyConfiguredApp(
     ...(!ready
       ? {
           error: state?.readiness.failureReason ?? startResponse.body,
-          recoveryHint: classifyLaunchFailure({
-            error: startResponse.body,
-            lastError: state?.lastError ?? undefined,
-            logs: state?.recentLogs,
-            runtimeStatus: state?.runtime.status
-          })
+          recoveryHint,
+          ...(recoveryHint ? { nextActions: nextActionsFromLaunchFailure(options, recoveryHint, state) } : {})
         }
       : {})
   };
@@ -1298,10 +1663,7 @@ async function stopConfiguredApp(options: RelaybaseCommandOptions, appId: string
   await mutateAppViaApi(options, appId, "stop").catch(() => undefined);
 }
 
-async function ensureDaemon(
-  options: RelaybaseCommandOptions,
-  allowStart: boolean
-): Promise<{ reachable: boolean; started: boolean; error?: string }> {
+async function ensureDaemon(options: RelaybaseCommandOptions, allowStart: boolean): Promise<DaemonEnsureResult> {
   const existing = await discovery(options);
   if (existing.reachable) {
     return { reachable: true, started: false };
@@ -1311,40 +1673,140 @@ async function ensureDaemon(
     return { reachable: false, started: false, error: existing.error };
   }
 
-  await ensureDir(options.stateDir);
   const cliPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "cli.ts");
-  const child = spawn(
-    process.execPath,
-    [
-      "--experimental-strip-types",
-      cliPath,
-      "serve",
-      "--host",
-      options.host,
-      "--port",
-      String(options.port),
-      "--state-dir",
-      options.stateDir
-    ],
-    {
+  const command = process.execPath;
+  const args = [
+    "--experimental-strip-types",
+    cliPath,
+    "serve",
+    "--host",
+    options.host,
+    "--port",
+    String(options.port),
+    "--state-dir",
+    options.stateDir
+  ];
+  const logPath = path.join(options.stateDir, "daemon.log");
+  const pidPath = path.join(options.stateDir, "daemon.pid");
+  const metadataPath = path.join(options.stateDir, "daemon.json");
+  const cwd = options.cwd;
+  try {
+    await ensureDir(options.stateDir);
+    await fs.appendFile(logPath, `[${new Date().toISOString()}] relaybase daemon start requested\n`, "utf8");
+  } catch (error) {
+    return {
+      reachable: false,
+      started: false,
+      command,
+      args,
+      cwd,
+      logPath,
+      pidPath,
+      metadataPath,
+      error: `Relaybase daemon state/log setup failed: ${errorMessage(error)}`
+    };
+  }
+
+  let stdoutFd: number | undefined;
+  let stderrFd: number | undefined;
+  let child;
+  try {
+    stdoutFd = openSync(logPath, "a");
+    stderrFd = openSync(logPath, "a");
+    child = spawn(command, args, {
       cwd: options.cwd,
       detached: true,
-      stdio: "ignore",
+      stdio: ["ignore", stdoutFd, stderrFd],
       windowsHide: true
+    });
+  } catch (error) {
+    return {
+      reachable: false,
+      started: false,
+      command,
+      args,
+      cwd,
+      logPath,
+      pidPath,
+      metadataPath,
+      error: `Relaybase daemon spawn failed: ${errorMessage(error)}`
+    };
+  } finally {
+    if (stdoutFd !== undefined) {
+      closeSync(stdoutFd);
     }
-  );
+    if (stderrFd !== undefined) {
+      closeSync(stderrFd);
+    }
+  }
+
+  let spawnError: string | undefined;
+  let exitCode: number | null | undefined;
+  let signal: NodeJS.Signals | null | undefined;
+  child.once("error", (error) => {
+    spawnError = error.message;
+  });
+  child.once("exit", (code, exitSignal) => {
+    exitCode = code;
+    signal = exitSignal;
+  });
+
+  const baseResult: DaemonEnsureResult = {
+    reachable: false,
+    started: true,
+    ...(child.pid ? { pid: child.pid } : {}),
+    command,
+    args,
+    cwd,
+    logPath,
+    pidPath,
+    metadataPath
+  };
+
+  if (child.pid) {
+    await writeTextAtomic(pidPath, `${child.pid}\n`).catch(() => undefined);
+  }
+  await writeTextAtomic(
+    metadataPath,
+    `${JSON.stringify(
+      {
+        pid: child.pid ?? null,
+        command,
+        args,
+        cwd,
+        host: options.host,
+        port: options.port,
+        stateDir: options.stateDir,
+        logPath,
+        startedAt: new Date().toISOString()
+      },
+      null,
+      2
+    )}\n`
+  ).catch(() => undefined);
   child.unref();
 
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     const probe = await discovery(options);
     if (probe.reachable) {
-      return { reachable: true, started: true };
+      return { ...baseResult, reachable: true };
+    }
+    if (spawnError) {
+      return { ...baseResult, error: `Relaybase daemon failed to spawn: ${spawnError}` };
+    }
+    if (exitCode !== undefined || signal !== undefined) {
+      return {
+        ...baseResult,
+        ...(exitCode !== undefined ? { exitCode } : {}),
+        ...(signal !== undefined ? { signal } : {}),
+        error: "Relaybase daemon exited before becoming reachable."
+      };
     }
     await delay(150);
   }
 
-  return { reachable: false, started: true, error: "Relaybase daemon did not become reachable before timeout." };
+  return { ...baseResult, error: "Relaybase daemon did not become reachable before timeout." };
 }
 
 async function discovery(
@@ -2097,6 +2559,10 @@ async function writeTextAtomic(filePath: string, content: string): Promise<void>
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   await fs.writeFile(tempPath, content, "utf8");
   await fs.rename(tempPath, filePath);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function nodeCommand(scriptPath: string): string {
