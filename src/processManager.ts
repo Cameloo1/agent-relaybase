@@ -217,6 +217,7 @@ export class ProcessManager {
       entry.phase = "errored";
       entry.lastError ??= "Process exited before becoming healthy.";
       this.#finishAttempt(attempt, "failed", entry.phase, entry.lastError);
+      await this.#cleanupAfterFailedStart(app, entry, child);
     } else if (healthy) {
       entry.status = "running";
       entry.health = "healthy";
@@ -493,6 +494,7 @@ export class ProcessManager {
     entry: RuntimeEntry,
     child: ChildProcessWithoutNullStreams
   ): Promise<void> {
+    entry.mcpDrain = await this.mcp.stopApp(app.id);
     await this.#terminateChild(child);
     entry.pid = undefined;
     entry.stoppedAt = new Date().toISOString();

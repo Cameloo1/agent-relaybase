@@ -58,6 +58,10 @@ export function dashboardHtml(options: { token: string; apps: AppStatusView[] })
       cursor: pointer;
     }
     button:hover { border-color: var(--accent); }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -111,6 +115,23 @@ export function dashboardHtml(options: { token: string; apps: AppStatusView[] })
       text-align: center;
       color: var(--muted);
     }
+    .notice {
+      min-height: 20px;
+      margin-bottom: 10px;
+      color: var(--muted);
+    }
+    .notice.error { color: var(--bad); }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
     @media (max-width: 760px) {
       table, thead, tbody, tr, th, td { display: block; }
       thead { display: none; }
@@ -130,6 +151,7 @@ export function dashboardHtml(options: { token: string; apps: AppStatusView[] })
       <span id="count" class="muted"></span>
       <button id="refresh" type="button">Refresh</button>
     </div>
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
     <div id="root"></div>
   </main>
   <script>
@@ -137,6 +159,7 @@ export function dashboardHtml(options: { token: string; apps: AppStatusView[] })
     const state = window.__RELAYBASE__;
     const root = document.querySelector("#root");
     const count = document.querySelector("#count");
+    const notice = document.querySelector("#notice");
 
     document.querySelector("#refresh").addEventListener("click", refresh);
 
@@ -147,17 +170,20 @@ export function dashboardHtml(options: { token: string; apps: AppStatusView[] })
         return;
       }
 
-      root.innerHTML = '<table><thead><tr><th>App</th><th>Status</th><th>Route</th><th>Backend port</th><th>Actions</th></tr></thead><tbody>' +
+      root.innerHTML = '<table><caption class="sr-only">Registered Relaybase apps</caption><thead><tr><th scope="col">App</th><th scope="col">Status</th><th scope="col">Route</th><th scope="col">Backend port</th><th scope="col">Actions</th></tr></thead><tbody>' +
         apps.map(app => {
           const status = app.runtime.status;
           const href = 'http://' + app.id + '.localhost:' + location.port;
           const backendPort = backendPortHtml(app);
+          const startDisabled = app.runtime && app.runtime.canStart === false ? ' disabled aria-disabled="true"' : '';
+          const stopDisabled = app.runtime && app.runtime.canStop === false ? ' disabled aria-disabled="true"' : '';
+          const appLabel = escapeHtml(app.name || app.id);
           return '<tr>' +
             '<td><strong>' + escapeHtml(app.name) + '</strong><br><span class="muted">' + escapeHtml(app.id) + '</span></td>' +
             '<td><span class="status ' + status + '"><span class="dot"></span>' + status + '</span></td>' +
             '<td><a href="' + href + '"><code>' + escapeHtml(app.id) + '.localhost:' + location.port + '</code></a></td>' +
             '<td>' + backendPort + '</td>' +
-            '<td><div class="actions"><button data-action="start" data-id="' + app.id + '">Start</button><button data-action="stop" data-id="' + app.id + '">Stop</button></div></td>' +
+            '<td><div class="actions"><button data-action="start" data-id="' + escapeHtml(app.id) + '" aria-label="Start ' + appLabel + '"' + startDisabled + '>Start</button><button data-action="stop" data-id="' + escapeHtml(app.id) + '" aria-label="Stop ' + appLabel + '"' + stopDisabled + '>Stop</button></div></td>' +
           '</tr>';
         }).join('') + '</tbody></table>';
 
@@ -167,17 +193,53 @@ export function dashboardHtml(options: { token: string; apps: AppStatusView[] })
     }
 
     async function refresh() {
-      const response = await fetch("/__hub/api/apps");
-      const body = await response.json();
-      render(body.apps || []);
+      try {
+        const response = await fetch("/__hub/api/apps");
+        if (!response.ok) {
+          throw new Error(await errorText(response));
+        }
+        const body = await response.json();
+        render(body.apps || []);
+        setNotice("App list refreshed.");
+      } catch (error) {
+        setNotice(error.message || "Refresh failed.", true);
+      }
     }
 
     async function mutate(action, id) {
-      await fetch("/__hub/api/apps/" + id + "/" + action, {
-        method: "POST",
-        headers: { "X-Relaybase-Token": state.token }
-      });
-      await refresh();
+      const buttons = Array.from(root.querySelectorAll("button[data-action]")).filter(button => button.dataset.id === id);
+      buttons.forEach(button => { button.disabled = true; });
+      const present = action === "start" ? "Starting" : action === "stop" ? "Stopping" : action + "ing";
+      const past = action === "start" ? "Start" : action === "stop" ? "Stop" : action;
+      setNotice(present + " " + id + "...");
+      try {
+        const response = await fetch("/__hub/api/apps/" + encodeURIComponent(id) + "/" + action, {
+          method: "POST",
+          headers: { "X-Relaybase-Token": state.token }
+        });
+        if (!response.ok) {
+          throw new Error(await errorText(response));
+        }
+        await refresh();
+        setNotice(past + " completed for " + id + ".");
+      } catch (error) {
+        setNotice(error.message || action + " failed.", true);
+        buttons.forEach(button => { button.disabled = false; });
+      }
+    }
+
+    async function errorText(response) {
+      try {
+        const body = await response.json();
+        return body.error || JSON.stringify(body);
+      } catch {
+        return response.status + " " + response.statusText;
+      }
+    }
+
+    function setNotice(message, isError = false) {
+      notice.textContent = message;
+      notice.className = isError ? "notice error" : "notice";
     }
 
     function backendPortHtml(app) {

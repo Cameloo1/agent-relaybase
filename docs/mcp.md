@@ -51,6 +51,7 @@ Relaybase exposes these lifecycle tools:
 ```text
 configure_project
 list_apps
+diagnose_token
 app_status
 health_check
 verify_app
@@ -60,6 +61,7 @@ start_app
 stop_app
 restart_app
 tail_logs
+log_stream_info
 app_url
 ```
 
@@ -76,9 +78,11 @@ Token-gated mutation tools:
 
 `list_apps` is read-only. It accepts `all`, `running`, `active`, `stopped`, `ready`, and `attention` filters. Its compact items include id, name, readiness, runtime, health, route, port, action, and attention state.
 
+`diagnose_token` is read-only. It returns the active state directory, token path, token presence, accepted mutation headers, and mismatch hints without returning token contents.
+
 `prove_app` returns a proof snapshot. With `lifecycle: false` or omitted, it is read-only. With `lifecycle: true`, it starts the app, checks routed health and logs, stops the app, and verifies cleanup.
 
-`tail_logs` returns a snapshot. Its `follow` argument is accepted for compatibility, but live following should use the HTTP log stream.
+`tail_logs` returns a snapshot. Its `follow` argument is accepted for compatibility, but the MCP tool does not hold a live stream open. Use `log_stream_info` to get the HTTP SSE stream URL and event contract.
 
 ## Resources
 

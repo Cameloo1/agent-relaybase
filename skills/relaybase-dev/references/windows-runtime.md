@@ -5,7 +5,7 @@ Use this reference when Relaybase work involves Windows process behavior, stale 
 ## Command Rules
 
 - Prefer `npm.cmd` over `npm` or `npm.ps1`.
-- Prefer `.\scripts\relaybase-dev.cmd` over direct `.ps1` helper invocation in Codex App and Windows shells.
+- Prefer `.\skills\relaybase-dev\scripts\relaybase-dev.cmd` over direct `.ps1` helper invocation in Codex App and Windows shells.
 - Never run or recommend `Set-ExecutionPolicy`; use the helper wrapper.
 - Assume Windows PowerShell unless `pwsh` is verified.
 - If tests or app starts fail with sandbox `spawn EPERM`, treat execution context as the first suspect.
@@ -16,7 +16,7 @@ Use this reference when Relaybase work involves Windows process behavior, stale 
 Windows may block direct `.ps1` helper execution. In Codex App or normal Windows shells, use the wrapper:
 
 ```powershell
-.\scripts\relaybase-dev.cmd -Action preflight
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action preflight
 ```
 
 The wrapper applies process-local bypass and does not change user, machine, or group policy.
@@ -33,7 +33,7 @@ POST /__hub/api/apps/<id>/start -> 401 Unauthorized
 Run:
 
 ```powershell
-.\scripts\relaybase-dev.cmd -Action diagnose-token
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action diagnose-token
 ```
 
 Check:
@@ -73,7 +73,7 @@ taskkill /pid <pid> /t /f
 Relaybase success requires the backend port to close after stop when the port is known. Use:
 
 ```powershell
-.\scripts\relaybase-dev.cmd -Action check-stop -AppId <id> -BackendPort <port>
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action check-stop -AppId <id> -BackendPort <port>
 ```
 
 If the port remains open after stop, treat stop as failed even if a wrapper status says `stopped`.

@@ -54,8 +54,11 @@ test("HTTP MCP rejects unauthorized mutation and accepts token auth", async () =
     );
     await assert.rejects(
       () => unauthorized.callTool({ name: "start_app", arguments: { id: "managed-auth" } }),
-      /UNAUTHORIZED_MUTATION/
+      /UNAUTHORIZED_MUTATION.*diagnose_token/
     );
+    const tokenDiagnostic = await unauthorized.callTool({ name: "diagnose_token", arguments: {} });
+    assert.equal(tokenDiagnostic.structuredContent?.tokenPresent, true);
+    assert.match(String(tokenDiagnostic.structuredContent?.tokenPath), /session-token$/);
     await unauthorized.close();
 
     const authorized = await createHttpMcpClient(hub.address().port, hub.runtime.token);
@@ -82,6 +85,18 @@ test("HTTP MCP rejects unauthorized mutation and accepts token auth", async () =
 
     const verified = await authorized.callTool({ name: "verify_app", arguments: { id: "managed-auth" } });
     assert.equal(verified.structuredContent?.state.routeReachable, true);
+
+    const logs = await authorized.callTool({
+      name: "tail_logs",
+      arguments: { id: "managed-auth", follow: true }
+    });
+    assert.equal(logs.structuredContent?.followSupported, false);
+    assert.equal(logs.structuredContent?.followAccepted, false);
+    assert.match(String(logs.structuredContent?.message), /snapshot/);
+
+    const stream = await authorized.callTool({ name: "log_stream_info", arguments: { id: "managed-auth" } });
+    assert.equal(stream.structuredContent?.transport, "http-sse");
+    assert.match(String(stream.structuredContent?.streamUrl), /\/logs\/stream$/);
 
     const readOnlyProof = await authorized.callTool({ name: "prove_app", arguments: { id: "managed-auth" } });
     assert.equal(readOnlyProof.structuredContent?.mode, "read-only");
@@ -325,6 +340,60 @@ test("aggregates child Streamable HTTP MCP tools with exact allowlists", async (
   } finally {
     await hub.close();
     await child.close();
+  }
+});
+
+test("cleans up child MCP exposure when app start fails health", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-child-failed-start-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18430, portRangeEnd: 18440 });
+
+  try {
+    await hub.listen();
+    await hub.runtime.registry.upsertManifest({
+      schemaVersion: 1,
+      id: "failed-child",
+      name: "failed-child",
+      command: `"${process.execPath}" -e "setInterval(()=>{},1000)"`,
+      cwd: rootDir,
+      protocol: "http",
+      healthUrl: "/health",
+      healthTimeoutMs: 500,
+      mcp: {
+        enabled: true,
+        children: [
+          {
+            id: "tools",
+            transport: "stdio",
+            command: process.execPath,
+            args: ["--experimental-strip-types", path.join(rootDir, "tests", "fixtures", "fake-mcp-child.ts")],
+            cwd: rootDir,
+            expose: {
+              tools: ["echo"],
+              resources: ["docs://index"],
+              prompts: ["debug"]
+            }
+          }
+        ]
+      }
+    });
+
+    const runtime = await hub.runtime.processes.start("failed-child");
+    assert.equal(runtime.status, "errored");
+    assert.equal(runtime.mcpChildren, undefined);
+    assert.deepEqual(hub.runtime.processes.mcp.statusForApp("failed-child"), []);
+
+    const client = await createHttpMcpClient(hub.address().port, hub.runtime.token);
+    try {
+      const tools = await client.listTools();
+      assert.equal(
+        tools.tools.some((tool) => tool.name === "failed-child.echo"),
+        false
+      );
+    } finally {
+      await client.close();
+    }
+  } finally {
+    await hub.close();
   }
 });
 

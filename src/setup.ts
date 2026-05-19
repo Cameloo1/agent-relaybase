@@ -575,7 +575,7 @@ export async function proposeSetupPlans(
         id: "mcp-only",
         label: "MCP/tool server only",
         architecture: "mcp-only",
-        score: 40,
+        score: scoreMcpOnly(detection),
         manifest: mcpManifest,
         detection,
         envStrategy,
@@ -2283,7 +2283,22 @@ function scoreManagedDynamic(detection: ProjectDetection, existingManifest: AppM
   if (!detection.scripts.dev && !detection.scripts.start && !existingManifest) {
     score -= 25;
   }
+  if (detection.appKind === "mcp" && !detection.scripts.dev && !detection.scripts.start && !existingManifest) {
+    score -= 30;
+  }
   return score;
+}
+
+function scoreMcpOnly(detection: ProjectDetection): number {
+  if (detection.appKind === "mcp" && !detection.scripts.dev && !detection.scripts.start) {
+    return 85;
+  }
+
+  if (detection.appKind === "mcp") {
+    return 60;
+  }
+
+  return 40;
 }
 
 function scoreFrameworkWrapper(detection: ProjectDetection): number {

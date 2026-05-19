@@ -2,7 +2,13 @@
 
 Relaybase gives Codex one reliable way to run local apps: configure the app once, open it through a stable route, inspect health and logs, and stop it cleanly.
 
-The repo-local Codex skill lives at:
+The primary repo-local Codex skill lives at:
+
+```text
+skills/relaybase/SKILL.md
+```
+
+The compatibility skill lives at:
 
 ```text
 skills/relaybase-dev/SKILL.md
@@ -15,10 +21,12 @@ Use it when a Codex session is starting, previewing, debugging, routing, or stop
 Point Codex at the skill when the app should use Relaybase:
 
 ```text
-Use $relaybase-dev at skills/relaybase-dev to run this app through Relaybase with direct ports only as fallback.
+Use $relaybase at skills/relaybase to run this app through Relaybase with direct ports only as fallback.
 ```
 
 This tells Codex to prefer manifests, daemon registration, stable routes, routed health checks, logs, and stop verification instead of choosing random localhost ports.
+
+Existing `$relaybase-dev` prompts remain supported for compatibility.
 
 ## Normal Flow
 

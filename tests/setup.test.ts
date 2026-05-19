@@ -175,6 +175,48 @@ test("configure dry-run uses one canonical manifest for selected plan and write 
   assert.equal(JSON.parse(manifestWrite.preview).upstreamPort, undefined);
 });
 
+test("MCP-only projects prefer the MCP setup plan over fake web commands", async () => {
+  const project = await tempProject("relaybase-mcp-only-");
+  await fs.writeFile(
+    path.join(project, "package.json"),
+    JSON.stringify(
+      {
+        name: "tool-server",
+        dependencies: {
+          "@modelcontextprotocol/sdk": "^1.29.0"
+        }
+      },
+      null,
+      2
+    )
+  );
+
+  const detection = await detectProject(project);
+  const plans = await proposeSetupPlans(detection);
+
+  assert.equal(detection.appKind, "mcp");
+  assert.equal(plans[0]?.id, "mcp-only");
+  assert.equal(plans[0]?.manifest.command, "external");
+  assert.notEqual(plans[0]?.manifest.command, "node server.js");
+});
+
+test("repo exposes Relaybase as a Codex plugin and primary skill", async () => {
+  const plugin = JSON.parse(await fs.readFile(path.join(rootDir, ".codex-plugin", "plugin.json"), "utf8"));
+  const mcp = JSON.parse(await fs.readFile(path.join(rootDir, ".mcp.json"), "utf8"));
+  const relaybaseSkill = await fs.readFile(path.join(rootDir, "skills", "relaybase", "SKILL.md"), "utf8");
+  const packageJson = JSON.parse(await fs.readFile(path.join(rootDir, "package.json"), "utf8"));
+
+  assert.equal(plugin.name, "relaybase");
+  assert.equal(plugin.skills, "./skills/");
+  assert.equal(plugin.mcpServers, "./.mcp.json");
+  assert.ok(plugin.interface.defaultPrompt.some((prompt: string) => prompt.includes("$relaybase")));
+  assert.deepEqual(mcp.mcpServers.relaybase.args, ["./bin/relaybase.cjs", "mcp"]);
+  assert.match(relaybaseSkill, /^name: relaybase/m);
+  assert.ok(packageJson.files.includes(".codex-plugin/"));
+  assert.ok(packageJson.files.includes(".mcp.json"));
+  assert.ok(packageJson.files.includes("skills/"));
+});
+
 test("configure can replay saved answers for noninteractive setup", async () => {
   const project = await tempProject("relaybase-answers-");
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-answers-state-"));
@@ -378,6 +420,27 @@ test("CLI list filters online daemon state and keeps status as an alias", async 
     await hub.runtime.processes.stop("running-app").catch(() => undefined);
     await hub.close();
   }
+});
+
+test("CLI rejects unknown options and serves command scoped help", async () => {
+  const unknown = await runRelaybaseCli(["health", "--jsoon"]);
+  assert.notEqual(unknown.code, 0);
+  assert.match(unknown.stderr, /Unknown option: --jsoon/);
+
+  const jsonUnknown = await runRelaybaseCli(["health", "--json", "--jsoon"]);
+  assert.notEqual(jsonUnknown.code, 0);
+  const body = JSON.parse(jsonUnknown.stdout);
+  assert.equal(body.ok, false);
+  assert.match(body.error, /Unknown option: --jsoon/);
+
+  const typoFilter = await runRelaybaseCli(["list", "--runnning"]);
+  assert.notEqual(typoFilter.code, 0);
+  assert.match(typoFilter.stderr, /Unknown option: --runnning/);
+
+  const startHelp = await runRelaybaseCli(["start", "--help"]);
+  assert.equal(startHelp.code, 0);
+  assert.match(startHelp.stdout, /Usage:\s+relaybase start <app-id>/);
+  assert.equal(startHelp.stderr, "");
 });
 
 test("configure generates a Docker Compose profile, override, lifecycle hooks, and evidence contract", async () => {
@@ -645,6 +708,7 @@ test("Docker setup validates explicit service and target port input", async () =
 
 test("skill docs prefer the Windows wrapper for direct helper actions", async () => {
   const docs = [
+    "skills/relaybase/SKILL.md",
     "skills/relaybase-dev/SKILL.md",
     "skills/relaybase-dev/references/windows-runtime.md",
     "skills/relaybase-dev/references/relaybase-contract.md",
@@ -658,6 +722,11 @@ test("skill docs prefer the Windows wrapper for direct helper actions", async ()
       if (line.includes("relaybase-dev.ps1 -Action")) {
         assert.match(line, /pwsh -NoProfile -File/, `${relativePath} has a direct .ps1 helper action: ${line}`);
       }
+      assert.doesNotMatch(
+        line,
+        /^\.\\scripts\\relaybase-dev\.cmd -Action/,
+        `${relativePath} uses a helper path that fails from repo root: ${line}`
+      );
     }
   }
 });

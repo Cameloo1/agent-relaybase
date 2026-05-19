@@ -212,13 +212,19 @@ test("dashboard labels app backend ports explicitly", () => {
         runtime: {
           status: "stopped",
           health: "unknown",
-          logLines: 0
+          logLines: 0,
+          canStart: true,
+          canStop: false
         }
       }
     ]
   });
 
-  assert.match(html, /<th>Backend port<\/th>/);
+  assert.match(html, /<th scope="col">Backend port<\/th>/);
+  assert.match(html, /aria-live="polite"/);
+  assert.match(html, /aria-label="Start ' \+ appLabel/);
+  assert.match(html, /aria-label="Stop ' \+ appLabel/);
+  assert.match(html, /disabled aria-disabled="true"/);
   assert.doesNotMatch(html, /<th>Port<\/th>/);
   assert.match(html, /fixed :/);
   assert.match(html, /requested/);

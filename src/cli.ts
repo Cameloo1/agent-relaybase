@@ -48,13 +48,27 @@ interface CliOptions {
 }
 
 void main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  const message = error instanceof Error ? error.message : String(error);
+  if (process.argv.slice(2).includes("--json")) {
+    console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+  } else {
+    console.error(message);
+  }
   process.exitCode = 1;
 });
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const command = args.shift() ?? "help";
+  if (command === "help" || command === "--help" || command === "-h") {
+    printHelp();
+    return;
+  }
+  if (args.includes("--help") || args.includes("-h")) {
+    printHelp(command);
+    return;
+  }
+
   const options = parseOptions(args);
 
   switch (command) {
@@ -89,11 +103,6 @@ async function main(): Promise<void> {
       return;
     case "logs":
       await logs(requiredArg(args[0], "logs"), options);
-      return;
-    case "help":
-    case "--help":
-    case "-h":
-      printHelp();
       return;
     default:
       throw new Error(`Unknown command: ${command}`);
@@ -375,6 +384,8 @@ function parseOptions(args: string[]): CliOptions {
       ];
     } else if (arg === "--docker-start-desktop") {
       options.docker.startDockerDesktop = true;
+    } else if (arg.startsWith("-")) {
+      throw new Error(`Unknown option: ${arg}`);
     }
   }
 
@@ -530,7 +541,47 @@ function apiRequest(
   });
 }
 
-function printHelp(): void {
+function printHelp(topic?: string): void {
+  if (topic === "list" || topic === "status") {
+    console.log(`Relaybase list
+
+Usage:
+  relaybase list [--running|--active|--stopped|--ready|--attention] [--json] [--verbose]
+
+Options:
+  --running                      Show apps with runtime status running
+  --active                       Show apps with runtime status starting, running, or stopping
+  --stopped                      Show apps with runtime status stopped
+  --ready                        Show apps with readiness state ready
+  --attention                    Show apps needing operator review
+  --json                         Print machine-readable output
+  --verbose                      Include cwd, manifest, MCP, stop, and error detail
+`);
+    return;
+  }
+
+  if (topic === "start" || topic === "stop" || topic === "restart") {
+    console.log(`Relaybase ${topic}
+
+Usage:
+  relaybase ${topic} <app-id> [--port <number>] [--host <host>] [--state-dir <path>]
+
+${topic} calls the running Relaybase daemon and requires the local mutation token.
+`);
+    return;
+  }
+
+  if (topic === "mcp") {
+    console.log(`Relaybase MCP
+
+Usage:
+  relaybase mcp [--state-dir <path>] [--port <number>] [--host <host>]
+
+Runs Relaybase as a stdio MCP server for local clients.
+`);
+    return;
+  }
+
   console.log(`Relaybase
 
 Commands:

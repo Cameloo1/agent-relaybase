@@ -1,4 +1,4 @@
 interface:
   display_name: "Relaybase Dev"
   short_description: "Develop apps through Relaybase first"
-  default_prompt: "Use $relaybase-dev to run this app through Relaybase with direct ports only as fallback."
+  default_prompt: "Use $relaybase to run this app through Relaybase with direct ports only as fallback; $relaybase-dev remains compatible."
