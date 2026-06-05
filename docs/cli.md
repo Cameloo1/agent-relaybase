@@ -23,6 +23,58 @@ Use `relaybase list` for the read-only app inventory. Lower-level commands remai
 
 `--json` results can include `nextActions`: concrete follow-up actions with an owner, command when available, and evidence when Relaybase can name the failing boundary.
 
+## tui
+
+```powershell
+relaybase serve
+relaybase tui
+relaybase tui --port 7777 --host 127.0.0.1
+relaybase tui -- --theme dark
+```
+
+`relaybase tui` launches the Go Bubble Tea TUI as a client of the running daemon. It does not start apps, inspect ports, or manage process lifecycle locally. The bridge passes `--base-url` and `--state-dir` to the TUI using the same `--host`, `--port`, and `--state-dir` conventions as other Relaybase commands. TUI-specific arguments can be passed after `--`.
+
+Binary resolution order:
+
+1. `RELAYBASE_TUI_BIN`
+2. repo-local `.relaybase/tui-dev-bin/<platform binary>` produced by `npm run tui:build`
+3. `bin/relaybase-tui/<platform binary>` inside the installed package
+4. optional `@cameloo/relaybase-tui-<platform>-<arch>` platform package
+5. globally installed `relaybase-tui` on `PATH`
+
+Supported binary names:
+
+- `relaybase-tui-windows-amd64.exe`
+- `relaybase-tui-windows-arm64.exe`
+- `relaybase-tui-darwin-amd64`
+- `relaybase-tui-darwin-arm64`
+- `relaybase-tui-linux-amd64`
+- `relaybase-tui-linux-arm64`
+
+Local source builds write the package asset binary:
+
+```powershell
+npm run doctor:tui
+npm run tui:build
+npm run tui:build:all
+npm run package:check
+```
+
+Direct binary launch is also supported:
+
+```powershell
+.\bin\relaybase-tui\relaybase-tui-windows-amd64.exe --base-url http://127.0.0.1:7777 --state-dir "$env:LOCALAPPDATA\Relaybase"
+```
+
+Troubleshooting:
+
+- Missing binary: build with `npm run tui:build`, install a package that includes the matching asset, or set `RELAYBASE_TUI_BIN`.
+- Package verification: `npm run package:check` reports whether the current-platform TUI binary is in the npm dry-run. Use `RELAYBASE_REQUIRE_TUI_BINARY=1 npm run package:check` after `npm run tui:build` for release gating.
+- Missing Go: install Go `1.25.x`, open a new terminal so `PATH` is refreshed, then verify with `go version`, `go env GOVERSION GOOS GOARCH GOMOD GOMODCACHE`, and `npm run doctor:tui`.
+- Daemon unavailable: start `relaybase serve`; the bridge does not silently start apps.
+- Auth failure: verify the selected `--state-dir` contains the Relaybase `session-token`, or set `RELAYBASE_TOKEN` for the TUI process.
+- Unsupported terminal: use the TUI dark/light fallback with `relaybase tui -- --theme dark` or `relaybase tui -- --theme light`.
+
 ## configure
 
 ```powershell
@@ -114,6 +166,7 @@ Runtime filters require the daemon because Relaybase cannot prove running state 
 ```powershell
 relaybase serve
 relaybase mcp
+relaybase tui
 relaybase register <manifest>
 relaybase start <app-id>
 relaybase stop <app-id>
@@ -122,4 +175,4 @@ relaybase status
 relaybase logs <app-id>
 ```
 
-`serve` starts the localhost daemon. `mcp` runs Relaybase as a stdio MCP server. `register` writes a manifest into Relaybase state. `start`, `stop`, and `restart` call the daemon API and require the local mutation token. `status` is a compatibility alias for `list`. `logs` prints the daemon's recent in-memory log snapshot for one app.
+`serve` starts the localhost daemon. `mcp` runs Relaybase as a stdio MCP server. `tui` launches the Go terminal client when a matching binary is installed or configured. `register` writes a manifest into Relaybase state. `start`, `stop`, and `restart` call the daemon API and require the local mutation token. `status` is a compatibility alias for `list`. `logs` prints the daemon's recent in-memory log snapshot for one app.

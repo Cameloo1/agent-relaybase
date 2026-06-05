@@ -4,7 +4,9 @@ import type { Registry } from "./registry.ts";
 import { DEFAULT_HOST, DEFAULT_PORT, DEFAULT_PORT_RANGE_END, DEFAULT_PORT_RANGE_START } from "./state.ts";
 import { ChildMcpSupervisor } from "./childMcp.ts";
 import { checkAppHealth, waitForHealthy } from "./health.ts";
-import { findAvailablePort, isPortOpen } from "./ports.ts";
+import { type DurableLogEvent, type LogStore, type LogStoreQuery, type LogStoreQueryResult } from "./logStore.ts";
+import { canBindPort, isPortOpen } from "./ports.ts";
+import { redactSecretLikeValues } from "./redaction.ts";
 import type {
   AppRecord,
   AppStatusView,
@@ -45,12 +47,14 @@ interface SpawnSpec {
   shell: boolean;
 }
 
-export interface AppLogEvent {
+export type AppLogEvent = DurableLogEvent;
+
+export interface AppLogStreamRotatedEvent {
   appId: string;
-  line: string;
-  stream: "stdout" | "stderr" | "system";
-  source: "system" | LifecycleHookName;
-  sequence: number;
+  droppedLogs: number;
+  droppedEvents: number;
+  retainedLogs: number;
+  retainedEvents: number;
   at: string;
 }
 
@@ -60,6 +64,7 @@ export interface ProcessManagerOptions {
   portRangeStart?: number;
   portRangeEnd?: number;
   stopPortOpenProbe?: (port: number, host: string) => Promise<boolean>;
+  logStore?: LogStore;
 }
 
 export class ProcessManager {
@@ -70,9 +75,12 @@ export class ProcessManager {
   readonly portRangeEnd: number;
   readonly mcp: ChildMcpSupervisor;
   readonly stopPortOpenProbe: (port: number, host: string) => Promise<boolean>;
+  readonly logStore?: LogStore;
   #runtime = new Map<string, RuntimeEntry>();
   #mutations = new Map<string, { action: "start" | "stop" | "restart"; promise: Promise<RuntimeView> }>();
+  #portReservations = new Map<number, string>();
   #logSubscribers = new Set<(event: AppLogEvent) => void>();
+  #logRotationSubscribers = new Set<(event: AppLogStreamRotatedEvent) => void>();
   #logSequence = 0;
 
   constructor(registry: Registry, options: ProcessManagerOptions = {}) {
@@ -82,6 +90,8 @@ export class ProcessManager {
     this.portRangeStart = options.portRangeStart ?? DEFAULT_PORT_RANGE_START;
     this.portRangeEnd = options.portRangeEnd ?? DEFAULT_PORT_RANGE_END;
     this.stopPortOpenProbe = options.stopPortOpenProbe ?? ((port, host) => isPortOpen(port, host));
+    this.logStore = options.logStore;
+    this.#logSequence = options.logStore?.lastSequence ?? 0;
     this.mcp = new ChildMcpSupervisor();
   }
 
@@ -172,17 +182,24 @@ export class ProcessManager {
     entry.child = child;
     entry.pid = child.pid;
     entry.startedAt = new Date().toISOString();
-    this.#appendLog(app.id, `[relaybase] starting ${app.id} on ${this.hubHost}:${assignedPort}`, "system", "system");
+    this.#appendLog(
+      app.id,
+      `[relaybase] starting ${app.id} on ${this.hubHost}:${assignedPort}`,
+      "system",
+      "system",
+      app,
+      env
+    );
     await this.mcp.startApp(app);
 
-    child.stdout.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stdout", "start"));
-    child.stderr.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stderr", "start"));
+    child.stdout.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stdout", "start", app, env));
+    child.stderr.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stderr", "start", app, env));
     child.once("error", (error) => {
       entry.status = "errored";
       entry.health = "unhealthy";
       entry.phase = "errored";
       entry.lastError = error.message;
-      this.#appendLog(app.id, `[relaybase] process error: ${error.message}`, "system", "system");
+      this.#appendLog(app.id, `[relaybase] process error: ${error.message}`, "system", "system", app, env);
     });
     child.once("exit", (code, signal) => {
       if (entry.status !== "stopped" && entry.status !== "errored") {
@@ -200,7 +217,9 @@ export class ProcessManager {
         app.id,
         `[relaybase] exited code=${code ?? "null"} signal=${signal ?? "null"}`,
         "system",
-        "system"
+        "system",
+        app,
+        env
       );
     });
 
@@ -283,7 +302,7 @@ export class ProcessManager {
     entry.phase = "stopping";
     entry.health = "unhealthy";
     entry.cleanupStatus = app.stopCommand ? "pending" : "not_needed";
-    this.#appendLog(id, "[relaybase] stopping", "system", "system");
+    this.#appendLog(id, "[relaybase] stopping", "system", "system", app);
     entry.mcpDrain = await this.mcp.stopApp(id);
 
     await this.#terminateChild(entry.child);
@@ -307,12 +326,49 @@ export class ProcessManager {
     return promise;
   }
 
-  async logs(id: string): Promise<string[]> {
-    return [...(this.#runtime.get(id)?.logs ?? [])];
+  async logs(id: string, options: LogStoreQuery = {}): Promise<string[]> {
+    if (this.logStore) {
+      const result = await this.queryLogs({ ...options, appId: id });
+      return result.events.map((event) => event.message);
+    }
+    const limit = options.limit ?? 500;
+    const lines = [...(this.#runtime.get(id)?.logs ?? [])];
+    return lines.slice(-limit);
   }
 
-  async logEvents(id: string): Promise<AppLogEvent[]> {
-    return [...(this.#runtime.get(id)?.logEvents ?? [])];
+  async logEvents(id: string, options: LogStoreQuery = {}): Promise<AppLogEvent[]> {
+    if (this.logStore) {
+      return (await this.queryLogs({ ...options, appId: id })).events;
+    }
+    const limit = options.limit ?? 500;
+    return [...(this.#runtime.get(id)?.logEvents ?? [])].slice(-limit);
+  }
+
+  async queryLogs(query: LogStoreQuery): Promise<LogStoreQueryResult> {
+    if (this.logStore) {
+      return this.logStore.query(query);
+    }
+
+    const appId = query.appId;
+    const events = appId ? [...(this.#runtime.get(appId)?.logEvents ?? [])] : [];
+    const filtered = events
+      .filter((event) => (query.before === undefined ? true : event.sequence < query.before))
+      .filter((event) => (query.after === undefined ? true : event.sequence > query.after))
+      .slice(-(query.limit ?? 500));
+    const oldestSequence = filtered[0]?.sequence;
+    const newestSequence = filtered.at(-1)?.sequence;
+    return {
+      events: filtered,
+      page: {
+        limit: query.limit ?? 500,
+        ...(query.before !== undefined ? { before: query.before } : {}),
+        ...(query.after !== undefined ? { after: query.after } : {}),
+        ...(oldestSequence !== undefined ? { oldestSequence } : {}),
+        ...(newestSequence !== undefined ? { newestSequence } : {}),
+        hasMore: events.length > filtered.length
+      },
+      diagnostics: []
+    };
   }
 
   subscribeLogs(id: string, listener: (event: AppLogEvent) => void): () => void {
@@ -324,6 +380,20 @@ export class ProcessManager {
     this.#logSubscribers.add(wrapped);
     return () => {
       this.#logSubscribers.delete(wrapped);
+    };
+  }
+
+  subscribeAllLogs(listener: (event: AppLogEvent) => void): () => void {
+    this.#logSubscribers.add(listener);
+    return () => {
+      this.#logSubscribers.delete(listener);
+    };
+  }
+
+  subscribeLogRotations(listener: (event: AppLogStreamRotatedEvent) => void): () => void {
+    this.#logRotationSubscribers.add(listener);
+    return () => {
+      this.#logRotationSubscribers.delete(listener);
     };
   }
 
@@ -473,19 +543,22 @@ export class ProcessManager {
       entry.phase = entry.cleanupStatus === "verification_failed" ? "stop_verification_failed" : "cleanup_failed";
       entry.lastError = failureReason;
       this.#finishAttempt(attempt, "failed", entry.phase, failureReason);
-      this.#appendLog(app.id, `[relaybase] stop failed: ${failureReason}`, "system", "system");
+      this.#appendLog(app.id, `[relaybase] stop failed: ${failureReason}`, "system", "system", app, env);
       return this.#view(entry, app.id);
     }
 
     entry.status = "stopped";
     entry.health = "unknown";
     entry.phase = "stopped";
+    if (entry.assignedPort) {
+      this.#releasePortReservation(app.id, entry.assignedPort);
+    }
     entry.assignedPort = undefined;
     entry.pid = undefined;
     entry.lastError = undefined;
     entry.blockingReason = undefined;
     this.#finishAttempt(attempt, "succeeded", entry.phase);
-    this.#appendLog(app.id, "[relaybase] stopped", "system", "system");
+    this.#appendLog(app.id, "[relaybase] stopped", "system", "system", app, env);
     return this.#view(entry, app.id);
   }
 
@@ -501,6 +574,7 @@ export class ProcessManager {
     if (!app.stopCommand) {
       entry.cleanupStatus = "not_needed";
       if (entry.assignedPort && (await this.#waitForPortClosed(entry.assignedPort, 3000))) {
+        this.#releasePortReservation(app.id, entry.assignedPort);
         entry.assignedPort = undefined;
       }
       return;
@@ -523,6 +597,7 @@ export class ProcessManager {
     }
 
     if (entry.assignedPort && (await this.#waitForPortClosed(entry.assignedPort, 3000))) {
+      this.#releasePortReservation(app.id, entry.assignedPort);
       entry.assignedPort = undefined;
     } else if (entry.assignedPort) {
       entry.cleanupStatus = "verification_failed";
@@ -565,12 +640,12 @@ export class ProcessManager {
       child.stdout.on("data", (chunk) => {
         const text = this.#redact(chunk.toString(), env);
         hook.stdout?.push(...this.#lines(text));
-        this.#appendLog(app.id, text, "stdout", name);
+        this.#appendLog(app.id, chunk.toString(), "stdout", name, app, env);
       });
       child.stderr.on("data", (chunk) => {
         const text = this.#redact(chunk.toString(), env);
         hook.stderr?.push(...this.#lines(text));
-        this.#appendLog(app.id, text, "stderr", name);
+        this.#appendLog(app.id, chunk.toString(), "stderr", name, app, env);
       });
       child.once("error", (error) => {
         hook.error = error.message;
@@ -696,14 +771,7 @@ export class ProcessManager {
   }
 
   #redact(text: string, env: NodeJS.ProcessEnv): string {
-    let redacted = text;
-    for (const [key, value] of Object.entries(env)) {
-      if (!value || value.length < 4 || !/(token|secret|password|key)/i.test(key)) {
-        continue;
-      }
-      redacted = redacted.split(value).join("[redacted]");
-    }
-    return redacted;
+    return redactSecretLikeValues(text, env).value;
   }
 
   #lines(text: string): string[] {
@@ -711,12 +779,54 @@ export class ProcessManager {
   }
 
   async #assignPort(app: AppRecord): Promise<number | undefined> {
+    this.#releaseAppPortReservations(app.id);
+
     if (app.upstreamPort) {
+      if (this.#isPortReserved(app.upstreamPort, app.id)) {
+        return undefined;
+      }
       const bindable = await isPortOpen(app.upstreamPort, this.hubHost).then((open) => !open);
-      return bindable ? app.upstreamPort : undefined;
+      if (!bindable) {
+        return undefined;
+      }
+      this.#reservePort(app.id, app.upstreamPort);
+      return app.upstreamPort;
     }
 
-    return findAvailablePort(this.portRangeStart, this.portRangeEnd, this.hubHost);
+    for (let port = this.portRangeStart; port <= this.portRangeEnd; port += 1) {
+      if (this.#isPortReserved(port, app.id)) {
+        continue;
+      }
+      if (await canBindPort(port, this.hubHost)) {
+        this.#reservePort(app.id, port);
+        return port;
+      }
+    }
+
+    throw new Error(`No available ports in range ${this.portRangeStart}-${this.portRangeEnd}.`);
+  }
+
+  #reservePort(appId: string, port: number): void {
+    this.#portReservations.set(port, appId);
+  }
+
+  #releasePortReservation(appId: string, port: number): void {
+    if (this.#portReservations.get(port) === appId) {
+      this.#portReservations.delete(port);
+    }
+  }
+
+  #releaseAppPortReservations(appId: string): void {
+    for (const [port, owner] of this.#portReservations) {
+      if (owner === appId) {
+        this.#portReservations.delete(port);
+      }
+    }
+  }
+
+  #isPortReserved(port: number, appId: string): boolean {
+    const owner = this.#portReservations.get(port);
+    return Boolean(owner && owner !== appId);
   }
 
   #spawnSpec(command: string): SpawnSpec {
@@ -849,7 +959,9 @@ export class ProcessManager {
     id: string,
     text: string,
     stream: AppLogEvent["stream"] = "system",
-    source: AppLogEvent["source"] = "system"
+    source: AppLogEvent["source"] = "system",
+    app?: AppRecord,
+    env?: NodeJS.ProcessEnv
   ): void {
     const entry = this.#runtime.get(id);
     if (!entry) {
@@ -861,16 +973,42 @@ export class ProcessManager {
         continue;
       }
 
-      entry.logs.push(line);
+      const redaction = redactSecretLikeValues(line, env);
+      const safeLine = redaction.value;
+      entry.logs.push(safeLine);
+      const timestamp = new Date().toISOString();
       const event: AppLogEvent = {
+        sequence: ++this.#logSequence,
+        timestamp,
+        at: timestamp,
         appId: id,
-        line,
+        groupId: app?.relaybase?.groupId ?? id,
+        componentRole: app?.relaybase?.componentRole ?? "other",
+        line: safeLine,
+        message: safeLine,
         stream,
         source,
-        sequence: ++this.#logSequence,
-        at: new Date().toISOString()
+        level: stream === "stderr" ? "error" : "info",
+        redacted: redaction.redacted
       };
       entry.logEvents.push(event);
+      if (this.logStore) {
+        void this.logStore
+          .append({
+            sequence: event.sequence,
+            timestamp: event.timestamp,
+            appId: event.appId,
+            groupId: event.groupId,
+            componentRole: event.componentRole,
+            stream: event.stream,
+            source: event.source,
+            level: event.level,
+            message: line,
+            redacted: event.redacted,
+            env
+          })
+          .catch(() => undefined);
+      }
       for (const subscriber of this.#logSubscribers) {
         try {
           subscriber(event);
@@ -880,12 +1018,32 @@ export class ProcessManager {
       }
     }
 
-    if (entry.logs.length > 500) {
-      entry.logs.splice(0, entry.logs.length - 500);
+    const droppedLogs = entry.logs.length > 500 ? entry.logs.length - 500 : 0;
+    if (droppedLogs) {
+      entry.logs.splice(0, droppedLogs);
     }
 
-    if (entry.logEvents.length > 500) {
-      entry.logEvents.splice(0, entry.logEvents.length - 500);
+    const droppedEvents = entry.logEvents.length > 500 ? entry.logEvents.length - 500 : 0;
+    if (droppedEvents) {
+      entry.logEvents.splice(0, droppedEvents);
+    }
+
+    if (droppedLogs || droppedEvents) {
+      const rotation: AppLogStreamRotatedEvent = {
+        appId: id,
+        droppedLogs,
+        droppedEvents,
+        retainedLogs: entry.logs.length,
+        retainedEvents: entry.logEvents.length,
+        at: new Date().toISOString()
+      };
+      for (const subscriber of this.#logRotationSubscribers) {
+        try {
+          subscriber(rotation);
+        } catch {
+          // Rotation subscribers are observers; log retention must not block on them.
+        }
+      }
     }
   }
 

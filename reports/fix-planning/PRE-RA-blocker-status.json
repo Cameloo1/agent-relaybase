@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-06-02",
+  "lastUpdatedByPrompt": "post-go-full-verification",
+  "sourceReport": "reports/fix-planning/PRE-RA-FP007-pre-ai-agent-readiness-plan.md",
+  "aiAgentPromptsBlocked": true,
+  "nextRecommendedPrompt": "PRE-RA-WORKSPACE-HYGIENE-COMMIT-OR-CLEAN-BASELINE",
+  "blockers": [
+    {
+      "id": "PRE-RA-BLOCKER-GO-TOOLCHAIN",
+      "fp000Id": "RB-001",
+      "severity": "P0",
+      "classification": ["environment", "repo-tooling"],
+      "ownerPrompt": "PRE-RA-FIX001C",
+      "status": "verified",
+      "environmentStatus": "go-available-via-program-files-path-in-this-session",
+      "currentEvidence": [
+        "node --version => v24.15.0",
+        "npm.cmd --version => 11.12.1",
+        "go version => go version go1.26.3 windows/amd64",
+        "go env from tui/ => GOVERSION go1.26.3, GOOS windows, GOARCH amd64, GOMOD tui/go.mod, GOMODCACHE artifacts/go-mod-cache",
+        "tui/go.mod requires Go 1.25.0",
+        ".go-version mirrors 1.25.0",
+        "npm.cmd run tui:doctor passed"
+      ],
+      "remainingEvidenceNeeded": [],
+      "blocksAiAgentPrompts": false
+    },
+    {
+      "id": "PRE-RA-BLOCKER-TUI-PACKAGE-BINARY",
+      "fp000Id": "RB-002",
+      "severity": "P0",
+      "classification": ["packaging", "environment"],
+      "ownerPrompt": "PRE-RA-FIX003",
+      "status": "verified",
+      "dependencies": ["PRE-RA-BLOCKER-GO-TOOLCHAIN"],
+      "currentEvidence": [
+        "npm.cmd run tui:build passed",
+        "bin/relaybase-tui/relaybase-tui-windows-amd64.exe exists",
+        "npm.cmd run package:check passed with TUI package binary present in workspace and npm dry-run",
+        "npm.cmd run package:check:strict passed",
+        "npm.cmd run tui:smoke verified relaybase tui bridge launch"
+      ],
+      "remainingEvidenceNeeded": [],
+      "blocksAiAgentPrompts": false
+    },
+    {
+      "id": "PRE-RA-BLOCKER-TUI-CHECKS-UNVERIFIED",
+      "fp000Id": "RB-003",
+      "severity": "P1",
+      "classification": ["test-coverage", "environment"],
+      "ownerPrompt": "PRE-RA-FIX002A-GO-CAPABLE-VERIFICATION",
+      "status": "verified-with-race-unsupported-on-this-host",
+      "dependencies": ["PRE-RA-BLOCKER-GO-TOOLCHAIN"],
+      "currentEvidence": [
+        "npm.cmd run tui:test passed",
+        "npm.cmd run tui:vet passed",
+        "npm.cmd run tui:snapshot passed",
+        "node scripts/tui-go.mjs race returned LASTEXIT:2 with unsupported-race diagnostic because Go race requires cgo",
+        "npm.cmd test passed 113/113 Node tests",
+        "npm.cmd run test:jest passed 1 suite / 4 tests"
+      ],
+      "remainingEvidenceNeeded": [
+        "Run race on a cgo/C-compiler-capable host or CI lane if release policy requires a passing race detector run."
+      ],
+      "blocksAiAgentPrompts": false
+    },
+    {
+      "id": "PRE-RA-BLOCKER-GORELEASER-CHECKSUM",
+      "fp000Id": "RB-004",
+      "severity": "P2",
+      "classification": ["release-tooling", "environment"],
+      "ownerPrompt": "PRE-RA-FIX005",
+      "status": "release-track-deferred-local-environment-blocked-no-goreleaser",
+      "currentEvidence": [
+        "where.exe goreleaser returned no match",
+        "npm.cmd run release:check failed closed with clear missing-GoReleaser diagnostic",
+        "PRE-RA-FP007 classifies GoReleaser/checksum verification as release-track-only once mandatory TUI gates pass"
+      ],
+      "remainingEvidenceNeeded": [
+        "goreleaser --version on a GoReleaser-capable host",
+        "npm.cmd run release:check passes on a GoReleaser-capable host or CI",
+        "npm.cmd run release:dry-run generates dist/relaybase-tui-checksums.txt"
+      ],
+      "blocksAiAgentPrompts": false
+    },
+    {
+      "id": "PRE-RA-BLOCKER-WORKSPACE-HYGIENE",
+      "fp000Id": "RB-005",
+      "severity": "P1",
+      "classification": ["workspace-hygiene"],
+      "ownerPrompt": "PRE-RA-FIX006",
+      "status": "blocked-dirty-worktree",
+      "currentEvidence": [
+        "npm.cmd run verify:clean-worktree failed",
+        "git status --short shows modified tracked release work and many untracked PRE-RA/R000-R015 source, docs, reports, scripts, and TUI files",
+        "The hygiene command did not delete, stage, or reset any user changes"
+      ],
+      "remainingEvidenceNeeded": [
+        "Classify and intentionally stage/commit the current source/docs/scripts/tests/reports, or rerun final verification from a clean disposable checkout.",
+        "Run npm.cmd run verify:clean-worktree from the chosen clean baseline.",
+        "Capture git status --short before and after final verification."
+      ],
+      "blocksAiAgentPrompts": true
+    },
+    {
+      "id": "PRE-RA-BLOCKER-TUI-EVIDENCE-CAPTURE",
+      "fp000Id": "RB-006",
+      "severity": "P2",
+      "classification": ["evidence-coverage", "environment"],
+      "ownerPrompt": "PRE-RA-FIX004",
+      "status": "verified",
+      "dependencies": ["PRE-RA-BLOCKER-GO-TOOLCHAIN", "PRE-RA-BLOCKER-TUI-PACKAGE-BINARY"],
+      "currentEvidence": [
+        "npm.cmd run tui:smoke passed",
+        "reports/release-candidate/tui-evidence-report.md verdict is PASS",
+        "artifacts/tui-verification/pty-transcript.txt contains real rendered TUI frames",
+        "Smoke verified direct binary launch, relaybase tui bridge launch, daemon connection, grouped frontend/backend panes, preferences, slash confirmation, export confirmation, assistant/command-bar confirmation, and no destructive action before confirmation"
+      ],
+      "remainingEvidenceNeeded": [],
+      "blocksAiAgentPrompts": false
+    }
+  ]
+}

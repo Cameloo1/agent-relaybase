@@ -169,7 +169,7 @@ A route response with status `200` through `499` counts as reachable because it 
 
 ## Logs
 
-`GET /__hub/api/apps/<id>/logs` returns the in-memory log snapshot.
+`GET /__hub/api/apps/<id>/logs` returns the durable log snapshot. It accepts `limit`, `before`, and `after` sequence query parameters for TUI scrollback paging.
 
 `GET /__hub/api/apps/<id>/logs/stream` returns an SSE stream with these event types:
 
@@ -182,7 +182,7 @@ ping
 
 Log events include app id, line, stream, source, sequence number, and timestamp. Stream values are `stdout`, `stderr`, and `system`.
 
-Relaybase keeps the most recent 500 log lines and 500 structured log events per running entry.
+Relaybase still keeps a bounded in-memory live buffer for streaming, but persisted scrollback is stored under `<state-dir>/logs/`. See [logs.md](logs.md) for storage, retention, redaction, and corruption diagnostics.
 
 ## Stop Verification
 

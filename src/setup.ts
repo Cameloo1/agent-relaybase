@@ -1,9 +1,14 @@
 import { spawn } from "node:child_process";
-import { closeSync, openSync, promises as fs } from "node:fs";
-import http from "node:http";
+import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+  daemonHttpRequest,
+  discovery,
+  ensureDaemon,
+  type DaemonEnsureResult,
+  type RelaybaseCommandOptions
+} from "./daemonLauncher.ts";
 import {
   buildDockerComposeSetup,
   classifyDockerFailure,
@@ -15,9 +20,22 @@ import {
   type DockerSetupOptions
 } from "./dockerProfile.ts";
 import { Registry, readManifestFile } from "./registry.ts";
+import { detectRuntimeMatrix } from "./setupRuntimeAdapters.ts";
+import type {
+  HealthCandidate,
+  PortBindingStrategy,
+  RepairCandidate,
+  RuntimeDetectionResult,
+  RuntimeId,
+  RuntimeMatrixSnapshot,
+  SetupQuestion,
+  StartCommandCandidate
+} from "./setupRuntimeTypes.ts";
 import { DEFAULT_HOST, DEFAULT_PORT, getDefaultStateDir, getOrCreateSessionToken, isNodeErrno } from "./state.ts";
-import type { AppManifestInput, AppRecord, AppState } from "./types.ts";
+import type { AppComponentRole, AppManifestInput, AppRecord, AppState } from "./types.ts";
 import { normalizeManifest } from "./validation.ts";
+
+export type { DaemonEnsureResult, RelaybaseCommandOptions } from "./daemonLauncher.ts";
 
 export type SetupArchitecture =
   | "managed-dynamic-port"
@@ -31,14 +49,6 @@ export type SetupArchitecture =
   | "mcp-only";
 
 export type EnvStrategy = "runtime-injection" | "env-relaybase-file" | "guarded-env-block" | "none";
-
-export interface RelaybaseCommandOptions {
-  cwd: string;
-  host: string;
-  port: number;
-  stateDir: string;
-  json?: boolean;
-}
 
 export type NextActionOwner =
   | "daemon"
@@ -57,21 +67,6 @@ export interface NextAction {
   evidence?: string;
 }
 
-export interface DaemonEnsureResult {
-  reachable: boolean;
-  started: boolean;
-  pid?: number;
-  command?: string;
-  args?: string[];
-  cwd?: string;
-  logPath?: string;
-  pidPath?: string;
-  metadataPath?: string;
-  exitCode?: number | null;
-  signal?: NodeJS.Signals | null;
-  error?: string;
-}
-
 export interface ConfigureProjectOptions extends RelaybaseCommandOptions {
   yes?: boolean;
   dryRun?: boolean;
@@ -82,8 +77,24 @@ export interface ConfigureProjectOptions extends RelaybaseCommandOptions {
   mcpInstall?: boolean;
   envStrategy?: EnvStrategy;
   selectedPlanId?: string;
+  commandHint?: string;
+  portStrategyHint?: string;
+  componentMetadata?: SetupComponentMetadata;
   startDaemon?: boolean;
   docker?: DockerSetupOptions;
+}
+
+export interface SetupComponentMetadata {
+  appId?: string;
+  name?: string;
+  command?: string;
+  cwd?: string;
+  healthUrl?: string;
+  groupId?: string;
+  componentRole?: AppComponentRole;
+  displayName?: string;
+  paneLabel?: string;
+  paneOrder?: number;
 }
 
 export interface OpenProjectOptions extends RelaybaseCommandOptions {
@@ -111,11 +122,15 @@ export interface ProjectDetection {
   portEnvKeys: string[];
   detectedPorts: number[];
   existingManifestPath?: string;
+  existingLaunchWrapperPath?: string;
+  existingSetupProfilePath?: string;
   dockerComposeFiles: string[];
   docker?: DockerComposeDetection;
   mcpHints: string[];
   monorepoHints: string[];
   healthCandidates: string[];
+  runtimeMatrix: RuntimeMatrixSnapshot;
+  primaryRuntime?: RuntimeDetectionResult;
 }
 
 export interface SetupWrite {
@@ -137,6 +152,16 @@ export interface SetupPlan {
   writes: SetupWrite[];
   recoverySteps: string[];
   requiresInput?: string[];
+  runtimeId?: RuntimeId;
+  startCommandCandidates?: StartCommandCandidate[];
+  portBindingStrategies?: PortBindingStrategy[];
+  runtimeHealthCandidates?: HealthCandidate[];
+  setupQuestions?: SetupQuestion[];
+  repairCandidates?: RepairCandidate[];
+  selectedCommand?: string;
+  selectedCommandSource?: "default" | "package-script" | "runtime-candidate";
+  selectedCommandCandidateId?: string;
+  portStrategyHint?: string;
 }
 
 export interface AppliedFile {
@@ -175,6 +200,19 @@ export interface RecoveryAttempt {
   architecture: SetupArchitecture;
   ready: boolean;
   error?: string;
+}
+
+export class SetupSelectionError extends Error {
+  readonly code: string;
+  readonly detail?: unknown;
+  readonly userAction?: string;
+
+  constructor(code: string, message: string, options: { detail?: unknown; userAction?: string } = {}) {
+    super(message);
+    this.code = code;
+    this.detail = options.detail;
+    this.userAction = options.userAction;
+  }
 }
 
 export interface OpenProjectResult {
@@ -275,6 +313,15 @@ interface LaunchProfile {
   manifestPath: string;
   command: string;
   envStrategy: EnvStrategy;
+  runtimeId?: RuntimeId;
+  runtimeCommandCandidates?: StartCommandCandidate[];
+  runtimePortStrategies?: PortBindingStrategy[];
+  runtimeHealthCandidates?: HealthCandidate[];
+  setupQuestions?: SetupQuestion[];
+  selectedCommand?: string;
+  selectedCommandSource?: string;
+  selectedCommandCandidateId?: string;
+  portStrategy?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -282,6 +329,7 @@ interface LaunchProfile {
 const SETUP_DIR = ".relaybase";
 const MANIFEST_FILE = "relaybase.app.json";
 const PROFILE_FILE = "launch-profile.json";
+const SETUP_PROFILE_FILE = "setup-profile.json";
 const REPORT_FILE = "setup-report.json";
 const EVENTS_DIR = "runs";
 const ANSWERS_FILE = "setup.answers.json";
@@ -308,6 +356,12 @@ export async function detectProject(cwd: string): Promise<ProjectDetection> {
   const existingManifestPath = (await exists(path.join(root, MANIFEST_FILE)))
     ? path.join(root, MANIFEST_FILE)
     : undefined;
+  const existingLaunchWrapperPath = (await exists(path.join(root, SETUP_DIR, "launch.cjs")))
+    ? path.join(root, SETUP_DIR, "launch.cjs")
+    : undefined;
+  const existingSetupProfilePath = (await exists(path.join(root, SETUP_DIR, SETUP_PROFILE_FILE)))
+    ? path.join(root, SETUP_DIR, SETUP_PROFILE_FILE)
+    : undefined;
   const envFiles = files
     .filter((file) => /^\.env(?:\.|$)/.test(file))
     .map((file) => path.join(root, file))
@@ -331,6 +385,20 @@ export async function detectProject(cwd: string): Promise<ProjectDetection> {
   const docker = dockerComposeFiles.length ? await detectDockerCompose(root, dockerComposeFiles, envFiles) : undefined;
   const mcpHints = detectMcpHints(files, scripts, deps);
   const monorepoHints = detectMonorepoHints(files, packageJson);
+  const runtimeMatrix = await detectRuntimeMatrix({
+    root,
+    files,
+    packageJson,
+    scripts,
+    dependencies: deps,
+    envFiles,
+    portEnvKeys,
+    detectedPorts,
+    dockerComposeFiles
+  });
+  const primaryRuntime = runtimeMatrix.primaryRuntime
+    ? runtimeMatrix.runtimes.find((runtime) => runtime.runtime === runtimeMatrix.primaryRuntime)
+    : undefined;
 
   return {
     root,
@@ -345,24 +413,36 @@ export async function detectProject(cwd: string): Promise<ProjectDetection> {
     portEnvKeys,
     detectedPorts,
     ...(existingManifestPath ? { existingManifestPath } : {}),
+    ...(existingLaunchWrapperPath ? { existingLaunchWrapperPath } : {}),
+    ...(existingSetupProfilePath ? { existingSetupProfilePath } : {}),
     dockerComposeFiles,
     ...(docker ? { docker } : {}),
     mcpHints,
     monorepoHints,
-    healthCandidates: healthCandidates(framework, appKind)
+    healthCandidates: healthCandidates(framework, appKind),
+    runtimeMatrix,
+    ...(primaryRuntime ? { primaryRuntime } : {})
   };
 }
 
 export async function proposeSetupPlans(
   detection: ProjectDetection,
-  options: { envStrategy?: EnvStrategy; mcpInstall?: boolean; docker?: DockerSetupOptions } = {}
+  options: {
+    envStrategy?: EnvStrategy;
+    mcpInstall?: boolean;
+    docker?: DockerSetupOptions;
+    commandHint?: string;
+    portStrategyHint?: string;
+    componentMetadata?: SetupComponentMetadata;
+  } = {}
 ): Promise<SetupPlan[]> {
   const existingManifest = detection.existingManifestPath
     ? await readManifestFile(detection.existingManifestPath).catch(() => undefined)
     : undefined;
   const appId = appIdFromDetection(detection, existingManifest);
   const name = appNameFromDetection(detection, existingManifest, appId);
-  const startCommand = startCommandFor(detection);
+  const commandSelection = selectSetupCommand(detection, options.commandHint ?? options.componentMetadata?.command);
+  const startCommand = commandSelection.command;
   const envStrategy = options.envStrategy ?? "runtime-injection";
   const baseManifest: AppManifestInput = existingManifest ?? {
     schemaVersion: 1,
@@ -373,11 +453,14 @@ export async function proposeSetupPlans(
     protocol: detection.framework === "websocket" ? "http+ws" : "http",
     healthUrl: detection.healthCandidates[0] ?? "/"
   };
+  const selectedBaseManifest = options.componentMetadata
+    ? withSetupComponentMetadata(baseManifest, options.componentMetadata)
+    : baseManifest;
   const plans: SetupPlan[] = [];
 
   const managedManifest = {
-    ...baseManifest,
-    command: String(baseManifest.command ?? startCommand),
+    ...selectedBaseManifest,
+    command: String(selectedBaseManifest.command ?? startCommand),
     upstreamPort: undefined
   };
   plans.push(
@@ -400,12 +483,18 @@ export async function proposeSetupPlans(
         "If the app ignores PORT, retry with a generated launch wrapper that passes framework port flags.",
         "If the health route is wrong, retry with a safer route candidate."
       ],
+      commandSelection,
+      portStrategyHint: options.portStrategyHint,
       extraWrites: setupWrites(detection.root, managedManifest, envStrategy, options.mcpInstall)
     })
   );
 
   if (detection.framework !== "unknown" || detection.scripts.dev) {
-    const wrapperManifest = { ...baseManifest, command: nodeCommand(".relaybase/launch.cjs"), upstreamPort: undefined };
+    const wrapperManifest = {
+      ...selectedBaseManifest,
+      command: nodeCommand(".relaybase/launch.cjs"),
+      upstreamPort: undefined
+    };
     plans.push(
       plan({
         id: "framework-port-flag",
@@ -421,13 +510,15 @@ export async function proposeSetupPlans(
         ],
         risks: ["Writes a Relaybase-owned launch wrapper under .relaybase/."],
         recoverySteps: ["If framework flags fail, fall back to pinned upstream port or external process mode."],
+        commandSelection,
+        portStrategyHint: options.portStrategyHint,
         extraWrites: [
           ...setupWrites(detection.root, wrapperManifest, envStrategy, options.mcpInstall),
           {
             path: path.join(detection.root, SETUP_DIR, "launch.cjs"),
             action: "create",
             reason: "Launch wrapper adapts package-manager scripts to Relaybase-assigned ports.",
-            preview: launchWrapper(detection)
+            preview: launchWrapper(detection, commandSelection.scriptName)
           }
         ]
       })
@@ -442,7 +533,7 @@ export async function proposeSetupPlans(
         label: `Pinned upstream port ${detectedPort}`,
         architecture: "pinned-upstream-port",
         score: 55,
-        manifest: { ...baseManifest, upstreamPort: detectedPort },
+        manifest: { ...selectedBaseManifest, upstreamPort: detectedPort },
         detection,
         envStrategy,
         reasons: [
@@ -451,9 +542,11 @@ export async function proposeSetupPlans(
         ],
         risks: ["A fixed port can conflict with stale app processes."],
         recoverySteps: ["If the port is occupied, identify the owner and ask before stopping it."],
+        commandSelection,
+        portStrategyHint: options.portStrategyHint,
         extraWrites: setupWrites(
           detection.root,
-          { ...baseManifest, upstreamPort: detectedPort },
+          { ...selectedBaseManifest, upstreamPort: detectedPort },
           envStrategy,
           options.mcpInstall
         )
@@ -486,7 +579,12 @@ export async function proposeSetupPlans(
         suggestedProjectName: `relaybase-${appId}`
       } satisfies DockerComposeDetection);
     try {
-      const dockerSetup = buildDockerComposeSetup(detection.root, baseManifest, dockerDetection, options.docker);
+      const dockerSetup = buildDockerComposeSetup(
+        detection.root,
+        selectedBaseManifest,
+        dockerDetection,
+        options.docker
+      );
       plans.push(
         plan({
           id: "docker-compose",
@@ -499,6 +597,8 @@ export async function proposeSetupPlans(
           reasons: dockerSetup.reasons,
           risks: dockerSetup.risks,
           recoverySteps: dockerSetup.recoverySteps,
+          commandSelection,
+          portStrategyHint: options.portStrategyHint,
           extraWrites: [
             ...setupWrites(detection.root, dockerSetup.manifest, envStrategy, options.mcpInstall),
             ...dockerSetup.writes
@@ -513,7 +613,7 @@ export async function proposeSetupPlans(
           label: "Docker Compose service",
           architecture: "docker-compose-service",
           score: 5,
-          manifest: baseManifest,
+          manifest: selectedBaseManifest,
           detection,
           envStrategy,
           reasons: [
@@ -525,7 +625,9 @@ export async function proposeSetupPlans(
             "Run relaybase configure interactively and choose the app-facing service.",
             "Or pass --service <name> --target-port <port> --health-path /api/health."
           ],
-          extraWrites: setupWrites(detection.root, baseManifest, envStrategy, options.mcpInstall),
+          commandSelection,
+          portStrategyHint: options.portStrategyHint,
+          extraWrites: setupWrites(detection.root, selectedBaseManifest, envStrategy, options.mcpInstall),
           requiresInput: ["docker.service", "docker.targetPort"]
         })
       );
@@ -533,7 +635,11 @@ export async function proposeSetupPlans(
   }
 
   if (detection.appKind === "static") {
-    const staticManifest = { ...baseManifest, command: nodeCommand(".relaybase/static-preview.cjs"), healthUrl: "/" };
+    const staticManifest = {
+      ...selectedBaseManifest,
+      command: nodeCommand(".relaybase/static-preview.cjs"),
+      healthUrl: "/"
+    };
     plans.push(
       plan({
         id: "static-preview",
@@ -548,6 +654,8 @@ export async function proposeSetupPlans(
         recoverySteps: [
           "If assets are built into a different folder, rerun configure and select a custom static output."
         ],
+        commandSelection,
+        portStrategyHint: options.portStrategyHint,
         extraWrites: [
           ...setupWrites(detection.root, staticManifest, envStrategy, options.mcpInstall),
           {
@@ -563,7 +671,7 @@ export async function proposeSetupPlans(
 
   if (detection.mcpHints.length) {
     const mcpManifest = {
-      ...baseManifest,
+      ...selectedBaseManifest,
       command: "external",
       mcp: {
         enabled: true,
@@ -582,6 +690,8 @@ export async function proposeSetupPlans(
         reasons: ["MCP hints were detected; Relaybase can expose child tools through the app manifest."],
         risks: ["Child MCP tool allowlists still need exact user-approved entries."],
         recoverySteps: ["Add exact child MCP tools/resources/prompts after inspecting the server."],
+        commandSelection,
+        portStrategyHint: options.portStrategyHint,
         extraWrites: setupWrites(detection.root, mcpManifest, envStrategy, true)
       })
     );
@@ -598,9 +708,16 @@ export async function configureProject(options: ConfigureProjectOptions): Promis
   const candidates = await proposeSetupPlans(detection, {
     envStrategy,
     mcpInstall: options.mcpInstall,
-    docker: options.docker ?? answers.docker
+    docker: options.docker ?? answers.docker,
+    commandHint: options.commandHint ?? answers.commandHint,
+    portStrategyHint: options.portStrategyHint ?? answers.portStrategyHint,
+    componentMetadata: options.componentMetadata ?? answers.componentMetadata
   });
-  let selectedPlan = selectPlan(candidates, options.selectedPlanId ?? options.profile ?? answers.selectedPlanId);
+  let selectedPlan = selectPlan(
+    candidates,
+    options.selectedPlanId ?? options.profile ?? answers.selectedPlanId,
+    options.portStrategyHint ?? answers.portStrategyHint
+  );
   if (!options.dryRun && selectedPlan.requiresInput?.length) {
     const details = selectedPlan.risks.length ? ` ${selectedPlan.risks.join(" ")}` : "";
     throw new Error(
@@ -1524,12 +1641,19 @@ async function applySetupPlan(selectedPlan: SetupPlan, options: { writeEnv: bool
     `${JSON.stringify(launchProfile(selectedPlan), null, 2)}\n`
   );
   await writeTextAtomic(
+    path.join(root, SETUP_DIR, SETUP_PROFILE_FILE),
+    `${JSON.stringify(launchProfile(selectedPlan), null, 2)}\n`
+  );
+  await writeTextAtomic(
     path.join(root, SETUP_DIR, ANSWERS_FILE),
     `${JSON.stringify(
       {
         version: 1,
         selectedPlanId: selectedPlan.id,
         envStrategy: selectedPlan.envStrategy,
+        commandHint: selectedPlan.selectedCommand,
+        portStrategyHint: primaryPlanPortStrategy(selectedPlan),
+        ...(selectedPlan.manifest.relaybase ? { componentMetadata: selectedPlan.manifest.relaybase } : {}),
         ...(selectedPlan.architecture === "docker-compose-service"
           ? { docker: dockerAnswersFromPlan(selectedPlan) }
           : {})
@@ -1663,163 +1787,6 @@ async function stopConfiguredApp(options: RelaybaseCommandOptions, appId: string
   await mutateAppViaApi(options, appId, "stop").catch(() => undefined);
 }
 
-async function ensureDaemon(options: RelaybaseCommandOptions, allowStart: boolean): Promise<DaemonEnsureResult> {
-  const existing = await discovery(options);
-  if (existing.reachable) {
-    return { reachable: true, started: false };
-  }
-
-  if (!allowStart) {
-    return { reachable: false, started: false, error: existing.error };
-  }
-
-  const cliPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "cli.ts");
-  const command = process.execPath;
-  const args = [
-    "--experimental-strip-types",
-    cliPath,
-    "serve",
-    "--host",
-    options.host,
-    "--port",
-    String(options.port),
-    "--state-dir",
-    options.stateDir
-  ];
-  const logPath = path.join(options.stateDir, "daemon.log");
-  const pidPath = path.join(options.stateDir, "daemon.pid");
-  const metadataPath = path.join(options.stateDir, "daemon.json");
-  const cwd = options.cwd;
-  try {
-    await ensureDir(options.stateDir);
-    await fs.appendFile(logPath, `[${new Date().toISOString()}] relaybase daemon start requested\n`, "utf8");
-  } catch (error) {
-    return {
-      reachable: false,
-      started: false,
-      command,
-      args,
-      cwd,
-      logPath,
-      pidPath,
-      metadataPath,
-      error: `Relaybase daemon state/log setup failed: ${errorMessage(error)}`
-    };
-  }
-
-  let stdoutFd: number | undefined;
-  let stderrFd: number | undefined;
-  let child;
-  try {
-    stdoutFd = openSync(logPath, "a");
-    stderrFd = openSync(logPath, "a");
-    child = spawn(command, args, {
-      cwd: options.cwd,
-      detached: true,
-      stdio: ["ignore", stdoutFd, stderrFd],
-      windowsHide: true
-    });
-  } catch (error) {
-    return {
-      reachable: false,
-      started: false,
-      command,
-      args,
-      cwd,
-      logPath,
-      pidPath,
-      metadataPath,
-      error: `Relaybase daemon spawn failed: ${errorMessage(error)}`
-    };
-  } finally {
-    if (stdoutFd !== undefined) {
-      closeSync(stdoutFd);
-    }
-    if (stderrFd !== undefined) {
-      closeSync(stderrFd);
-    }
-  }
-
-  let spawnError: string | undefined;
-  let exitCode: number | null | undefined;
-  let signal: NodeJS.Signals | null | undefined;
-  child.once("error", (error) => {
-    spawnError = error.message;
-  });
-  child.once("exit", (code, exitSignal) => {
-    exitCode = code;
-    signal = exitSignal;
-  });
-
-  const baseResult: DaemonEnsureResult = {
-    reachable: false,
-    started: true,
-    ...(child.pid ? { pid: child.pid } : {}),
-    command,
-    args,
-    cwd,
-    logPath,
-    pidPath,
-    metadataPath
-  };
-
-  if (child.pid) {
-    await writeTextAtomic(pidPath, `${child.pid}\n`).catch(() => undefined);
-  }
-  await writeTextAtomic(
-    metadataPath,
-    `${JSON.stringify(
-      {
-        pid: child.pid ?? null,
-        command,
-        args,
-        cwd,
-        host: options.host,
-        port: options.port,
-        stateDir: options.stateDir,
-        logPath,
-        startedAt: new Date().toISOString()
-      },
-      null,
-      2
-    )}\n`
-  ).catch(() => undefined);
-  child.unref();
-
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    const probe = await discovery(options);
-    if (probe.reachable) {
-      return { ...baseResult, reachable: true };
-    }
-    if (spawnError) {
-      return { ...baseResult, error: `Relaybase daemon failed to spawn: ${spawnError}` };
-    }
-    if (exitCode !== undefined || signal !== undefined) {
-      return {
-        ...baseResult,
-        ...(exitCode !== undefined ? { exitCode } : {}),
-        ...(signal !== undefined ? { signal } : {}),
-        error: "Relaybase daemon exited before becoming reachable."
-      };
-    }
-    await delay(150);
-  }
-
-  return { ...baseResult, error: "Relaybase daemon did not become reachable before timeout." };
-}
-
-async function discovery(
-  options: RelaybaseCommandOptions
-): Promise<{ reachable: boolean; body?: Record<string, unknown>; error?: string }> {
-  const response = await httpRequest(options, "GET", "/.well-known/mcp.json");
-  if (!response.ok) {
-    return { reachable: false, error: response.body || `HTTP ${response.statusCode}` };
-  }
-
-  return { reachable: true, body: safeJson(response.body) };
-}
-
 async function registerViaApi(
   options: RelaybaseCommandOptions,
   manifestPath: string
@@ -1895,45 +1862,153 @@ function httpRequest(
   body?: unknown,
   token?: string
 ): Promise<{ ok: boolean; statusCode: number; body: string }> {
-  const payload = body === undefined ? undefined : JSON.stringify(body);
-  return new Promise((resolve) => {
-    const request = http.request(
-      {
-        host: options.host,
-        port: options.port,
-        path: requestPath,
-        method,
-        timeout: 2000,
-        headers: {
-          host: "localhost",
-          ...(payload ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } : {}),
-          ...(token ? { "x-relaybase-token": token } : {})
-        }
+  return daemonHttpRequest(options, method, requestPath, body, token);
+}
+
+interface SetupCommandSelection {
+  command: string;
+  source: "default" | "package-script" | "runtime-candidate";
+  scriptName?: string;
+  candidateId?: string;
+}
+
+function selectSetupCommand(detection: ProjectDetection, commandHint?: string): SetupCommandSelection {
+  const defaultCommand = startCommandFor(detection);
+  const normalizedHint = normalizeCommandHintText(commandHint);
+  if (!normalizedHint) {
+    return { command: defaultCommand, source: "default" };
+  }
+  const packageScript = packageScriptSelection(detection, normalizedHint);
+  if (packageScript) {
+    return packageScript;
+  }
+  const runtimeCandidate = runtimeCandidateSelection(detection, normalizedHint);
+  if (runtimeCandidate) {
+    return runtimeCandidate;
+  }
+  assertSafeSetupCommandHint(normalizedHint);
+  throw new SetupSelectionError(
+    "SETUP_COMMAND_HINT_UNSUPPORTED",
+    `Unsupported setup command hint "${normalizedHint}". Relaybase only accepts detected package-manager scripts or runtime adapter command candidates.`,
+    {
+      detail: {
+        commandHint: normalizedHint,
+        packageScripts: Object.keys(detection.scripts),
+        runtimeCandidates: detection.runtimeMatrix.runtimes.flatMap((runtime) =>
+          runtime.startCommandCandidates.map((candidate) => candidate.commandPreview)
+        )
       },
-      (response) => {
-        const chunks: Buffer[] = [];
-        response.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-        response.on("end", () => {
-          const statusCode = response.statusCode ?? 500;
-          resolve({
-            ok: statusCode >= 200 && statusCode < 300,
-            statusCode,
-            body: Buffer.concat(chunks).toString("utf8")
-          });
-        });
+      userAction: "Use one of the detected package scripts or runtime command candidates from the setup plan."
+    }
+  );
+}
+
+function normalizeCommandHintText(commandHint?: string): string | undefined {
+  const normalized = typeof commandHint === "string" ? commandHint.replace(/\s+/g, " ").trim() : "";
+  return normalized || undefined;
+}
+
+function assertSafeSetupCommandHint(commandHint: string): void {
+  const unsafe = [
+    { pattern: /&&|\|\||\|/, label: "shell chaining or pipes" },
+    { pattern: /(^|[^-])(;)/, label: "command separators" },
+    { pattern: /[<>]/, label: "redirection" },
+    { pattern: /\$\(|`/, label: "command substitution" }
+  ].find((entry) => entry.pattern.test(commandHint));
+  if (unsafe) {
+    throw new SetupSelectionError(
+      "SETUP_COMMAND_HINT_UNSAFE",
+      `Unsafe setup command hint rejected: ${unsafe.label} is not allowed.`,
+      {
+        detail: { commandHint },
+        userAction: "Use a single detected package-manager script or runtime adapter command without shell operators."
       }
     );
+  }
+}
 
-    request.once("timeout", () => {
-      request.destroy();
-      resolve({ ok: false, statusCode: 0, body: "Relaybase server is not reachable." });
-    });
-    request.once("error", (error) => resolve({ ok: false, statusCode: 0, body: error.message }));
-    if (payload) {
-      request.write(payload);
+function packageScriptSelection(detection: ProjectDetection, commandHint: string): SetupCommandSelection | undefined {
+  const tokens = commandHint.split(/\s+/).filter(Boolean);
+  if (tokens.length < 3) {
+    return undefined;
+  }
+  const scriptName = packageScriptNameFromTokens(tokens);
+  if (!scriptName || !Object.prototype.hasOwnProperty.call(detection.scripts, scriptName)) {
+    return undefined;
+  }
+  return {
+    command: `${detection.packageCommand} ${runToken(detection.packageManager)} ${scriptName}`,
+    source: "package-script",
+    scriptName,
+    candidateId: `package-script:${scriptName}`
+  };
+}
+
+function packageScriptNameFromTokens(tokens: string[]): string | undefined {
+  const lower = tokens.map((token) => token.toLowerCase());
+  if (lower[0] === "corepack" || lower[0] === "corepack.cmd") {
+    if (lower.length === 4 && ["pnpm", "yarn"].includes(lower[1] ?? "") && lower[2] === "run") {
+      return tokens[3];
     }
-    request.end();
-  });
+    return undefined;
+  }
+  if (["npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.cmd"].includes(lower[0] ?? "")) {
+    if (lower.length === 3 && lower[1] === "run" && tokens[2]) {
+      return tokens[2];
+    }
+  }
+  return undefined;
+}
+
+function runtimeCandidateSelection(
+  detection: ProjectDetection,
+  commandHint: string
+): SetupCommandSelection | undefined {
+  const normalized = normalizeComparableCommand(commandHint);
+  for (const runtime of detection.runtimeMatrix.runtimes) {
+    for (const candidate of runtime.startCommandCandidates) {
+      const previews = [candidate.commandPreview, candidate.command.join(" ")].map(normalizeComparableCommand);
+      if (previews.includes(normalized)) {
+        return {
+          command: candidate.commandPreview,
+          source: "runtime-candidate",
+          candidateId: candidate.id
+        };
+      }
+    }
+  }
+  return undefined;
+}
+
+function normalizeComparableCommand(command: string): string {
+  return command
+    .replace(/<HOST>|\$HOST/gi, "HOST")
+    .replace(/<PORT>|\$PORT/gi, "PORT")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function commandCandidatesWithSelection(
+  candidates: StartCommandCandidate[],
+  selection?: SetupCommandSelection
+): StartCommandCandidate[] {
+  if (!selection || selection.source === "default") {
+    return candidates;
+  }
+  const selectedCandidate: StartCommandCandidate = {
+    id: selection.candidateId ?? "selected-command",
+    label: "Selected command",
+    command: selection.command.split(/\s+/).filter(Boolean),
+    commandPreview: selection.command,
+    confidence: "high",
+    reasons: ["Selected from the approved setup command hint."],
+    risks: []
+  };
+  const rest = candidates.filter(
+    (candidate) => candidate.commandPreview !== selection.command && candidate.id !== selectedCandidate.id
+  );
+  return [selectedCandidate, ...rest];
 }
 
 function plan(input: {
@@ -1949,7 +2024,13 @@ function plan(input: {
   recoverySteps: string[];
   extraWrites: SetupWrite[];
   requiresInput?: string[];
+  commandSelection?: SetupCommandSelection;
+  portStrategyHint?: string;
 }): SetupPlan {
+  const runtime = input.detection.primaryRuntime;
+  const runtimeCandidates = runtime
+    ? commandCandidatesWithSelection(runtime.startCommandCandidates, input.commandSelection)
+    : undefined;
   return {
     id: input.id,
     label: input.label,
@@ -1961,7 +2042,21 @@ function plan(input: {
     manifest: input.manifest,
     writes: input.extraWrites,
     recoverySteps: input.recoverySteps,
-    ...(input.requiresInput ? { requiresInput: input.requiresInput } : {})
+    selectedCommand: input.commandSelection?.command ?? String(input.manifest.command ?? ""),
+    selectedCommandSource: input.commandSelection?.source ?? "default",
+    ...(input.commandSelection?.candidateId ? { selectedCommandCandidateId: input.commandSelection.candidateId } : {}),
+    ...(input.portStrategyHint ? { portStrategyHint: input.portStrategyHint } : {}),
+    ...(input.requiresInput ? { requiresInput: input.requiresInput } : {}),
+    ...(runtime
+      ? {
+          runtimeId: runtime.runtime,
+          startCommandCandidates: runtimeCandidates,
+          portBindingStrategies: runtime.portStrategies,
+          runtimeHealthCandidates: runtime.healthCandidates,
+          setupQuestions: runtime.questions,
+          repairCandidates: runtime.repairCandidates
+        }
+      : {})
   };
 }
 
@@ -2038,7 +2133,26 @@ function manifestForDisk(root: string, manifest: AppManifestInput): AppManifestI
     ...(normalized.startTimeoutMs !== undefined ? { startTimeoutMs: normalized.startTimeoutMs } : {}),
     ...(normalized.stopTimeoutMs !== undefined ? { stopTimeoutMs: normalized.stopTimeoutMs } : {}),
     ...(normalized.healthTimeoutMs !== undefined ? { healthTimeoutMs: normalized.healthTimeoutMs } : {}),
-    ...(normalized.mcp ? { mcp: normalized.mcp } : {})
+    ...(normalized.mcp ? { mcp: normalized.mcp } : {}),
+    ...(normalized.relaybase ? { relaybase: normalized.relaybase } : {})
+  };
+}
+
+function withSetupComponentMetadata(manifest: AppManifestInput, metadata: SetupComponentMetadata): AppManifestInput {
+  return {
+    ...manifest,
+    ...(metadata.appId ? { id: metadata.appId } : {}),
+    ...(metadata.name ? { name: metadata.name } : {}),
+    ...(metadata.cwd ? { cwd: metadata.cwd } : {}),
+    ...(metadata.healthUrl ? { healthUrl: metadata.healthUrl } : {}),
+    relaybase: {
+      ...(manifest.relaybase ?? {}),
+      ...(metadata.groupId ? { groupId: metadata.groupId } : {}),
+      ...(metadata.componentRole ? { componentRole: metadata.componentRole } : {}),
+      ...(metadata.displayName ? { displayName: metadata.displayName } : {}),
+      ...(metadata.paneLabel ? { paneLabel: metadata.paneLabel } : {}),
+      ...(metadata.paneOrder !== undefined ? { paneOrder: metadata.paneOrder } : {})
+    }
   };
 }
 
@@ -2063,8 +2177,8 @@ function mergeRelaybaseEnvBlock(current: string, block: string): string {
   return `${normalized}${normalized ? os.EOL.repeat(2) : ""}${block}`;
 }
 
-function launchWrapper(detection: ProjectDetection): string {
-  const script = detection.scripts.dev ? "dev" : detection.scripts.start ? "start" : "";
+function launchWrapper(detection: ProjectDetection, scriptHint?: string): string {
+  const script = scriptHint ?? (detection.scripts.dev ? "dev" : detection.scripts.start ? "start" : "");
   const wrapper = wrapperCommand(detection.packageManager);
   const baseArgs = [...wrapper.args, ...packageManagerArgs(detection.packageManager, script)];
   const frameworkArgs = frameworkPortArgs(detection.framework);
@@ -2151,14 +2265,42 @@ server.listen(port, host, () => {
 `;
 }
 
-function selectPlan(candidates: SetupPlan[], id?: string): SetupPlan {
+function selectPlan(candidates: SetupPlan[], id?: string, portStrategyHint?: string): SetupPlan {
   if (!candidates.length) {
     throw new Error("Relaybase could not generate any setup plans for this project.");
   }
-  if (!id) {
+  const selected = id
+    ? candidates.find((candidate) => candidate.id === id || candidate.architecture === id)
+    : portStrategyHint
+      ? candidates.find((candidate) => planHonorsPortStrategy(candidate, portStrategyHint))
+      : candidates[0];
+  if (!selected) {
+    if (portStrategyHint) {
+      throw new SetupSelectionError(
+        "SETUP_PORT_STRATEGY_UNAVAILABLE",
+        `Setup port strategy "${portStrategyHint}" is not available.`,
+        {
+          detail: {
+            portStrategyHint,
+            available: [...new Set(candidates.flatMap((candidate) => [...planPortStrategies(candidate)]))]
+          },
+          userAction: "Choose one of the port strategies returned by the setup plan."
+        }
+      );
+    }
     return candidates[0];
   }
-  return candidates.find((candidate) => candidate.id === id || candidate.architecture === id) ?? candidates[0];
+  if (portStrategyHint && !planHonorsPortStrategy(selected, portStrategyHint)) {
+    throw new SetupSelectionError(
+      "SETUP_PORT_STRATEGY_MISMATCH",
+      `Selected setup plan "${selected.id}" cannot honor port strategy "${portStrategyHint}".`,
+      {
+        detail: { selectedPlanId: selected.id, portStrategyHint, available: [...planPortStrategies(selected)] },
+        userAction: "Choose a compatible setup plan or remove the port strategy hint."
+      }
+    );
+  }
+  return selected;
 }
 
 function launchProfile(selectedPlan: SetupPlan): LaunchProfile {
@@ -2172,9 +2314,82 @@ function launchProfile(selectedPlan: SetupPlan): LaunchProfile {
     manifestPath: path.join(root, MANIFEST_FILE),
     command: String(selectedPlan.manifest.command),
     envStrategy: selectedPlan.envStrategy,
+    ...(selectedPlan.selectedCommand ? { selectedCommand: selectedPlan.selectedCommand } : {}),
+    ...(selectedPlan.selectedCommandSource ? { selectedCommandSource: selectedPlan.selectedCommandSource } : {}),
+    ...(selectedPlan.selectedCommandCandidateId
+      ? { selectedCommandCandidateId: selectedPlan.selectedCommandCandidateId }
+      : {}),
+    ...(primaryPlanPortStrategy(selectedPlan) ? { portStrategy: primaryPlanPortStrategy(selectedPlan) } : {}),
+    ...(selectedPlan.runtimeId
+      ? {
+          runtimeId: selectedPlan.runtimeId,
+          runtimeCommandCandidates: selectedPlan.startCommandCandidates ?? [],
+          runtimePortStrategies: selectedPlan.portBindingStrategies ?? [],
+          runtimeHealthCandidates: selectedPlan.runtimeHealthCandidates ?? [],
+          setupQuestions: selectedPlan.setupQuestions ?? []
+        }
+      : {}),
     createdAt: now,
     updatedAt: now
   };
+}
+
+function primaryPlanPortStrategy(plan: SetupPlan): string | undefined {
+  return plan.portStrategyHint ?? [...planPortStrategies(plan)][0];
+}
+
+function planHonorsPortStrategy(plan: SetupPlan, portStrategyHint: string): boolean {
+  if (portStrategyHint === "generated_launch_wrapper" || portStrategyHint === "framework_port_flags") {
+    return plan.id === "framework-port-flag" || String(plan.manifest.command ?? "").includes(".relaybase/launch.cjs");
+  }
+  if (portStrategyHint === "fixed_upstream_port") {
+    return plan.id === "pinned-upstream" || plan.manifest.upstreamPort !== undefined;
+  }
+  if (portStrategyHint === "docker_compose_wrapper" || portStrategyHint === "compose_port_mapping") {
+    return plan.architecture === "docker-compose-service";
+  }
+  if (
+    portStrategyHint === "managed_dynamic_port" ||
+    portStrategyHint === "env_port" ||
+    portStrategyHint === "runtime_specific_env"
+  ) {
+    return plan.architecture === "managed-dynamic-port";
+  }
+  return planPortStrategies(plan).has(portStrategyHint);
+}
+
+function planPortStrategies(plan: SetupPlan): Set<string> {
+  const strategies = new Set<string>();
+  for (const strategy of plan.portBindingStrategies ?? []) {
+    strategies.add(strategy.id);
+    if (strategy.id === "framework_port_flags") {
+      strategies.add("generated_launch_wrapper");
+    }
+  }
+  if (plan.manifest.upstreamPort !== undefined) {
+    strategies.add("fixed_upstream_port");
+  }
+  if (plan.architecture === "managed-dynamic-port") {
+    strategies.add("managed_dynamic_port");
+    strategies.add("env_port");
+  }
+  if (plan.architecture === "framework-port-flag") {
+    strategies.add("framework_port_flags");
+    strategies.add("generated_launch_wrapper");
+  }
+  if (
+    plan.architecture === "generated-launch-wrapper" ||
+    String(plan.manifest.command).includes(".relaybase/launch.cjs")
+  ) {
+    strategies.add("generated_launch_wrapper");
+  }
+  if (plan.architecture === "docker-compose-service") {
+    strategies.add("docker_compose_wrapper");
+  }
+  if (!strategies.size || plan.architecture === "mcp-only" || plan.architecture === "static-build-preview") {
+    strategies.add("manual_custom");
+  }
+  return strategies;
 }
 
 function dockerAnswersFromPlan(selectedPlan: SetupPlan): DockerSetupOptions | undefined {
@@ -2217,7 +2432,15 @@ async function readLaunchProfile(cwd: string): Promise<LaunchProfile | undefined
 async function readSetupAnswers(
   answersPath: string | undefined,
   cwd: string
-): Promise<{ selectedPlanId?: string; envStrategy?: EnvStrategy; noStart?: boolean; docker?: DockerSetupOptions }> {
+): Promise<{
+  selectedPlanId?: string;
+  envStrategy?: EnvStrategy;
+  noStart?: boolean;
+  docker?: DockerSetupOptions;
+  commandHint?: string;
+  portStrategyHint?: string;
+  componentMetadata?: SetupComponentMetadata;
+}> {
   if (!answersPath) {
     return {};
   }
@@ -2227,6 +2450,9 @@ async function readSetupAnswers(
     ...(typeof parsed.selectedPlanId === "string" ? { selectedPlanId: parsed.selectedPlanId } : {}),
     ...(isEnvStrategy(parsed.envStrategy) ? { envStrategy: parsed.envStrategy } : {}),
     ...(typeof parsed.noStart === "boolean" ? { noStart: parsed.noStart } : {}),
+    ...(typeof parsed.commandHint === "string" ? { commandHint: parsed.commandHint } : {}),
+    ...(typeof parsed.portStrategyHint === "string" ? { portStrategyHint: parsed.portStrategyHint } : {}),
+    ...(isSetupComponentMetadata(parsed.componentMetadata) ? { componentMetadata: parsed.componentMetadata } : {}),
     ...(isDockerSetupOptions(parsed.docker) ? { docker: parsed.docker } : {})
   };
 }
@@ -2256,6 +2482,26 @@ function isDockerSetupOptions(value: unknown): value is DockerSetupOptions {
       (Array.isArray(candidate.composeProfiles) &&
         candidate.composeProfiles.every((item) => typeof item === "string"))) &&
     (candidate.startDockerDesktop === undefined || typeof candidate.startDockerDesktop === "boolean")
+  );
+}
+
+function isSetupComponentMetadata(value: unknown): value is SetupComponentMetadata {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  return (
+    (candidate.appId === undefined || typeof candidate.appId === "string") &&
+    (candidate.name === undefined || typeof candidate.name === "string") &&
+    (candidate.command === undefined || typeof candidate.command === "string") &&
+    (candidate.cwd === undefined || typeof candidate.cwd === "string") &&
+    (candidate.healthUrl === undefined || typeof candidate.healthUrl === "string") &&
+    (candidate.groupId === undefined || typeof candidate.groupId === "string") &&
+    (candidate.componentRole === undefined ||
+      ["frontend", "backend", "worker", "database", "service", "other"].includes(String(candidate.componentRole))) &&
+    (candidate.displayName === undefined || typeof candidate.displayName === "string") &&
+    (candidate.paneLabel === undefined || typeof candidate.paneLabel === "string") &&
+    (candidate.paneOrder === undefined || Number.isInteger(candidate.paneOrder))
   );
 }
 
@@ -2321,6 +2567,18 @@ function startCommandFor(detection: ProjectDetection): string {
   }
   if (detection.appKind === "static") {
     return nodeCommand(".relaybase/static-preview.cjs");
+  }
+  if (detection.appKind === "unknown" && !detection.primaryRuntime) {
+    return "external";
+  }
+  const runtimeCommand = detection.primaryRuntime?.startCommandCandidates.find(
+    (candidate) => candidate.confidence === "high" || candidate.confidence === "medium"
+  );
+  if (runtimeCommand && !/[<>]/.test(runtimeCommand.commandPreview)) {
+    return runtimeCommand.commandPreview;
+  }
+  if (detection.primaryRuntime && detection.primaryRuntime.runtime !== "javascript-typescript") {
+    return "external";
   }
   return "node server.js";
 }
@@ -2625,8 +2883,4 @@ function redactResult(result: ConfigureProjectResult): ConfigureProjectResult {
   return JSON.parse(
     JSON.stringify(result, (key, value) => (/token|secret|password|key/i.test(key) ? "[redacted]" : value))
   ) as ConfigureProjectResult;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

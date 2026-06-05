@@ -1,4 +1,4 @@
-![Relaybase title](docs\relaybase-title.png)
+![Relaybase title](docs/relaybase-title.png)
 
 # Relaybase
 
@@ -26,6 +26,33 @@ relaybase health
 `relaybase health` is read-only diagnosis. It reports daemon reachability, project configuration, app readiness, routes, logs, Docker profile findings, and concrete `nextActions` when something is wrong.
 
 Use `relaybase list` to see registered apps and runtime state. It uses daemon state when available and registry-only state when the daemon is offline.
+
+## TUI
+
+Run the daemon, then launch the terminal UI:
+
+```powershell
+relaybase serve
+relaybase tui
+```
+
+The Node CLI bridge resolves the TUI binary in this order: `RELAYBASE_TUI_BIN`, the repo-local `.relaybase/tui-dev-bin/<platform binary>` from `npm run tui:build`, `bin/relaybase-tui/<platform binary>` inside the installed package, an optional `@cameloo/relaybase-tui-<platform>-<arch>` platform package, then a globally installed `relaybase-tui` on `PATH`. Local source builds write both the ignored development launch binary and the package asset binary with:
+
+```powershell
+npm run doctor:tui
+npm run tui:build
+npm run package:check
+```
+
+The direct binary entrypoint is `relaybase-tui`; it accepts `--base-url`, `--state-dir`, and `--theme`. For example:
+
+```powershell
+.\bin\relaybase-tui\relaybase-tui-windows-amd64.exe --base-url http://127.0.0.1:7777
+```
+
+If `relaybase tui` reports a missing binary, build it from source or set `RELAYBASE_TUI_BIN` to an existing `relaybase-tui` binary. Source builds and TUI checks require Go `1.25.x`; `npm run doctor:tui` reports the local Go, binary, and release-tool readiness. If the bridge reports that the daemon is unavailable, start `relaybase serve` first. Auth failures are handled by the TUI using the existing Relaybase state directory token conventions.
+
+Relaybase CLI commands load a local `.env` from the command working directory before reading environment-backed options. Copy `.env.example` to `.env`, fill in `OPENROUTER_API_KEY` and `RELAYBASE_AGENT_MODEL` for live Operator Agent/OpenRouter runs, then start the daemon or run `npm run agent:smoke:openrouter`. Existing shell environment values take precedence over `.env`; set `RELAYBASE_ENV_FILE` to use a different file.
 
 ## Routes
 
@@ -83,6 +110,11 @@ Read-only MCP calls do not require mutation auth. HTTP mutation tools require th
 | Codex workflow and repo-local Relaybase skill     | [docs/relaybase-dev-skill.md](docs/relaybase-dev-skill.md)           |
 | Docker Compose setup and limits                   | [docs/docker-compose-lifecycle.md](docs/docker-compose-lifecycle.md) |
 | Local security defaults and current product scope | [docs/security-and-limits.md](docs/security-and-limits.md)           |
+| TUI architecture, bridge, and packaging           | [docs/tui-architecture.md](docs/tui-architecture.md)                 |
+| TUI Go toolchain and verification                 | [docs/tui-toolchain.md](docs/tui-toolchain.md)                       |
+| TUI Operator Agent architecture and OpenRouter    | [docs/tui-agent-architecture.md](docs/tui-agent-architecture.md)     |
+| TUI setup/onboarding commands and safety          | [docs/tui-setup-onboarding.md](docs/tui-setup-onboarding.md)         |
+| External AI app/agent builder guidance            | [docs/ai-app-builder/README.md](docs/ai-app-builder/README.md)       |
 
 ## Current Scope
 

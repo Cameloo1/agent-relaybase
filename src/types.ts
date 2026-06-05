@@ -6,6 +6,28 @@ export type HealthStatus = "unknown" | "healthy" | "unhealthy";
 
 export type RouteSource = "header" | "host";
 
+export type AppComponentRole = "frontend" | "backend" | "worker" | "database" | "service" | "other";
+
+export type AppComponentStatus = "stopped" | "starting" | "running" | "stopping" | "failed" | "degraded";
+
+export type AppAggregateStatus = "failed" | "degraded" | "starting" | "running" | "stopped";
+
+export interface RelaybaseManifestMetadata {
+  groupId: string;
+  componentRole: AppComponentRole;
+  displayName: string;
+  paneLabel: string;
+  paneOrder: number;
+}
+
+export interface AppManifestDiagnostic {
+  code: string;
+  severity: "info" | "warning" | "error";
+  message: string;
+  field?: string;
+  detail?: unknown;
+}
+
 export type LifecyclePhase =
   | "stopped"
   | "prestarting"
@@ -95,6 +117,7 @@ export interface AppManifestInput {
   stopTimeoutMs?: unknown;
   healthTimeoutMs?: unknown;
   mcp?: unknown;
+  relaybase?: unknown;
 }
 
 export interface AppRecord {
@@ -115,6 +138,8 @@ export interface AppRecord {
   stopTimeoutMs?: number;
   healthTimeoutMs?: number;
   mcp?: AppMcpConfig;
+  relaybase?: RelaybaseManifestMetadata;
+  manifestDiagnostics?: AppManifestDiagnostic[];
   manifestPath?: string;
   createdAt: string;
   updatedAt: string;
@@ -245,6 +270,34 @@ export interface RouteHealth {
   policy: "human-or-agent";
   humanRoute: RouteProbe;
   agentRoute: RouteProbe;
+}
+
+export interface AppComponentRoute {
+  humanUrl: string;
+  agentUrl: string;
+  reachable: boolean;
+  health?: RouteHealth;
+}
+
+export interface AppComponent {
+  appId: string;
+  groupId: string;
+  role: AppComponentRole;
+  paneLabel: string;
+  paneOrder: number;
+  displayName: string;
+  route: AppComponentRoute;
+  pid?: number;
+  port?: number;
+  status: AppComponentStatus;
+  lastError: string | null;
+}
+
+export interface AppGroup {
+  groupId: string;
+  displayName: string;
+  components: AppComponent[];
+  aggregateStatus: AppAggregateStatus;
 }
 
 export interface AppState {

@@ -26,6 +26,28 @@ import {
   type OpenProjectResult,
   type SetupPlan
 } from "./setup.ts";
+import {
+  formatOpenRouterLiveSmokeError,
+  printOpenRouterLiveSmokeResult,
+  runOpenRouterLiveSmoke
+} from "./agent/openrouterLiveSmoke.ts";
+import {
+  formatAgentLiveAcceptanceError,
+  printAgentLiveAcceptanceResult,
+  runAgentLiveAcceptance
+} from "./agent/liveAcceptance.ts";
+import {
+  formatAgentLiveCommandMatrixError,
+  printAgentLiveCommandMatrixResult,
+  runAgentLiveCommandMatrix
+} from "./agent/liveCommandMatrix.ts";
+import {
+  formatAgentFolderStartLiveError,
+  printAgentFolderStartLiveResult,
+  runAgentFolderStartLive
+} from "./agent/liveFolderStart.ts";
+import { formatRelaybaseEnvFileDiagnostics, loadRelaybaseEnvFile } from "./envFile.ts";
+import { runRelaybaseTui } from "./tuiBridge.ts";
 
 interface CliOptions {
   port: number;
@@ -41,6 +63,7 @@ interface CliOptions {
   mcpInstall: boolean;
   prove: boolean;
   verbose: boolean;
+  daemonStartPolicy: "auto" | "never";
   listFilter: AppListFilter;
   profile?: string;
   answersPath?: string;
@@ -69,9 +92,19 @@ async function main(): Promise<void> {
     return;
   }
 
-  const options = parseOptions(args);
+  const envFile = loadRelaybaseEnvFile();
+  if (envFile.diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
+    throw new Error(formatRelaybaseEnvFileDiagnostics(envFile));
+  }
+
+  const { cliArgs, passthroughArgs } =
+    command === "tui" ? splitPassthroughArgs(args) : { cliArgs: args, passthroughArgs: [] };
+  const options = parseOptions(cliArgs);
 
   switch (command) {
+    case "agent":
+      await agent(args, options);
+      return;
     case "configure":
       await configure(options);
       return;
@@ -103,6 +136,9 @@ async function main(): Promise<void> {
       return;
     case "logs":
       await logs(requiredArg(args[0], "logs"), options);
+      return;
+    case "tui":
+      process.exitCode = await runRelaybaseTui(options, passthroughArgs);
       return;
     default:
       throw new Error(`Unknown command: ${command}`);
@@ -136,6 +172,179 @@ async function mcp(options: CliOptions): Promise<void> {
   process.once("SIGTERM", () => {
     void server.close().then(() => process.exit(0));
   });
+}
+
+async function agent(args: string[], options: CliOptions): Promise<void> {
+  const subcommand = args[0];
+  if (subcommand === "smoke-openrouter") {
+    try {
+      const result = await runOpenRouterLiveSmoke();
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      printOpenRouterLiveSmokeResult(result);
+      return;
+    } catch (error) {
+      throw new Error(formatOpenRouterLiveSmokeError(error), { cause: error });
+    }
+  }
+
+  if (subcommand === "live-acceptance") {
+    try {
+      const result = await runAgentLiveAcceptance();
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      printAgentLiveAcceptanceResult(result);
+      return;
+    } catch (error) {
+      throw new Error(formatAgentLiveAcceptanceError(error), { cause: error });
+    }
+  }
+
+  if (subcommand === "live-command-matrix") {
+    try {
+      const result = await runAgentLiveCommandMatrix();
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      printAgentLiveCommandMatrixResult(result);
+      return;
+    } catch (error) {
+      throw new Error(formatAgentLiveCommandMatrixError(error), { cause: error });
+    }
+  }
+
+  if (subcommand === "live-folder-start") {
+    try {
+      const result = await runAgentFolderStartLive();
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      printAgentFolderStartLiveResult(result);
+      return;
+    } catch (error) {
+      throw new Error(formatAgentFolderStartLiveError(error), { cause: error });
+    }
+  }
+
+  if (subcommand === "threads") {
+    await agentThreads(args.slice(1), options);
+    return;
+  }
+
+  throw new Error(
+    "Usage: relaybase agent <smoke-openrouter|live-acceptance|live-command-matrix|live-folder-start|threads>"
+  );
+}
+
+async function agentThreads(args: string[], options: CliOptions): Promise<void> {
+  const subcommand = args[0] ?? "list";
+  if (subcommand === "list") {
+    const response = await agentApiRequest(options, "GET", "/__hub/api/agent/sessions");
+    printAgentApiResponse(response, options);
+    return;
+  }
+  if (subcommand === "active") {
+    const response = await agentApiRequest(options, "GET", "/__hub/api/agent/sessions/active");
+    printAgentApiResponse(response, options);
+    return;
+  }
+  if (subcommand === "show") {
+    const sessionId = requiredArg(args[1], "agent threads show");
+    const response = await agentApiRequest(
+      options,
+      "GET",
+      `/__hub/api/agent/sessions/${encodeURIComponent(sessionId)}`
+    );
+    printAgentApiResponse(response, options);
+    return;
+  }
+  if (subcommand === "context") {
+    const sessionId = requiredArg(args[1], "agent threads context");
+    const response = await agentApiRequest(
+      options,
+      "GET",
+      `/__hub/api/agent/sessions/${encodeURIComponent(sessionId)}/context-preview`
+    );
+    printAgentApiResponse(response, options);
+    return;
+  }
+  if (subcommand === "activate") {
+    const sessionId = requiredArg(args[1], "agent threads activate");
+    const response = await agentApiRequest(
+      options,
+      "POST",
+      `/__hub/api/agent/sessions/${encodeURIComponent(sessionId)}/activate`,
+      {}
+    );
+    printAgentApiResponse(response, options);
+    return;
+  }
+  if (subcommand === "rename") {
+    const sessionId = requiredArg(args[1], "agent threads rename");
+    const title = requiredArg(args[2], "agent threads rename <session-id> <title>");
+    const response = await agentApiRequest(
+      options,
+      "PATCH",
+      `/__hub/api/agent/sessions/${encodeURIComponent(sessionId)}`,
+      {
+        title
+      }
+    );
+    printAgentApiResponse(response, options);
+    return;
+  }
+  if (subcommand === "clear") {
+    const sessionId = requiredArg(args[1], "agent threads clear");
+    const response = await agentApiRequest(
+      options,
+      "POST",
+      `/__hub/api/agent/sessions/${encodeURIComponent(sessionId)}/clear`,
+      {}
+    );
+    printAgentApiResponse(response, options);
+    return;
+  }
+  if (subcommand === "export") {
+    const sessionId = requiredArg(args[1], "agent threads export");
+    const format = args.includes("--markdown") || args.includes("--format=markdown") ? "markdown" : "json";
+    const response = await agentApiRequest(
+      options,
+      "GET",
+      `/__hub/api/agent/sessions/${encodeURIComponent(sessionId)}/export?format=${format}`
+    );
+    printAgentApiResponse(response, options);
+    return;
+  }
+  throw new Error(
+    "Usage: relaybase agent threads <list|active|show|context|activate|rename|clear|export> [session-id]"
+  );
+}
+
+async function agentApiRequest(
+  options: CliOptions,
+  method: string,
+  pathName: string,
+  body?: unknown
+): Promise<Record<string, unknown>> {
+  const response = await apiRequest(options, method, pathName, body, await getOrCreateSessionToken(options.stateDir));
+  if (!response.ok) {
+    throw new Error(response.body || `Relaybase Agent Gateway request failed: ${method} ${pathName}`);
+  }
+  return JSON.parse(response.body) as Record<string, unknown>;
+}
+
+function printAgentApiResponse(response: Record<string, unknown>, options: CliOptions): void {
+  if (options.json) {
+    console.log(JSON.stringify(response, null, 2));
+    return;
+  }
+  console.log(JSON.stringify(response, null, 2));
 }
 
 async function register(manifestPath: string | undefined, options: CliOptions): Promise<void> {
@@ -309,6 +518,7 @@ function parseOptions(args: string[]): CliOptions {
     mcpInstall: false,
     prove: false,
     verbose: false,
+    daemonStartPolicy: "auto",
     listFilter: "all",
     docker: {}
   };
@@ -327,6 +537,10 @@ function parseOptions(args: string[]): CliOptions {
       options.json = true;
     } else if (arg === "--verbose") {
       options.verbose = true;
+    } else if (arg === "--no-daemon-start") {
+      options.daemonStartPolicy = "never";
+    } else if (arg === "--daemon-start-policy") {
+      options.daemonStartPolicy = requiredDaemonStartPolicy(requiredArg(args[++index], "--daemon-start-policy"));
     } else if (arg === "--running") {
       setListFilter(options, "running");
     } else if (arg === "--active") {
@@ -397,6 +611,17 @@ function setListFilter(options: CliOptions, filter: AppListFilter): void {
     throw new Error("Use only one app list filter.");
   }
   options.listFilter = filter;
+}
+
+function splitPassthroughArgs(args: string[]): { cliArgs: string[]; passthroughArgs: string[] } {
+  const separatorIndex = args.indexOf("--");
+  if (separatorIndex === -1) {
+    return { cliArgs: args, passthroughArgs: [] };
+  }
+  return {
+    cliArgs: args.slice(0, separatorIndex),
+    passthroughArgs: args.slice(separatorIndex + 1)
+  };
 }
 
 async function configure(options: CliOptions): Promise<void> {
@@ -582,13 +807,64 @@ Runs Relaybase as a stdio MCP server for local clients.
     return;
   }
 
+  if (topic === "tui") {
+    console.log(`Relaybase TUI
+
+Usage:
+  relaybase tui [--port <number>] [--host <host>] [--state-dir <path>] [--no-daemon-start] [-- <tui-args>]
+
+Launches the Go Bubble Tea TUI as a daemon client. By default, the Node bridge starts the Relaybase daemon first when it is not reachable.
+
+Options:
+  --no-daemon-start              Do not auto-start the Relaybase daemon before launching the TUI
+  --daemon-start-policy <mode>   auto or never
+
+Binary resolution order:
+  1. RELAYBASE_TUI_BIN
+  2. repo-local .relaybase/tui-dev-bin/<platform binary> from npm run tui:build
+  3. bin/relaybase-tui/<platform binary> inside this package
+  4. @cameloo/relaybase-tui-<platform>-<arch> platform package
+  5. globally installed relaybase-tui on PATH
+`);
+    return;
+  }
+
+  if (topic === "agent") {
+    console.log(`Relaybase Agent
+
+Usage:
+  relaybase agent smoke-openrouter [--json]
+  relaybase agent live-acceptance [--json]
+  relaybase agent live-command-matrix [--json]
+  relaybase agent live-folder-start [--json]
+  relaybase agent threads list [--json]
+  relaybase agent threads active [--json]
+  relaybase agent threads show <session-id> [--json]
+  relaybase agent threads context <session-id> [--json]
+  relaybase agent threads activate <session-id> [--json]
+  relaybase agent threads rename <session-id> <title> [--json]
+  relaybase agent threads clear <session-id> [--json]
+  relaybase agent threads export <session-id> [--markdown|--json]
+
+Runs a live OpenRouter smoke through the daemon Agent Gateway, Operator Agent runtime, and OpenAI Agents SDK TypeScript Chat Completions path.
+Requires OPENROUTER_API_KEY and RELAYBASE_AGENT_MODEL in the daemon/CLI environment.
+The live-acceptance command runs the stricter RA013 daemon/TUI/setup acceptance flow with exact google/gemini-3.1-flash-lite.
+The live-command-matrix command runs the AGENT-TUI-MATRIX-006 diagnostic, safety, acceptance, and artifact gate with exact google/gemini-3.1-flash-lite.
+The live-folder-start command runs the AGENT-FOLDER-START-006 natural-language setup/register/start loop with exact google/gemini-3.1-flash-lite.
+Thread commands call the daemon Agent Gateway session API; they do not read or mutate the SQLite store directly.
+`);
+    return;
+  }
+
   console.log(`Relaybase
 
 Commands:
+  agent                        Agent Gateway diagnostics and live provider smokes
   configure                     Set up or repair the current project for Relaybase
   open                          Start the configured app and open its Relaybase route
   health                        Inspect Relaybase, project config, route, logs, and readiness
   list                          List registered apps and runtime state
+  tui                           Launch the Go Bubble Tea TUI client
 
 Advanced:
   serve                         Start the localhost hub daemon
@@ -865,6 +1141,13 @@ function requiredDependencyPortPolicy(value: string): "internal-only" | "preserv
     return value;
   }
   throw new Error('--dependency-port-policy must be "internal-only" or "preserve-existing".');
+}
+
+function requiredDaemonStartPolicy(value: string): "auto" | "never" {
+  if (value === "auto" || value === "never") {
+    return value;
+  }
+  throw new Error('--daemon-start-policy must be "auto" or "never".');
 }
 
 function askText(prompt: string, defaultValue: string): Promise<string> {

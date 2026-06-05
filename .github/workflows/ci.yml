@@ -13,8 +13,8 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    name: Verify (${{ matrix.os }})
+  node:
+    name: Node Verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -40,9 +40,105 @@ jobs:
       - name: Run release verification gate
         run: npm run verify
 
+      - name: Verify clean workspace
+        if: always()
+        run: npm run verify:clean-worktree
+
+  go-tui:
+    name: Go TUI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+          - macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tui/go.mod
+          cache-dependency-path: tui/go.sum
+
+      - name: Print Go environment
+        working-directory: tui
+        run: |
+          go version
+          go env GOVERSION GOOS GOARCH GOMOD GOMODCACHE
+
+      - name: Run Go tests
+        run: npm run tui:test
+
+      - name: Run Go vet
+        run: npm run tui:vet
+
+      - name: Run Go race tests
+        if: runner.os == 'Linux'
+        run: npm run tui:race
+
+      - name: Verify clean workspace
+        if: always()
+        run: npm run verify:clean-worktree
+
+  tui-build:
+    name: TUI Build Smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+          - macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tui/go.mod
+          cache-dependency-path: tui/go.sum
+
+      - name: Print Go environment
+        working-directory: tui
+        run: |
+          go version
+          go env GOVERSION GOOS GOARCH GOMOD GOMODCACHE
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build platform TUI binary
+        run: npm run tui:build
+
+      - name: Verify clean workspace
+        if: always()
+        run: npm run verify:clean-worktree
+
   package:
     name: Package Check
-    needs: verify
+    needs:
+      - node
+      - go-tui
+      - tui-build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -60,3 +156,72 @@ jobs:
 
       - name: Verify package contents
         run: npm run package:check
+
+      - name: Verify clean workspace
+        if: always()
+        run: npm run verify:clean-worktree
+
+  release-artifacts:
+    name: Release Artifact Dry Run
+    needs:
+      - go-tui
+      - tui-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tui/go.mod
+          cache-dependency-path: tui/go.sum
+
+      - name: Print Go environment
+        working-directory: tui
+        run: |
+          go version
+          go env GOVERSION GOOS GOARCH GOMOD GOMODCACHE
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set up GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          install-only: true
+
+      - name: Print GoReleaser version
+        run: goreleaser --version
+
+      - name: Validate GoReleaser configuration
+        run: npm run release:check
+
+      - name: Generate snapshot release artifacts and checksums
+        run: npm run release:dry-run
+
+      - name: Inspect release artifacts
+        run: |
+          test -f dist/relaybase-tui-checksums.txt
+          cat dist/relaybase-tui-checksums.txt
+          find dist -maxdepth 2 -type f | sort
+
+      - name: Verify clean workspace
+        if: always()
+        run: npm run verify:clean-worktree
+
+      - name: Upload release dry-run artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: relaybase-tui-release-dry-run
+          path: dist/**
+          if-no-files-found: error

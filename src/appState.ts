@@ -1,6 +1,8 @@
 import http from "node:http";
+import { buildAppComponentState } from "./appComponents.ts";
 import type { RelaybaseRuntime } from "./server.ts";
 import { isPortOpen } from "./ports.ts";
+import type { RelaybaseState } from "./apiTypes.ts";
 import type {
   AppReadiness,
   AppState,
@@ -14,9 +16,23 @@ import type {
 
 const DEFAULT_READINESS_TIMEOUT_MS = 8000;
 
-export async function getAllAppStates(runtime: RelaybaseRuntime): Promise<AppState[]> {
+export async function getRelaybaseState(runtime: RelaybaseRuntime): Promise<RelaybaseState> {
+  const generatedAt = new Date().toISOString();
   const statuses = await runtime.processes.listStatuses();
-  return Promise.all(statuses.map((app) => buildAppState(runtime, app.id, { status: app })));
+  const apps = await Promise.all(statuses.map((app) => buildAppState(runtime, app.id, { status: app })));
+  const componentState = buildAppComponentState({ states: apps, statuses, generatedAt });
+
+  return {
+    apps,
+    groups: componentState.groups,
+    components: componentState.components,
+    ...(componentState.diagnostics.length ? { diagnostics: componentState.diagnostics } : {}),
+    generatedAt
+  };
+}
+
+export async function getAllAppStates(runtime: RelaybaseRuntime): Promise<AppState[]> {
+  return (await getRelaybaseState(runtime)).apps;
 }
 
 export async function getAppState(runtime: RelaybaseRuntime, id: string): Promise<AppState> {

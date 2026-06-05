@@ -1,0 +1,263 @@
+# TUI Setup And Onboarding Plan
+
+This document defines the Relaybase TUI setup workflow for adding, registering, configuring, opening, proving, and repairing apps. As of RA012B, the Node/TypeScript daemon exposes setup/onboarding API contracts backed by the shared setup engine facade in `src/setupEngine.ts`, and the Go TUI has daemon-client setup methods, slash commands, no-apps onboarding, setup preview rendering, repair rendering, and confirmation-gated setup mutations.
+
+## Current Source Primitives
+
+Current implemented setup primitives:
+
+- `relaybase configure`
+- `relaybase configure --dry-run`
+- `relaybase configure --profile <id>`
+- `relaybase configure --repair`
+- `relaybase register <manifest>`
+- `relaybase open`
+- `relaybase health`
+- `relaybase health --prove`
+- `relaybase health --prove --yes`
+- `src/setup.ts` project detection, setup plans, write previews, apply flow, verification, and proof bundle support
+- `src/setupEngine.ts` daemon-facing facade over the existing CLI setup primitives
+- `src/setupRuntimeTypes.ts` runtime adapter contract models
+- `src/setupRuntimeAdapters.ts` daemon runtime adapter registry
+- `src/api.ts` `POST /__hub/api/apps/register`
+- `src/setupApi.ts` daemon setup/onboarding API routes
+- `src/setupApiTypes.ts` exported setup/onboarding API types
+
+Runtime breadth note: RA012B adds verified fixture coverage for runtime adapters covering JavaScript/TypeScript, Python, Go, Java, Kotlin/JVM, C#/.NET, Ruby, PHP, Docker Compose, Rust, Elixir, Scala, Clojure, Dart, native/C/C++, and Procfile projects. These adapters expose runtime-aware detection, command candidates, port strategies, health candidates, setup questions, and repair candidates. Live launch/proof still depends on the host having the relevant runtime tools and the user approving setup/lifecycle actions.
+
+Current TUI setup behavior:
+
+- The TUI can preview setup plans and write diffs through `POST /__hub/api/setup/preview`.
+- The TUI can apply setup plans through `POST /__hub/api/setup/apply` only after confirmation.
+- The TUI can register manifests, inspect/validate manifests, preview/apply safe manifest patches, open projects, prove health, and request repair plans through daemon setup APIs.
+- The TUI can render a no-apps onboarding state with commands for configuring the current directory, choosing a project path, registering a manifest, reading setup docs, or starting the daemon.
+- The TUI can parse `/add`, `/configure`, `/register`, `/open`, `/prove`, `/health`, `/repair`, `/manifest`, `/port`, and `/component` setup commands.
+
+The TUI still does not write files, run package managers, spawn app commands, probe ports, or manage lifecycle directly. Setup execution remains daemon-owned.
+
+## Implemented Daemon Setup API
+
+RA001/RA002 expose these daemon-owned setup routes:
+
+- `POST /__hub/api/setup/detect`
+- `POST /__hub/api/setup/plans`
+- `POST /__hub/api/setup/preview`
+- `POST /__hub/api/setup/apply`
+- `POST /__hub/api/setup/register-manifest`
+- `POST /__hub/api/setup/inspect-manifest`
+- `POST /__hub/api/setup/validate-manifest`
+- `POST /__hub/api/setup/patch-manifest/preview`
+- `POST /__hub/api/setup/patch-manifest/apply`
+- `POST /__hub/api/setup/open`
+- `POST /__hub/api/setup/prove`
+- `POST /__hub/api/setup/repair`
+- `GET /__hub/api/setup/operations/:operationId`
+
+Read-only routes return detection, choices, previews, manifest diagnostics, and repair previews without mutating the project. Apply, register, patch apply, open, and prove use existing daemon auth rules, and write/start/proof actions require explicit confirmation where they can mutate files or lifecycle state. Setup operations are synchronous today; `/setup/operations/:operationId` exists only as a normalized diagnostic route until async setup operation storage is implemented.
+
+Daemon setup routes emit safe setup events on the global event bus:
+
+- `setup.detected`
+- `setup.plan_created`
+- `setup.preview_created`
+- `setup.apply_started`
+- `setup.apply_completed`
+- `setup.apply_failed`
+- `setup.registered`
+- `setup.prove_started`
+- `setup.prove_completed`
+- `setup.repair_plan_created`
+- `setup.repair_applied`
+
+Event payloads contain safe summaries such as cwd, choice count, selected plan id, registered app id, proof status, and diagnostic counts. They do not include raw env values or setup file contents.
+
+## Agent Gateway Setup Context
+
+As of RA010, the daemon Agent Gateway can receive TUI context for setup/onboarding messages, include bounded/redacted setup context in Operator Agent prompts, expose daemon-owned setup/onboarding tools, and stream setup/approval events back to the Go TUI. `TuiAgentContext` includes:
+
+- selected pane id
+- selected app id
+- selected group id
+- selected component role
+- current route
+- current TUI page
+- current cwd from TUI launch
+- whether the daemon has zero apps
+- current setup wizard state
+- current setup plan id
+- current diagnostics
+- terminal clipboard/browser-open capability metadata
+
+The Agent Gateway event contract represents setup-related event shapes that the TUI can render from the daemon session stream:
+
+- `setup.plan_preview`
+- `setup.file_write_approval_required`
+- `setup.manifest_patch_approval_required`
+- `setup.repair_choices`
+- `setup.prove_result`
+
+The daemon implements tools for project detection, setup planning, setup write preview, approved setup apply, manifest registration, manifest inspect/validate/patch, health route and pinned-port patches, component metadata patches, safe env override patches, open/prove flows, and repair previews. Mutating tools return `approval_required` unless executed through an approved daemon path. As of RA010, the Go TUI can render model-selected setup previews, file-write/manifest approval prompts, repair choices, and prove results, then approve or reject the pending daemon approval.
+
+## Desired User Workflow
+
+Example natural-language flow:
+
+```text
+TUI > add C:\path\to\ratemygithub using npm run dev
+TUI > launch ratemygithub
+```
+
+Runtime-aware examples:
+
+```text
+TUI > configure this folder
+TUI > start this folder
+TUI > add this Python FastAPI app
+TUI > add this Django app
+TUI > add this Go server
+TUI > add this Rust app
+TUI > add this Spring Boot app
+TUI > add this .NET app
+TUI > add this Rails app
+TUI > add this Laravel app
+TUI > add this Phoenix app
+TUI > add this Docker Compose service
+TUI > repair this app because it ignores PORT
+TUI > use fixed port 3000
+TUI > make this app a frontend component
+```
+
+The current daemon/TUI behavior is:
+
+1. TUI captures the path and command intent.
+2. Daemon setup APIs or Agent Gateway tools run project detection and return runtime matrix metadata.
+3. Daemon returns setup plan choices with runtime/language/framework confidence, command candidates, port strategy candidates, setup questions, repair candidates, and diagnostics.
+4. TUI shows manifest, wrapper, setup-profile, env write previews, runtime-specific command/port context, and ambiguity questions.
+5. User approves or cancels.
+6. Daemon applies approved writes and registers the manifest.
+7. User launches through a daemon lifecycle operation.
+8. TUI shows operation progress, route, logs, and health proof from daemon state/events.
+
+## Implemented Slash Commands
+
+Implemented TUI setup commands:
+
+```text
+/add app
+/add app <path> using <command>
+/register <manifest-path>
+/configure
+/configure cwd
+/configure current folder
+/configure <path> --dry-run
+/open <path-or-app>
+/health <app> --prove
+/prove <app>
+/repair <app-or-path>
+/manifest inspect <app-or-path>
+/manifest edit <field> <value>
+/health route <app> <route>
+/port pinned <app> <port>
+/component role <app> <role>
+/component group <app> <groupId>
+/component label <app> <label>
+```
+
+These commands call daemon setup/onboarding APIs. They must not write files or spawn app processes directly from the TUI.
+
+## Configure Current Folder
+
+The TUI has current-directory context when the Node bridge passes `--current-directory` or `RELAYBASE_TUI_CURRENT_DIRECTORY`, or when the direct binary can read its launch working directory. If no trusted current-directory context exists, `/configure current folder` asks for a path instead of guessing.
+
+## No-Apps State
+
+When the daemon has no registered apps, the TUI offers:
+
+- configure current project when trusted current-directory context exists
+- register manifest
+- read setup docs
+- start daemon if missing
+- choose a project path
+
+If the daemon is unavailable, the TUI may show how to start `relaybase serve`, but it must not silently start unknown user apps.
+
+## Setup Plan Choices
+
+The daemon setup API returns setup candidates with:
+
+- plan id
+- label
+- architecture
+- score
+- reasons
+- risks
+- required inputs
+- recovery steps
+- files that would be created, updated, skipped, or left unchanged
+- runtime id and confidence
+- runtime command candidates
+- runtime port strategy candidates
+- runtime health candidates
+- setup questions
+- runtime repair candidates
+
+The TUI separates dry-run preview from apply. `/configure <path> --dry-run`, `/repair <app-or-path>`, and `/manifest inspect <app-or-path>` are read-only. `/configure <path>`, `/add app`, `/register`, `/open`, `/prove`, `/health --prove`, and manifest patch commands require confirmation before the daemon mutates files, registration state, proof artifacts, or lifecycle state.
+
+Runtime-specific setup choices now come through the daemon setup engine, not the TUI. The TUI should continue to render daemon-produced plan choices, setup questions, diffs, and diagnostics without detecting runtimes or writing files locally.
+
+## Repair Flows
+
+When an app ignores `PORT`, has a wrong health route, has stale manifest fields, or fails proof, the TUI should offer daemon-produced repair choices:
+
+- retry with framework wrapper
+- retry with pinned upstream port
+- repair manifest
+- change health route
+- re-register manifest
+- prove route and stop behavior again
+
+The daemon performs repair writes and lifecycle proof after approval. The TUI currently requests repair previews and then routes approved setup apply or manifest patch requests back to the daemon.
+
+## Safe Manifest Fields
+
+Implemented setup manifest patch APIs may prepare approved edits for:
+
+- `id`
+- `name`
+- `command`
+- `cwd`
+- `protocol`
+- `healthUrl`
+- `upstreamPort`
+- `env` with secret-safe handling
+- `relaybase.groupId`
+- `relaybase.componentRole`
+- `relaybase.displayName`
+- `relaybase.paneLabel`
+- `relaybase.paneOrder`
+
+Native `components[]` is a future migration. Current frontend/backend setup means component-as-app metadata unless implementation adds native components in a later roadmap. TUI component commands edit safe `relaybase.*` manifest metadata through the daemon manifest patch API when the target app exposes a manifest path in daemon state.
+
+## Frontend And Backend Groups
+
+The TUI guides users through creating or editing component-as-app metadata so separate frontend and backend manifests appear under one group:
+
+- frontend component app with `relaybase.componentRole: "frontend"`
+- backend component app with `relaybase.componentRole: "backend"`
+- shared `relaybase.groupId`
+- pane labels and pane order
+
+Each component remains one daemon-owned app process. The TUI should not combine multiple commands into a TUI-managed process group.
+
+## Proof
+
+`/prove <app>` and `/health <app> --prove` should show:
+
+- backend port opened
+- Relaybase route works
+- logs are captured
+- stop closes a daemon-owned port when applicable
+- proof artifact path when the daemon writes one
+- failure owner and next actions
+
+Lifecycle proof requires explicit approval because it can start and stop apps.

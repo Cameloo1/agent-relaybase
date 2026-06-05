@@ -1,7 +1,21 @@
 import http from "node:http";
 import net from "node:net";
 import { handleApiRequest } from "./api.ts";
+import { AgentGatewayService } from "./agent/gateway.ts";
+import {
+  appStateEventData,
+  DaemonEventBus,
+  lifecycleOperationEventData,
+  lifecycleOperationEventType,
+  logLineEventData,
+  logRotationEventData,
+  routeHealthEventData
+} from "./daemonEvents.ts";
+import { getRelaybaseState } from "./appState.ts";
 import { dashboardHtml } from "./dashboard.ts";
+import { LogExportService } from "./logExport.ts";
+import { LogStore } from "./logStore.ts";
+import { OperationStore } from "./operationStore.ts";
 import { ProcessManager } from "./processManager.ts";
 import { Registry } from "./registry.ts";
 import { RelaybaseMcpService } from "./relaybaseMcp.ts";
@@ -17,7 +31,7 @@ import {
 } from "./state.ts";
 import { sendHtml, sendJson } from "./responses.ts";
 import { maybeHandleTcpTunnel } from "./tcpTunnel.ts";
-import type { ServerOptions } from "./types.ts";
+import type { AppComponent, AppGroup, AppState, ServerOptions } from "./types.ts";
 
 export interface RelaybaseRuntime {
   host: string;
@@ -26,6 +40,11 @@ export interface RelaybaseRuntime {
   token: string;
   registry: Registry;
   processes: ProcessManager;
+  logStore: LogStore;
+  exports: LogExportService;
+  agentGateway: AgentGatewayService;
+  operations: OperationStore;
+  events: DaemonEventBus;
   mcp: RelaybaseMcpService;
 }
 
@@ -44,6 +63,7 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
   const stateDir = options.stateDir ?? getDefaultStateDir();
   const registry = new Registry(stateDir);
   await registry.load();
+  const logStore = await LogStore.open(stateDir);
   const token = await getOrCreateSessionToken(stateDir);
   const runtime = {
     host,
@@ -51,15 +71,23 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
     stateDir,
     token,
     registry,
+    logStore,
+    exports: undefined as unknown as LogExportService,
+    agentGateway: new AgentGatewayService({ stateDir }),
+    operations: new OperationStore(),
+    events: new DaemonEventBus(),
     processes: new ProcessManager(registry, {
       hubHost: host,
       hubPort: port,
       portRangeStart: options.portRangeStart ?? DEFAULT_PORT_RANGE_START,
       portRangeEnd: options.portRangeEnd ?? DEFAULT_PORT_RANGE_END,
+      logStore,
       stopPortOpenProbe: options.stopPortOpenProbe
     })
   } as RelaybaseRuntime;
+  runtime.exports = new LogExportService(runtime);
   runtime.mcp = new RelaybaseMcpService(runtime);
+  wireDaemonEvents(runtime);
 
   const sockets = new Set<net.Socket>();
   const httpServer = http.createServer((request, response) => {
@@ -80,8 +108,10 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
       void maybeHandleTcpTunnel(runtime, socket, firstChunk)
         .then((handled) => {
           if (!handled) {
+            socket.pause();
             socket.unshift(firstChunk);
             httpServer.emit("connection", socket);
+            socket.resume();
           }
         })
         .catch((error) => {
@@ -111,6 +141,100 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
       return { host, port };
     }
   };
+}
+
+function wireDaemonEvents(runtime: RelaybaseRuntime): void {
+  runtime.operations.subscribe((operation) => {
+    const type = lifecycleOperationEventType(operation);
+    runtime.events.publish({
+      type,
+      appId: operation.appId,
+      operationId: operation.operationId,
+      correlationId: operation.error?.correlationId,
+      data: lifecycleOperationEventData(operation)
+    });
+
+    if (type !== "app.lifecycle_operation_completed" && type !== "app.lifecycle_operation_failed") {
+      return;
+    }
+
+    const state = lifecycleOperationState(operation.result);
+    if (!state) {
+      return;
+    }
+
+    void publishGroupedAppStateChange(runtime, state, operation.operationId, operation.error?.correlationId);
+  });
+
+  runtime.processes.subscribeAllLogs((log) => {
+    runtime.events.publish({
+      type: "log.line_available",
+      appId: log.appId,
+      data: logLineEventData(log)
+    });
+  });
+
+  runtime.processes.subscribeLogRotations((rotation) => {
+    runtime.events.publish({
+      type: "log.stream_rotated",
+      appId: rotation.appId,
+      data: logRotationEventData(rotation)
+    });
+  });
+}
+
+async function publishGroupedAppStateChange(
+  runtime: RelaybaseRuntime,
+  fallbackState: AppState,
+  operationId: string,
+  correlationId?: string
+): Promise<void> {
+  let state = fallbackState;
+  let component: AppComponent | undefined;
+  let group: AppGroup | undefined;
+
+  try {
+    const snapshot = await getRelaybaseState(runtime);
+    state = snapshot.apps.find((app) => app.id === fallbackState.id) ?? fallbackState;
+    component = snapshot.components.find((entry) => entry.appId === fallbackState.id);
+    if (component) {
+      const groupId = component.groupId;
+      group = snapshot.groups.find((entry) => entry.groupId === groupId);
+    }
+  } catch {
+    // State-change events are best-effort notifications; clients can recover with /__hub/api/state.
+  }
+
+  runtime.events.publish({
+    type: "app.state_changed",
+    appId: state.id,
+    operationId,
+    ...(correlationId ? { correlationId } : {}),
+    data: appStateEventData(state, operationId, { component, group })
+  });
+
+  if (state.routeHealth) {
+    runtime.events.publish({
+      type: "route.health_changed",
+      appId: state.id,
+      operationId,
+      ...(correlationId ? { correlationId } : {}),
+      data: routeHealthEventData(state, operationId)
+    });
+  }
+}
+
+function lifecycleOperationState(result: unknown): AppState | undefined {
+  if (!result || typeof result !== "object" || !("state" in result)) {
+    return undefined;
+  }
+
+  const state = (result as { state?: unknown }).state;
+  if (!state || typeof state !== "object" || !("id" in state)) {
+    return undefined;
+  }
+
+  return state as AppState;
 }
 
 async function handleHttp(
@@ -254,6 +378,7 @@ async function close(
   sockets: Set<net.Socket>
 ): Promise<void> {
   await runtime.mcp.close();
+  await runtime.logStore.close();
 
   return new Promise((resolve) => {
     for (const socket of sockets) {

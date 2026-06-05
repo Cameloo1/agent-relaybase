@@ -1,8 +1,17 @@
 .codex-tools/
+.codex/
+.tmp/
 .relaybase/
+.env
+.env.*
+!.env.example
 MVP.md
 coverage/
 dist/
 node_modules/
 npm-debug.log*
+*.tgz
+artifacts/
+bin/relaybase-tui/relaybase-tui-*
+!bin/relaybase-tui/README.md
 

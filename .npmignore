@@ -1,8 +1,15 @@
 .codex-tools/
+.codex/
 .github/
 .relaybase/
+.env
+.env.*
+!.env.example
+artifacts/
 coverage/
+dist/
 node_modules/
 npm-debug.log*
+*.tgz
 tests/
 

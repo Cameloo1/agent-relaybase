@@ -37,6 +37,7 @@ startTimeoutMs
 stopTimeoutMs
 healthTimeoutMs
 mcp
+relaybase
 ```
 
 `id` must be 1 to 63 characters, lowercase letters, numbers, and dashes only. It cannot start or end with a dash.
@@ -50,6 +51,8 @@ mcp
 `upstreamPort` pins the app to a fixed backend port. Without it, Relaybase chooses a runtime port.
 
 Lifecycle timeout fields are milliseconds and must be between `100` and `3600000`.
+
+`relaybase` is an optional metadata block for TUI grouping. It never changes lifecycle ownership: each app remains one command/process. See [app-components.md](app-components.md) for the implemented fields, roles, fallback behavior, and aggregate status rules.
 
 ## Lifecycle Hooks
 

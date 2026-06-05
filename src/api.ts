@@ -1,27 +1,49 @@
 import type http from "node:http";
 import path from "node:path";
-import { getAllAppStates, getAppState } from "./appState.ts";
+import { handleAgentApiRequest } from "./agent/api.ts";
+import { AgentGatewayRequestError } from "./agent/gateway.ts";
+import { correlationIdForRequest, relaybaseErrorResponse, setCorrelationHeader } from "./apiErrors.ts";
+import type { AppState, DaemonEvent, LifecycleOperationType } from "./apiTypes.ts";
+import { getAppState, getRelaybaseState } from "./appState.ts";
+import { appRecordEventData } from "./daemonEvents.ts";
+import { LogExportRequestError } from "./logExport.ts";
+import { OperationConflictError, type OperationOutcome } from "./operationStore.ts";
 import { readManifestFile } from "./registry.ts";
-import { notFound, sendJson } from "./responses.ts";
+import { sendJson } from "./responses.ts";
 import type { RelaybaseRuntime } from "./server.ts";
+import { handleSetupApiRequest, SetupApiRequestError } from "./setupApi.ts";
+import type { LifecycleAttempt, RuntimeView } from "./types.ts";
+
+const DAEMON_EVENTS_HEARTBEAT_MS = 1000;
+const DAEMON_EVENTS_RETRY_MS = 3000;
 
 class ApiError extends Error {
   readonly statusCode: number;
   readonly code: string;
   readonly recoverable: boolean;
-  readonly details?: Record<string, unknown>;
+  readonly retryable: boolean;
+  readonly detail?: unknown;
+  readonly userAction?: string;
 
   constructor(
     statusCode: number,
     code: string,
     message: string,
-    options: { recoverable?: boolean; details?: Record<string, unknown> } = {}
+    options: {
+      recoverable?: boolean;
+      retryable?: boolean;
+      detail?: unknown;
+      details?: unknown;
+      userAction?: string;
+    } = {}
   ) {
     super(message);
     this.statusCode = statusCode;
     this.code = code;
-    this.recoverable = options.recoverable ?? statusCode >= 400;
-    this.details = options.details;
+    this.retryable = options.retryable ?? options.recoverable ?? statusCode >= 400;
+    this.recoverable = this.retryable;
+    this.detail = options.detail ?? options.details;
+    this.userAction = options.userAction;
   }
 }
 
@@ -32,15 +54,46 @@ export async function handleApiRequest(
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://localhost");
   const parts = url.pathname.split("/").filter(Boolean);
+  const correlationId = correlationIdForRequest(request);
+  setCorrelationHeader(response, correlationId);
 
   try {
     if (request.method === "GET" && url.pathname === "/__hub/api/state") {
-      sendJson(response, 200, { apps: await getAllAppStates(runtime) });
+      sendJson(response, 200, await getRelaybaseState(runtime));
       return;
     }
 
     if (request.method === "GET" && url.pathname === "/__hub/api/apps") {
       sendJson(response, 200, { apps: await runtime.processes.listStatuses() });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/__hub/api/events") {
+      requireToken(runtime, request, {
+        code: "UNAUTHORIZED_EVENT_STREAM",
+        message: "Unauthorized Relaybase event stream.",
+        userAction: "Use the session token from this daemon state directory before opening the event stream."
+      });
+      await streamDaemonEvents(runtime, request, response);
+      return;
+    }
+
+    if (
+      request.method === "GET" &&
+      parts.length === 4 &&
+      parts[0] === "__hub" &&
+      parts[1] === "api" &&
+      parts[2] === "operations"
+    ) {
+      const operation = runtime.operations.get(parts[3]);
+      if (!operation) {
+        throw new ApiError(404, "OPERATION_NOT_FOUND", "Relaybase operation was not found.", {
+          retryable: false,
+          detail: { operationId: parts[3] },
+          userAction: "Refresh the operation list or start a new lifecycle operation."
+        });
+      }
+      sendJson(response, 200, { operation });
       return;
     }
 
@@ -52,7 +105,79 @@ export async function handleApiRequest(
         manifest,
         typeof body.manifestPath === "string" ? { manifestPath: body.manifestPath } : {}
       );
+      runtime.events.publish({
+        type: "app.registered",
+        appId: app.id,
+        correlationId,
+        data: appRecordEventData(app)
+      });
       sendJson(response, 201, { app });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/__hub/api/logs/export") {
+      requireToken(runtime, request, {
+        code: "UNAUTHORIZED_LOG_EXPORT",
+        message: "Unauthorized Relaybase log export.",
+        userAction: "Use the session token from this daemon state directory before exporting logs."
+      });
+      const body = await readJsonBody(request);
+      const exportResult = await runtime.exports.create(body, correlationId);
+      sendJson(response, 202, { export: exportResult });
+      return;
+    }
+
+    if (parts[0] === "__hub" && parts[1] === "api" && parts[2] === "agent") {
+      if (
+        await handleAgentApiRequest({
+          runtime,
+          request,
+          response,
+          parts,
+          requireToken: (options) => requireToken(runtime, request, options)
+        })
+      ) {
+        return;
+      }
+    }
+
+    if (parts[0] === "__hub" && parts[1] === "api" && parts[2] === "setup") {
+      if (
+        await handleSetupApiRequest({
+          runtime,
+          request,
+          response,
+          url,
+          parts,
+          correlationId,
+          requireToken: (options) => requireToken(runtime, request, options)
+        })
+      ) {
+        return;
+      }
+    }
+
+    if (
+      request.method === "GET" &&
+      parts.length === 4 &&
+      parts[0] === "__hub" &&
+      parts[1] === "api" &&
+      parts[2] === "exports"
+    ) {
+      requireToken(runtime, request, {
+        code: "UNAUTHORIZED_LOG_EXPORT_STATUS",
+        message: "Unauthorized Relaybase log export status.",
+        userAction: "Use the session token from this daemon state directory before reading export status."
+      });
+      const exportResult = runtime.exports.get(parts[3]);
+      if (!exportResult) {
+        throw new ApiError(404, "LOG_EXPORT_NOT_FOUND", "Relaybase log export was not found.", {
+          retryable: false,
+          detail: { exportId: parts[3] },
+          userAction: "Start a new export or refresh the export status list."
+        });
+      }
+      sendJson(response, 200, { export: exportResult });
       return;
     }
 
@@ -60,24 +185,9 @@ export async function handleApiRequest(
       const id = parts[3];
       const action = parts[4];
 
-      if (request.method === "POST" && action === "start") {
+      if (request.method === "POST" && isLifecycleOperationType(action)) {
         requireToken(runtime, request);
-        const started = await runtime.processes.start(id);
-        sendJson(response, 200, { runtime: started, state: await getAppState(runtime, id) });
-        return;
-      }
-
-      if (request.method === "POST" && action === "stop") {
-        requireToken(runtime, request);
-        const stopped = await runtime.processes.stop(id);
-        sendJson(response, 200, { runtime: stopped, state: await getAppState(runtime, id) });
-        return;
-      }
-
-      if (request.method === "POST" && action === "restart") {
-        requireToken(runtime, request);
-        const restarted = await runtime.processes.restart(id);
-        sendJson(response, 200, { runtime: restarted, state: await getAppState(runtime, id) });
+        await handleLifecycleMutation(runtime, request, response, url, id, action, correlationId);
         return;
       }
     }
@@ -115,19 +225,218 @@ export async function handleApiRequest(
       parts[2] === "apps" &&
       parts[4] === "logs"
     ) {
+      const query = parseLogQuery(url);
+      const result = await runtime.processes.queryLogs({ appId: parts[3], ...query });
       sendJson(response, 200, {
         id: parts[3],
-        logs: await runtime.processes.logs(parts[3]),
-        events: await runtime.processes.logEvents(parts[3]),
+        logs: result.events.map((event) => event.message),
+        events: result.events,
+        page: result.page,
+        diagnostics: result.diagnostics,
         streamUrl: `http://${runtime.host}:${runtime.port}/__hub/api/apps/${encodeURIComponent(parts[3])}/logs/stream`
       });
       return;
     }
 
-    notFound(response);
+    throw new ApiError(404, "NOT_FOUND", "Not found.", {
+      retryable: false,
+      userAction: "Use one of the documented Relaybase API routes."
+    });
   } catch (error) {
-    sendApiError(runtime, response, error);
+    sendApiError(runtime, response, error, correlationId);
   }
+}
+
+interface LifecycleOperationResult {
+  runtime: RuntimeView;
+  state: AppState;
+}
+
+async function handleLifecycleMutation(
+  runtime: RelaybaseRuntime,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  url: URL,
+  id: string,
+  action: LifecycleOperationType,
+  correlationId: string
+): Promise<void> {
+  const handle = enqueueLifecycleOperation(runtime, id, action, correlationId);
+
+  if (prefersAsyncLifecycle(request, url)) {
+    sendJson(response, handle.created ? 202 : 200, {
+      operationId: handle.operationId,
+      operation: handle.operation,
+      ...(handle.deduplicated ? { deduplicated: true } : {})
+    });
+    return;
+  }
+
+  const operation = await handle.done;
+  if (!isLifecycleOperationResult(operation.result)) {
+    throw new ApiError(
+      400,
+      operation.error?.code ?? "LIFECYCLE_OPERATION_FAILED",
+      operation.error?.message ?? `${action} failed before producing an app state.`,
+      {
+        retryable: operation.error?.retryable ?? true,
+        detail: { operationId: operation.operationId, operation },
+        userAction: operation.error?.userAction ?? "Inspect the operation status and app logs before retrying."
+      }
+    );
+  }
+
+  sendJson(response, 200, {
+    operationId: operation.operationId,
+    operation,
+    runtime: operation.result.runtime,
+    state: operation.result.state
+  });
+}
+
+export function enqueueLifecycleOperation(
+  runtime: RelaybaseRuntime,
+  id: string,
+  action: LifecycleOperationType,
+  correlationId: string
+) {
+  try {
+    return runtime.operations.enqueueLifecycle<LifecycleOperationResult>({
+      operationType: action,
+      targetId: id,
+      correlationId,
+      run: async (context) => {
+        context.addProgress(`Daemon accepted ${action} for app ${id}.`, 20, "accepted");
+        if (action === "restart") {
+          context.addProgress("Restart is a daemon-owned stop phase followed by a start phase.", 30, "restart");
+        }
+        const lifecycleRuntime = await runLifecycleAction(runtime, id, action);
+        context.addProgress(`Daemon lifecycle call completed for ${action}.`, 85, "state-refresh");
+        return {
+          runtime: lifecycleRuntime,
+          state: await getAppState(runtime, id)
+        };
+      },
+      evaluate: (result) => evaluateLifecycleOutcome(action, id, result.runtime)
+    });
+  } catch (error) {
+    if (error instanceof OperationConflictError) {
+      throw new ApiError(409, "OPERATION_CONFLICT", error.message, {
+        retryable: true,
+        detail: { activeOperation: error.activeOperation },
+        userAction: "Poll the active operation before starting a conflicting lifecycle action."
+      });
+    }
+    throw error;
+  }
+}
+
+async function runLifecycleAction(
+  runtime: RelaybaseRuntime,
+  id: string,
+  action: LifecycleOperationType
+): Promise<RuntimeView> {
+  if (action === "start") {
+    return runtime.processes.start(id);
+  }
+
+  if (action === "stop") {
+    return runtime.processes.stop(id);
+  }
+
+  return runtime.processes.restart(id);
+}
+
+function evaluateLifecycleOutcome(action: LifecycleOperationType, id: string, runtime: RuntimeView): OperationOutcome {
+  const succeeded = action === "stop" ? runtime.status === "stopped" : runtime.status === "running";
+  if (succeeded) {
+    return {
+      status: "succeeded",
+      retryable: false,
+      message: `Succeeded ${action} for app ${id}.`
+    };
+  }
+
+  const message =
+    runtime.lastError ??
+    runtime.blockingReason ??
+    `Lifecycle ${action} for app ${id} finished with runtime status ${runtime.status}.`;
+  const timedOut = didLifecycleTimeOut(runtime, message);
+
+  return {
+    status: timedOut ? "timed_out" : "failed",
+    code: timedOut ? "LIFECYCLE_TIMED_OUT" : "LIFECYCLE_OPERATION_FAILED",
+    retryable: true,
+    message,
+    userAction: "Inspect the app logs, lifecycle attempt history, and manifest timeouts before retrying.",
+    detail: {
+      appId: id,
+      action,
+      runtime
+    }
+  };
+}
+
+function didLifecycleTimeOut(runtime: RuntimeView, message: string): boolean {
+  if (runtime.cleanupStatus === "timeout" || /timeout|timed out|did not become healthy/i.test(message)) {
+    return true;
+  }
+
+  const attempts = [runtime.lastStartAttempt, runtime.lastStopAttempt, ...(runtime.attemptHistory ?? [])].filter(
+    (attempt): attempt is LifecycleAttempt => Boolean(attempt)
+  );
+  return attempts.some((attempt) => attempt.hooks.some((hook) => hook.timedOut));
+}
+
+function prefersAsyncLifecycle(request: http.IncomingMessage, url: URL): boolean {
+  const asyncParam = url.searchParams.get("async");
+  const waitParam = url.searchParams.get("wait");
+  const prefer = headerText(request.headers.prefer);
+  const relaybaseAsync = headerText(request.headers["x-relaybase-async"]);
+  return (
+    asyncParam === "true" ||
+    asyncParam === "1" ||
+    waitParam === "false" ||
+    prefer.toLowerCase().includes("respond-async") ||
+    relaybaseAsync.toLowerCase() === "true"
+  );
+}
+
+function headerText(value: string | string[] | undefined): string {
+  return Array.isArray(value) ? value.join(",") : (value ?? "");
+}
+
+function isLifecycleOperationType(action: string): action is LifecycleOperationType {
+  return action === "start" || action === "stop" || action === "restart";
+}
+
+function isLifecycleOperationResult(result: unknown): result is LifecycleOperationResult {
+  return Boolean(result && typeof result === "object" && "runtime" in result && "state" in result);
+}
+
+function parseLogQuery(url: URL): { limit?: number; before?: number; after?: number } {
+  return {
+    ...parseOptionalPositiveInt(url.searchParams.get("limit"), "limit"),
+    ...parseOptionalPositiveInt(url.searchParams.get("before"), "before"),
+    ...parseOptionalPositiveInt(url.searchParams.get("after"), "after")
+  };
+}
+
+function parseOptionalPositiveInt(value: string | null, field: "limit" | "before" | "after"): Record<string, number> {
+  if (value === null || value === "") {
+    return {};
+  }
+
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new ApiError(400, "INVALID_LOG_QUERY", `Log query parameter ${field} must be a positive integer.`, {
+      retryable: false,
+      detail: { field, value },
+      userAction: "Use positive integer log pagination parameters."
+    });
+  }
+
+  return { [field]: parsed };
 }
 
 async function streamAppLogs(
@@ -153,10 +462,13 @@ async function streamAppLogs(
   };
 
   send("status", { id, state: "connected", at: new Date().toISOString() });
+  const snapshot = await runtime.processes.queryLogs({ appId: id, limit: 300 });
   send("snapshot", {
     id,
-    lines: (await runtime.processes.logs(id)).slice(-300),
-    events: (await runtime.processes.logEvents(id)).slice(-300),
+    lines: snapshot.events.map((event) => event.message),
+    events: snapshot.events,
+    page: snapshot.page,
+    diagnostics: snapshot.diagnostics,
     at: new Date().toISOString()
   });
 
@@ -182,37 +494,202 @@ async function streamAppLogs(
   response.once("close", cleanup);
 }
 
-function requireToken(runtime: RelaybaseRuntime, request: http.IncomingMessage): void {
+async function streamDaemonEvents(
+  runtime: RelaybaseRuntime,
+  request: http.IncomingMessage,
+  response: http.ServerResponse
+): Promise<void> {
+  response.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "x-accel-buffering": "no"
+  });
+  response.flushHeaders?.();
+
+  let closed = false;
+  const send = (event: DaemonEvent, retryMs?: number) => {
+    if (closed || response.destroyed) {
+      return;
+    }
+    if (retryMs !== undefined) {
+      response.write(`retry: ${retryMs}\n`);
+    }
+    response.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+  };
+  const sendComment = (comment: string) => {
+    if (!closed && !response.destroyed) {
+      response.write(`: ${comment}\n\n`);
+    }
+  };
+
+  const lastEventId = headerText(request.headers["last-event-id"]);
+  send(
+    runtime.events.create({
+      type: "daemon.ready",
+      data: {
+        daemon: {
+          status: "running",
+          host: runtime.host,
+          port: runtime.port
+        },
+        reconnect: {
+          replay: "not_implemented",
+          requiresStateRefresh: true,
+          lastEventId: lastEventId || null
+        }
+      }
+    }),
+    DAEMON_EVENTS_RETRY_MS
+  );
+  send(
+    runtime.events.create({
+      type: "daemon.health_changed",
+      data: {
+        daemon: {
+          status: "running",
+          host: runtime.host,
+          port: runtime.port
+        }
+      }
+    })
+  );
+
+  const unsubscribe = runtime.events.subscribe((event) => send(event));
+  const heartbeat = setInterval(() => {
+    sendComment(`heartbeat ${new Date().toISOString()}`);
+  }, DAEMON_EVENTS_HEARTBEAT_MS);
+
+  const cleanup = () => {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    clearInterval(heartbeat);
+    unsubscribe();
+    if (!response.destroyed) {
+      response.end();
+    }
+  };
+  request.once("close", cleanup);
+  response.once("close", cleanup);
+}
+
+function requireToken(
+  runtime: RelaybaseRuntime,
+  request: http.IncomingMessage,
+  options: { code?: string; message?: string; userAction?: string } = {}
+): void {
   const token = request.headers["x-relaybase-token"] ?? request.headers.authorization?.replace(/^Bearer\s+/i, "");
   const actual = Array.isArray(token) ? token[0] : token;
   if (actual !== runtime.token) {
-    throw new ApiError(401, "UNAUTHORIZED_MUTATION", "Unauthorized Relaybase mutation.", {
-      recoverable: true,
-      details: tokenDiagnostics(runtime)
-    });
+    throw new ApiError(
+      401,
+      options.code ?? "UNAUTHORIZED_MUTATION",
+      options.message ?? "Unauthorized Relaybase mutation.",
+      {
+        retryable: true,
+        detail: tokenDiagnostics(runtime),
+        userAction:
+          options.userAction ??
+          "Run relaybase diagnose_token or use the session token from this daemon state directory."
+      }
+    );
   }
 }
 
-function sendApiError(runtime: RelaybaseRuntime, response: http.ServerResponse, error: unknown): void {
+function sendApiError(
+  runtime: RelaybaseRuntime,
+  response: http.ServerResponse,
+  error: unknown,
+  correlationId: string
+): void {
+  if (response.headersSent) {
+    response.end();
+    return;
+  }
+
+  setCorrelationHeader(response, correlationId);
+
   if (error instanceof ApiError) {
-    sendJson(response, error.statusCode, {
-      error: error.message,
-      code: error.code,
-      recoverable: error.recoverable,
-      details: error.details
-    });
+    sendJson(
+      response,
+      error.statusCode,
+      relaybaseErrorResponse({
+        code: error.code,
+        message: error.message,
+        detail: error.detail,
+        retryable: error.retryable,
+        userAction: error.userAction,
+        correlationId
+      })
+    );
+    return;
+  }
+
+  if (error instanceof LogExportRequestError) {
+    sendJson(
+      response,
+      error.statusCode,
+      relaybaseErrorResponse({
+        code: error.code,
+        message: error.message,
+        detail: error.detail,
+        retryable: error.retryable,
+        userAction: error.userAction,
+        correlationId
+      })
+    );
+    return;
+  }
+
+  if (error instanceof SetupApiRequestError) {
+    sendJson(
+      response,
+      error.statusCode,
+      relaybaseErrorResponse({
+        code: error.code,
+        message: error.message,
+        detail: error.detail,
+        retryable: error.retryable,
+        userAction: error.userAction,
+        correlationId
+      })
+    );
+    return;
+  }
+
+  if (error instanceof AgentGatewayRequestError) {
+    sendJson(
+      response,
+      error.statusCode,
+      relaybaseErrorResponse({
+        code: error.code,
+        message: error.message,
+        detail: error.detail,
+        retryable: error.retryable,
+        userAction: error.userAction,
+        correlationId
+      })
+    );
     return;
   }
 
   const message = error instanceof Error ? error.message : "Unknown Relaybase API error.";
-  sendJson(response, 400, {
-    error: message,
-    code: "RELAYBASE_API_ERROR",
-    recoverable: true,
-    details: {
-      stateDir: runtime.stateDir
-    }
-  });
+  sendJson(
+    response,
+    400,
+    relaybaseErrorResponse({
+      code: "RELAYBASE_API_ERROR",
+      message,
+      retryable: true,
+      detail: {
+        stateDir: runtime.stateDir
+      },
+      userAction: "Inspect the Relaybase command output and retry the API request after correcting the input.",
+      correlationId
+    })
+  );
 }
 
 function tokenDiagnostics(runtime: RelaybaseRuntime): Record<string, unknown> {

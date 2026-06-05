@@ -4,14 +4,26 @@ import type {
   AppMcpConfig,
   AppProtocol,
   AppRecord,
+  AppComponentRole,
+  AppManifestDiagnostic,
   ChildMcpConfig,
   ChildMcpTransport,
-  McpExposePolicy
+  McpExposePolicy,
+  RelaybaseManifestMetadata
 } from "./types.ts";
 
 const APP_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const VALID_PROTOCOLS = new Set<AppProtocol>(["http", "http+ws", "tcp"]);
 const VALID_CHILD_MCP_TRANSPORTS = new Set<ChildMcpTransport>(["stdio", "streamable-http", "sse"]);
+const VALID_COMPONENT_ROLES = new Set<AppComponentRole>([
+  "frontend",
+  "backend",
+  "worker",
+  "database",
+  "service",
+  "other"
+]);
+const DEFAULT_PANE_ORDER = 100;
 
 export function validateAppId(id: string): void {
   if (!APP_ID_PATTERN.test(id)) {
@@ -62,6 +74,7 @@ export function normalizeManifest(
   const startTimeoutMs = normalizeTimeout(input.startTimeoutMs, "startTimeoutMs");
   const stopTimeoutMs = normalizeTimeout(input.stopTimeoutMs, "stopTimeoutMs");
   const healthTimeoutMs = normalizeTimeout(input.healthTimeoutMs, "healthTimeoutMs");
+  const relaybase = normalizeRelaybaseMetadata(input.relaybase, id, name);
   const hasLifecycleFields = [
     preStartCommand,
     stopCommand,
@@ -71,7 +84,10 @@ export function normalizeManifest(
     stopTimeoutMs,
     healthTimeoutMs
   ].some((value) => value !== undefined);
-  const schemaVersion = normalizeSchemaVersion(input.schemaVersion, input.mcp !== undefined || hasLifecycleFields);
+  const schemaVersion = normalizeSchemaVersion(
+    input.schemaVersion,
+    input.mcp !== undefined || hasLifecycleFields || relaybase.seen
+  );
   const mcp = normalizeMcpConfig(input.mcp, cwd);
 
   return {
@@ -92,6 +108,8 @@ export function normalizeManifest(
     ...(stopTimeoutMs !== undefined ? { stopTimeoutMs } : {}),
     ...(healthTimeoutMs !== undefined ? { healthTimeoutMs } : {}),
     ...(mcp ? { mcp } : {}),
+    ...(relaybase.metadata ? { relaybase: relaybase.metadata } : {}),
+    ...(relaybase.diagnostics.length ? { manifestDiagnostics: relaybase.diagnostics } : {}),
     ...(options.manifestPath ? { manifestPath: path.resolve(options.manifestPath) } : {}),
     createdAt: now,
     updatedAt: now
@@ -207,6 +225,167 @@ function normalizeSchemaVersion(value: unknown, hasMcpBlock: boolean): 1 | undef
   }
 
   return 1;
+}
+
+function normalizeRelaybaseMetadata(
+  value: unknown,
+  appId: string,
+  appName: string
+): { seen: boolean; metadata?: RelaybaseManifestMetadata; diagnostics: AppManifestDiagnostic[] } {
+  if (value === undefined) {
+    return { seen: false, diagnostics: [] };
+  }
+
+  const diagnostics: AppManifestDiagnostic[] = [];
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    diagnostics.push(
+      relaybaseDiagnostic(
+        "RELAYBASE_METADATA_INVALID",
+        "Manifest field relaybase must be an object when provided.",
+        "relaybase",
+        {
+          expected: "object",
+          receivedType: valueType(value)
+        }
+      )
+    );
+    return { seen: true, diagnostics };
+  }
+
+  const raw = value as Record<string, unknown>;
+  const role = normalizeComponentRole(raw.componentRole, diagnostics);
+  const groupId = normalizeMetadataString(raw.groupId, "relaybase.groupId", appId, diagnostics, {
+    validate: isValidAppId,
+    expected: "a valid Relaybase app/group id"
+  });
+  const displayName = normalizeMetadataString(raw.displayName, "relaybase.displayName", appName, diagnostics);
+  const paneLabel = normalizeMetadataString(raw.paneLabel, "relaybase.paneLabel", role, diagnostics);
+  const paneOrder = normalizePaneOrder(raw.paneOrder, diagnostics);
+
+  return {
+    seen: true,
+    metadata: {
+      groupId,
+      componentRole: role,
+      displayName,
+      paneLabel,
+      paneOrder
+    },
+    diagnostics
+  };
+}
+
+function normalizeComponentRole(value: unknown, diagnostics: AppManifestDiagnostic[]): AppComponentRole {
+  if (value === undefined || value === null || value === "") {
+    return "other";
+  }
+
+  if (typeof value !== "string" || !VALID_COMPONENT_ROLES.has(value as AppComponentRole)) {
+    diagnostics.push(
+      relaybaseDiagnostic(
+        "RELAYBASE_COMPONENT_ROLE_INVALID",
+        "Manifest field relaybase.componentRole must be one of: frontend, backend, worker, database, service, other.",
+        "relaybase.componentRole",
+        {
+          expected: [...VALID_COMPONENT_ROLES],
+          receivedType: valueType(value)
+        }
+      )
+    );
+    return "other";
+  }
+
+  return value as AppComponentRole;
+}
+
+function normalizeMetadataString(
+  value: unknown,
+  field: string,
+  fallback: string,
+  diagnostics: AppManifestDiagnostic[],
+  options: { validate?: (value: string) => boolean; expected?: string } = {}
+): string {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  if (typeof value !== "string" || !value.trim()) {
+    diagnostics.push(
+      relaybaseDiagnostic(
+        "RELAYBASE_METADATA_FIELD_INVALID",
+        `Manifest field ${field} must be a non-empty string.`,
+        field,
+        {
+          expected: "non-empty string",
+          receivedType: valueType(value)
+        }
+      )
+    );
+    return fallback;
+  }
+
+  const normalized = value.trim();
+  if (options.validate && !options.validate(normalized)) {
+    diagnostics.push(
+      relaybaseDiagnostic(
+        "RELAYBASE_METADATA_FIELD_INVALID",
+        `Manifest field ${field} must be ${options.expected}.`,
+        field,
+        {
+          expected: options.expected,
+          receivedType: valueType(value)
+        }
+      )
+    );
+    return fallback;
+  }
+
+  return normalized;
+}
+
+function normalizePaneOrder(value: unknown, diagnostics: AppManifestDiagnostic[]): number {
+  if (value === undefined || value === null || value === "") {
+    return DEFAULT_PANE_ORDER;
+  }
+
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    diagnostics.push(
+      relaybaseDiagnostic(
+        "RELAYBASE_PANE_ORDER_INVALID",
+        "Manifest field relaybase.paneOrder must be an integer.",
+        "relaybase.paneOrder",
+        {
+          expected: "integer",
+          receivedType: valueType(value)
+        }
+      )
+    );
+    return DEFAULT_PANE_ORDER;
+  }
+
+  return value;
+}
+
+function relaybaseDiagnostic(code: string, message: string, field: string, detail?: unknown): AppManifestDiagnostic {
+  return {
+    code,
+    severity: "warning",
+    message,
+    field,
+    ...(detail ? { detail } : {})
+  };
+}
+
+function valueType(value: unknown): string {
+  if (value === null) {
+    return "null";
+  }
+
+  if (Array.isArray(value)) {
+    return "array";
+  }
+
+  return typeof value;
 }
 
 function normalizeMcpConfig(value: unknown, appCwd: string): AppMcpConfig | undefined {
