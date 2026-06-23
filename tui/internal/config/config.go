@@ -50,9 +50,18 @@ func LoadWithEnv(getenv func(string) string) Config {
 }
 
 func (c *Config) ReloadToken() {
+	c.ReloadTokenForStateDir(false)
+}
+
+func (c *Config) ReloadTokenForStateDir(preferStateDirToken bool) {
 	c.TokenPath = filepath.Join(c.StateDir, "session-token")
+	tokenFromStateDir := readTokenFile(c.TokenPath)
+	if preferStateDirToken && tokenFromStateDir != "" {
+		c.Token = tokenFromStateDir
+		return
+	}
 	if strings.TrimSpace(c.Token) == "" {
-		c.Token = readTokenFile(c.TokenPath)
+		c.Token = tokenFromStateDir
 	}
 }
 

@@ -10,6 +10,11 @@ Read-only endpoints:
 GET /__hub/api/state
 GET /__hub/api/apps
 GET /__hub/api/apps/<id>/state
+```
+
+Tokened log-read endpoints:
+
+```text
 GET /__hub/api/apps/<id>/logs
 GET /__hub/api/apps/<id>/logs/stream
 ```
@@ -23,7 +28,7 @@ POST /__hub/api/apps/<id>/stop
 POST /__hub/api/apps/<id>/restart
 ```
 
-Mutations require the local token through `Authorization: Bearer <token>` or `x-relaybase-token: <token>`.
+Tokened log reads and mutations require the local token through `Authorization: Bearer <token>` or `x-relaybase-token: <token>`.
 
 ## State Shape
 

@@ -500,6 +500,21 @@ test("manifest inspect, validate, patch preview, and patch apply stay safe", asy
     assert.equal(traversal.statusCode, 400);
     assert.equal(traversal.json.code, "SETUP_PATH_OUTSIDE_PROJECT");
 
+    const noCwdAbsolute = await apiRequest(port, "POST", "/__hub/api/setup/inspect-manifest", {
+      manifestPath
+    });
+    assert.equal(noCwdAbsolute.statusCode, 400);
+    assert.equal(noCwdAbsolute.json.code, "SETUP_PATH_OUTSIDE_PROJECT");
+
+    const unsafeCommandPatch = await apiRequest(port, "POST", "/__hub/api/setup/patch-manifest/preview", {
+      cwd: project,
+      manifestPath,
+      patch: { command: "node server.js | tee app.log" }
+    });
+    assert.equal(unsafeCommandPatch.statusCode, 400);
+    assert.equal(unsafeCommandPatch.json.code, "SETUP_COMMAND_PATCH_UNSAFE");
+    assert.equal(await fs.readFile(manifestPath, "utf8"), before);
+
     const unconfirmed = await apiRequest(
       port,
       "POST",

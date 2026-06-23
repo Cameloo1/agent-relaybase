@@ -43,13 +43,20 @@ export function redactSecretLikeValues(value: string, env: NodeJS.ProcessEnv = p
   return redactForExport(value, { env });
 }
 
+export function redactDiagnosticText(value: string): string {
+  return value.replace(
+    /(?:token|password|passwd|secret|api[_-]?key|authorization|bearer|relaybase_token|session-token)(\s*[:=]\s*)?\S*/gi,
+    "[redacted]"
+  );
+}
+
 export function redactForExport(value: string, options: RedactionOptions = {}): RedactionResult {
   const env = options.env ?? process.env;
   let redacted = value;
   const report = emptyRedactionReport();
 
   for (const [key, envValue] of Object.entries(env)) {
-    if (!envValue || envValue.length < 4 || !/(token|secret|password|key)/i.test(key)) {
+    if (!envValue || envValue.length < 4 || !isSensitiveObjectKey(key)) {
       continue;
     }
 
@@ -230,11 +237,33 @@ function isSensitiveObjectKey(key: string): boolean {
     normalized.endsWith("secret") ||
     normalized === "password" ||
     normalized.endsWith("password") ||
+    normalized === "pass" ||
+    normalized.endsWith("pass") ||
+    normalized === "passwd" ||
+    normalized.endsWith("passwd") ||
+    normalized === "pwd" ||
+    normalized.endsWith("pwd") ||
     normalized === "passphrase" ||
+    normalized.endsWith("passphrase") ||
     normalized === "authorization" ||
+    normalized.endsWith("authorization") ||
+    normalized === "auth" ||
+    normalized.endsWith("auth") ||
+    normalized === "cookie" ||
+    normalized.endsWith("cookie") ||
+    normalized === "session" ||
+    normalized.endsWith("session") ||
+    normalized === "credential" ||
+    normalized.endsWith("credential") ||
+    normalized === "credentials" ||
+    normalized.endsWith("credentials") ||
     normalized === "apikey" ||
     normalized.endsWith("apikey") ||
+    normalized === "key" ||
+    normalized.endsWith("key") ||
     normalized === "privatekey" ||
-    normalized.endsWith("privatekey")
+    normalized.endsWith("privatekey") ||
+    normalized === "cert" ||
+    normalized.endsWith("cert")
   );
 }

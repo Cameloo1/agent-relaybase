@@ -292,6 +292,45 @@ test("Operator Agent runtime does not emit started for approval-gated SDK tool c
   });
 });
 
+test("Operator Agent config filters offered tools and blocks read-only policy mutations", async () => {
+  await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-config-policy-secret", async () => {
+    const session = makeSession();
+    const run = makeRun(session.id);
+    const runtime = new OperatorAgentRuntime({ runnerFactory: () => new FakeRunner("ok") });
+    const allowedConfig: AgentConfig = {
+      ...validAgentConfig(),
+      toolAllowlist: ["list_apps", "tail_logs"]
+    };
+
+    const filtered = await runtime.execute({
+      relaybase: fakeRelaybaseRuntime(),
+      config: allowedConfig,
+      session,
+      message: makeMessage(session.id, run.id, "list apps"),
+      run,
+      context: minimalTuiContext(),
+      emit: () => undefined
+    });
+
+    assert.deepEqual(filtered.toolNames, ["list_apps", "tail_logs"]);
+
+    const blockedRuntime = new OperatorAgentRuntime({ runnerFactory: () => new FakeRunner("ok") });
+    const blockedRun = makeRun(session.id);
+    const blocked = await blockedRuntime.execute({
+      relaybase: fakeApprovalRelaybaseRuntime().runtime,
+      config: { ...validAgentConfig(), approvalPolicy: "read_only_only" },
+      session,
+      message: makeMessage(session.id, blockedRun.id, "start notes"),
+      run: blockedRun,
+      context: { selectedAppId: "notes-web", diagnostics: [] },
+      emit: () => undefined
+    });
+
+    assert.equal(blocked.status, "completed");
+    assertNoWriteTools(blocked.toolNames);
+  });
+});
+
 test("Agent Gateway converts SDK approval interruptions into pending approvals and resumes approved tools", async () => {
   await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-approval-secret", async () => {
     const fixture = fakeApprovalRelaybaseRuntime();
@@ -612,6 +651,20 @@ test("RA008 policy guardrails separate read-only tools, approval-required tools,
     "AGENT_TOOL_ARBITRARY_COMMAND_BLOCKED"
   );
   assert.equal(
+    evaluateToolPolicy("apply_setup_plan", {
+      cwd: "C:\\project",
+      commandHint: "npm run dev && del secrets"
+    }).diagnostic?.code,
+    "AGENT_TOOL_ARBITRARY_COMMAND_BLOCKED"
+  );
+  assert.equal(
+    evaluateToolPolicy("patch_manifest_fields", {
+      manifestPath: "C:\\project\\relaybase.app.json",
+      patch: { command: "node server.js | tee app.log" }
+    }).diagnostic?.code,
+    "AGENT_TOOL_ARBITRARY_COMMAND_BLOCKED"
+  );
+  assert.equal(
     evaluateToolPolicy("export_logs", { scope: "all", redact: false }).diagnostic?.code,
     "AGENT_TOOL_UNREDACTED_EXPORT_BLOCKED"
   );
@@ -822,6 +875,25 @@ test("RA007 mutating tools exist but default model execution path is approval ga
   assert.equal(result.status, "approval_required");
   assert.equal(result.approval?.required, true);
   assertNoWriteTools(operatorAgentReadOnlyToolNames());
+});
+
+test("TUI action proposal honors browser and copy config gates", async () => {
+  const context = {
+    runtime: fakeRelaybaseRuntime(),
+    tuiContext: minimalTuiContext({
+      terminalCapabilities: { clipboard: "available", browserOpen: "available", colorDepth: "truecolor" },
+      currentRoute: "http://notes.localhost:7777"
+    }),
+    config: { ...validAgentConfig(), allowBrowserOpen: false, allowCopyRoute: false }
+  };
+
+  const copy = await executeRelaybaseAgentTool("propose_tui_action", { kind: "copy_route" }, context);
+  assert.equal(copy.status, "unavailable");
+  assert.equal(copy.diagnostic?.code, "AGENT_TUI_COPY_ROUTE_DISABLED");
+
+  const open = await executeRelaybaseAgentTool("propose_tui_action", { kind: "open_browser" }, context);
+  assert.equal(open.status, "unavailable");
+  assert.equal(open.diagnostic?.code, "AGENT_TUI_BROWSER_OPEN_DISABLED");
 });
 
 class FakeRunner implements OperatorAgentRunner {

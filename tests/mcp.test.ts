@@ -56,6 +56,10 @@ test("HTTP MCP rejects unauthorized mutation and accepts token auth", async () =
       () => unauthorized.callTool({ name: "start_app", arguments: { id: "managed-auth" } }),
       /UNAUTHORIZED_MUTATION.*diagnose_token/
     );
+    const manifestResource = await unauthorized.readResource({ uri: "relaybase://app/managed-auth/manifest" });
+    const manifestText = String(manifestResource.contents[0]?.text ?? "");
+    assert.doesNotMatch(manifestText, /env/);
+    assert.doesNotMatch(manifestText, /raw-mcp-secret/);
     const tokenDiagnostic = await unauthorized.callTool({ name: "diagnose_token", arguments: {} });
     assert.equal(tokenDiagnostic.structuredContent?.tokenPresent, true);
     assert.match(String(tokenDiagnostic.structuredContent?.tokenPath), /session-token$/);
@@ -321,19 +325,25 @@ test("aggregates child Streamable HTTP MCP tools with exact allowlists", async (
     const runtime = await hub.runtime.processes.start("webapp");
     assert.equal(runtime.mcpChildren?.[0].status, "connected");
 
+    const unauthenticated = await createHttpMcpClient(hub.address().port);
     const client = await createHttpMcpClient(hub.address().port, hub.runtime.token);
     try {
-      const tools = await client.listTools();
+      const tools = await unauthenticated.listTools();
       assert.ok(tools.tools.some((tool) => tool.name === "webapp.query"));
       assert.equal(
         tools.tools.some((tool) => tool.name === "webapp.hidden"),
         false
+      );
+      await assert.rejects(
+        () => unauthenticated.callTool({ name: "webapp.query", arguments: { text: "hello" } }),
+        /UNAUTHORIZED_MUTATION/
       );
 
       const result = await client.callTool({ name: "webapp.query", arguments: { text: "hello" } });
       assert.equal(result.structuredContent?.child, "http");
       assert.equal(result.structuredContent?.name, "query");
     } finally {
+      await unauthenticated.close();
       await client.close();
       await hub.runtime.processes.stop("webapp");
     }
@@ -407,6 +417,7 @@ async function registerManagedApp(registry: Registry, id: string, extra: Record<
     cwd: rootDir,
     protocol: "http",
     healthUrl: "/health",
+    env: { SECRET_TOKEN: "raw-mcp-secret" },
     ...extra
   });
 }

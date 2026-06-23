@@ -36,6 +36,7 @@ import type { AppRecord } from "./types.ts";
 
 const RELAYBASE_VERSION = "0.1.0";
 const LOCAL_TOKEN_HEADER = "x-relaybase-token";
+const MAX_JSON_BODY_BYTES = 1024 * 1024;
 
 interface McpSession {
   server: Server;
@@ -131,6 +132,11 @@ export class RelaybaseMcpService {
       }
     } catch (error) {
       if (!response.headersSent) {
+        if (error instanceof McpError) {
+          sendJsonRpcError(response, 400, error.code, error.message);
+          return;
+        }
+
         sendJsonRpcError(
           response,
           500,
@@ -481,6 +487,7 @@ export class RelaybaseMcpService {
         return structuredToolResult(await this.#appUrl(requiredArg(args.id, "id"), requiredAppUrlType(args.type)));
       default:
         if (this.runtime.processes.mcp.listTools().some((tool) => tool.name === name)) {
+          this.#requireMutationToken(extra, mutationAuthMode);
           return this.runtime.processes.mcp.callTool(name, args);
         }
 
@@ -784,7 +791,7 @@ export class RelaybaseMcpService {
         throw new Error(`Unknown app: ${id}`);
       }
 
-      return textResource(uri, JSON.stringify(app, null, 2), "application/json");
+      return textResource(uri, JSON.stringify(appManifestResource(app), null, 2), "application/json");
     }
 
     if (uri.startsWith("relaybase://app/") && uri.includes("/mcp/")) {
@@ -951,6 +958,11 @@ function structuredToolResult(value: unknown): CallToolResult {
   };
 }
 
+function appManifestResource(app: AppRecord): Record<string, unknown> {
+  const { env: _env, ...safeApp } = app;
+  return safeApp;
+}
+
 function textResource(uri: string, text: string, mimeType: string): ReadResourceResult {
   return {
     contents: [
@@ -1042,8 +1054,15 @@ function bearerToken(value: string | undefined): string | undefined {
 
 async function readJsonBody(request: http.IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.byteLength;
+    if (totalBytes > MAX_JSON_BODY_BYTES) {
+      request.destroy();
+      throw new McpError(ErrorCode.InvalidRequest, "Request body exceeds the 1 MB limit.");
+    }
+    chunks.push(buffer);
   }
 
   if (!chunks.length) {

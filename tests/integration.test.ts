@@ -146,6 +146,40 @@ test("keeps reserved hub routes on the dashboard/API", async () => {
   }
 });
 
+test("server finalizes HTTP and upgrade requests when route handling throws", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-handler-error-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
+
+  try {
+    await hub.listen();
+    hub.runtime.registry.get = async () => {
+      throw new Error("forced registry failure");
+    };
+
+    const response = await httpRequest(hub.address().port, "/", {
+      host: `broken.localhost:${hub.address().port}`
+    });
+    assert.equal(response.statusCode, 500);
+    assert.equal(JSON.parse(response.body).code, "RELAYBASE_INTERNAL_SERVER_ERROR");
+
+    const upgrade = await rawSocketTranscript(
+      hub.address().port,
+      [
+        "GET /live HTTP/1.1",
+        `Host: broken.localhost:${hub.address().port}`,
+        "Connection: Upgrade",
+        "Upgrade: websocket",
+        "",
+        ""
+      ].join("\r\n")
+    );
+    assert.match(upgrade, /HTTP\/1\.1 500/);
+    assert.match(upgrade, /Relaybase internal server error/);
+  } finally {
+    await hub.close();
+  }
+});
+
 test("proxies upgrade sockets for WebSocket-style dev servers", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-ws-"));
   const upstream = await createUpgradeUpstream();
@@ -169,6 +203,8 @@ test("proxies upgrade sockets for WebSocket-style dev servers", async () => {
         `Host: socket.localhost:${hub.address().port}`,
         "Connection: Upgrade",
         "Upgrade: websocket",
+        "Proxy-Authorization: Basic should-not-forward",
+        "TE: trailers",
         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
         "Sec-WebSocket-Version: 13",
         "",
@@ -178,6 +214,38 @@ test("proxies upgrade sockets for WebSocket-style dev servers", async () => {
 
     assert.match(transcript, /101 Switching Protocols/);
     assert.match(transcript, /upgraded/);
+    assert.equal(upstream.rawHeaders().includes("Proxy-Authorization"), false);
+    assert.equal(upstream.rawHeaders().includes("TE"), false);
+    assert.equal(upstream.rawHeaders().includes("Upgrade"), true);
+  } finally {
+    await hub.close();
+    await upstream.close();
+  }
+});
+
+test("proxy tears down partial HTTP responses on upstream stream failure", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-partial-proxy-"));
+  const upstream = await createPartialFailureUpstream();
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
+
+  try {
+    await hub.runtime.registry.upsertManifest({
+      id: "partial",
+      name: "Partial",
+      command: "external",
+      cwd: ".",
+      upstreamPort: upstream.port
+    });
+    await hub.listen();
+
+    const result = await partialHttpTranscript(hub.address().port, "/partial", {
+      host: `partial.localhost:${hub.address().port}`
+    });
+
+    assert.equal(result.statusCode, 200);
+    assert.equal(result.body, "partial-body");
+    assert.match(result.error ?? "", /aborted|socket hang up|ECONNRESET/i);
+    assert.doesNotMatch(result.body, /Relaybase proxy failed/);
   } finally {
     await hub.close();
     await upstream.close();
@@ -244,7 +312,13 @@ test("manages process lifecycle and injects hub env", async () => {
       )
     );
 
-    const stream = openSseCollector(hub.address().port, "/__hub/api/apps/managed/logs/stream");
+    const unauthorizedStream = await apiRequest(hub.address().port, "GET", "/__hub/api/apps/managed/logs/stream");
+    assert.equal(unauthorizedStream.statusCode, 401);
+    assert.equal(JSON.parse(unauthorizedStream.body).code, "UNAUTHORIZED_APP_LOG_STREAM");
+
+    const stream = openSseCollector(hub.address().port, "/__hub/api/apps/managed/logs/stream", {
+      "x-relaybase-token": hub.runtime.token
+    });
     await stream.until("event: snapshot");
     await httpRequest(hub.address().port, "/emit-log?message=fixture%20emitted%20live%20log", {
       "x-relaybase-app": "managed",
@@ -368,7 +442,17 @@ test("HTTP log snapshots page durable logs across daemon restart", async () => {
     });
     await hub.runtime.logStore.flush();
 
-    const liveResponse = await apiRequest(hub.address().port, "GET", "/__hub/api/apps/durable/logs?limit=5");
+    const unauthorizedResponse = await apiRequest(hub.address().port, "GET", "/__hub/api/apps/durable/logs?limit=5");
+    assert.equal(unauthorizedResponse.statusCode, 401);
+    assert.equal(JSON.parse(unauthorizedResponse.body).code, "UNAUTHORIZED_APP_LOGS");
+
+    const liveResponse = await apiRequest(
+      hub.address().port,
+      "GET",
+      "/__hub/api/apps/durable/logs?limit=5",
+      undefined,
+      { "x-relaybase-token": hub.runtime.token }
+    );
     assert.equal(liveResponse.statusCode, 200);
     const liveBody = JSON.parse(liveResponse.body);
     const liveEvent = liveBody.events.find((event: { message: string }) => event.message === "durable scrollback line");
@@ -386,7 +470,9 @@ test("HTTP log snapshots page durable logs across daemon restart", async () => {
     const recoveredResponse = await apiRequest(
       hub.address().port,
       "GET",
-      `/__hub/api/apps/durable/logs?limit=1&before=${encodeURIComponent(String(liveEvent.sequence + 1))}`
+      `/__hub/api/apps/durable/logs?limit=1&before=${encodeURIComponent(String(liveEvent.sequence + 1))}`,
+      undefined,
+      { "x-relaybase-token": hub.runtime.token }
     );
     assert.equal(recoveredResponse.statusCode, 200);
     const recoveredBody = JSON.parse(recoveredResponse.body);
@@ -1505,7 +1591,13 @@ test("routes basic TCP tunnel handshakes", async () => {
     });
     await hub.listen();
 
-    const response = await tcpEcho(hub.address().port, "RELAYBASE-TCP echo\n\nhello");
+    const unauthorized = await tcpEcho(hub.address().port, "RELAYBASE-TCP echo\n\nhello");
+    assert.match(unauthorized, /Unauthorized Relaybase TCP tunnel/);
+
+    const response = await tcpEcho(
+      hub.address().port,
+      `RELAYBASE-TCP echo\nX-Relaybase-Token: ${hub.runtime.token}\n\nhello`
+    );
     assert.equal(response, "hello");
   } finally {
     await hub.close();
@@ -1836,11 +1928,27 @@ async function createConditionalHttpUpstream(
   };
 }
 
-async function createUpgradeUpstream(): Promise<{ port: number; close(): Promise<void> }> {
+async function createUpgradeUpstream(): Promise<{ port: number; rawHeaders(): string[]; close(): Promise<void> }> {
   const server = http.createServer();
-  server.on("upgrade", (_request, socket) => {
+  let lastRawHeaders: string[] = [];
+  server.on("upgrade", (request, socket) => {
+    lastRawHeaders = request.rawHeaders;
     socket.write("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n");
     socket.end("upgraded");
+  });
+  await listen(server);
+  return {
+    port: (server.address() as net.AddressInfo).port,
+    rawHeaders: () => lastRawHeaders,
+    close: () => closeServer(server)
+  };
+}
+
+async function createPartialFailureUpstream(): Promise<{ port: number; close(): Promise<void> }> {
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/plain" });
+    response.write("partial-body");
+    setImmediate(() => response.socket?.destroy(new Error("forced upstream stream failure")));
   });
   await listen(server);
   return {
@@ -1891,6 +1999,36 @@ function httpRequest(
       );
     });
     request.once("error", reject);
+    request.end();
+  });
+}
+
+function partialHttpTranscript(
+  port: number,
+  pathName: string,
+  headers: Record<string, string>
+): Promise<{ statusCode: number; body: string; error?: string }> {
+  return new Promise((resolve) => {
+    const request = http.request({ host: "127.0.0.1", port, path: pathName, headers }, (response) => {
+      const chunks: Buffer[] = [];
+      let settled = false;
+      const settle = (error?: string) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve({
+          statusCode: response.statusCode ?? 0,
+          body: Buffer.concat(chunks).toString("utf8"),
+          error
+        });
+      };
+      response.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      response.once("end", () => settle());
+      response.once("aborted", () => settle("aborted"));
+      response.once("error", (error) => settle(error.message));
+    });
+    request.once("error", (error) => resolve({ statusCode: 0, body: "", error: error.message }));
     request.end();
   });
 }

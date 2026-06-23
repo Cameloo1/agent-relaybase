@@ -43,6 +43,7 @@ const SKIPPED_DIRS = new Set([
   "coverage",
   "__pycache__"
 ]);
+const UNSAFE_COMMAND_PATH_CHARS = /[&|<>;$`"'\\]/;
 
 const MAX_RELATIVE_FILES = 600;
 const MAX_SNIPPETS = 120;
@@ -425,8 +426,12 @@ function goAdapter(): RuntimeAdapter {
       ...(rootMain
         ? [command("go.root", "Go root module", ["go", "run", "."], "high", ["main.go detected at project root"])]
         : []),
-      ...cmdMains.map((file) => {
+      ...cmdMains.flatMap((file) => {
         const commandPath = `./${path.posix.dirname(file)}`;
+        if (!isSafeCommandPathPart(commandPath)) {
+          return [];
+        }
+
         return command(
           `go.${commandPath}`,
           `Go command ${commandPath}`,
@@ -597,18 +602,18 @@ function dotnetAdapter(): RuntimeAdapter {
 
     const text = combinedSnippet(input);
     const web = /Microsoft\.NET\.Sdk\.Web|WebApplication\.CreateBuilder|Microsoft\.AspNetCore/i.test(text);
-    const candidates =
-      csprojFiles.length === 1
-        ? [
-            command(
-              "dotnet.project",
-              "dotnet run project",
-              ["dotnet", "run", "--project", csprojFiles[0]],
-              web ? "high" : "medium",
-              [`${csprojFiles[0]} detected`]
-            )
-          ]
-        : [command("dotnet.run", "dotnet run", ["dotnet", "run"], web ? "medium" : "low", ["dotnet project detected"])];
+    const safeCsproj = csprojFiles.length === 1 && isSafeCommandPathPart(csprojFiles[0]) ? csprojFiles[0] : undefined;
+    const candidates = safeCsproj
+      ? [
+          command(
+            "dotnet.project",
+            "dotnet run project",
+            ["dotnet", "run", "--project", safeCsproj],
+            web ? "high" : "medium",
+            [`${safeCsproj} detected`]
+          )
+        ]
+      : [command("dotnet.run", "dotnet run", ["dotnet", "run"], web ? "medium" : "low", ["dotnet project detected"])];
 
     return result({
       runtime: "dotnet",
@@ -846,15 +851,20 @@ function rustAdapter(): RuntimeAdapter {
         ...(hasFile(input, /^src\/main\.rs$/)
           ? [command("rust.run", "Cargo run", ["cargo", "run"], web ? "high" : "medium", ["src/main.rs detected"])]
           : []),
-        ...bins.map((file) =>
-          command(
+        ...bins.flatMap((file) => {
+          const binName = path.posix.basename(file, ".rs");
+          if (!isSafeCommandPathPart(binName)) {
+            return [];
+          }
+
+          return command(
             `rust.${file}`,
-            `Cargo bin ${path.posix.basename(file, ".rs")}`,
-            ["cargo", "run", "--bin", path.posix.basename(file, ".rs")],
+            `Cargo bin ${binName}`,
+            ["cargo", "run", "--bin", binName],
             bins.length === 1 ? "high" : "medium",
             [`${file} detected`]
-          )
-        )
+          );
+        })
       ],
       portStrategies: [
         portStrategy("env_port", "medium", { env: { PORT: "<PORT>" } }),
@@ -1351,6 +1361,10 @@ function diagnostic(
 
 function matchingFiles(input: RuntimeDetectionInput, patterns: RegExp[]): string[] {
   return input.relativeFiles.filter((file) => patterns.some((pattern) => pattern.test(file)));
+}
+
+function isSafeCommandPathPart(value: string): boolean {
+  return !UNSAFE_COMMAND_PATH_CHARS.test(value);
 }
 
 function hasFile(input: RuntimeDetectionInput, pattern: RegExp): boolean {

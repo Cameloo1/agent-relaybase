@@ -91,11 +91,17 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
 
   const sockets = new Set<net.Socket>();
   const httpServer = http.createServer((request, response) => {
-    void handleHttp(runtime, request, response);
+    void handleHttp(runtime, request, response).catch((error) => {
+      finishFailedHttpRequest(response, error);
+    });
   });
 
   httpServer.on("upgrade", (request, socket, head) => {
-    void handleUpgrade(runtime, request, socket as net.Socket, Buffer.isBuffer(head) ? head : Buffer.from(head));
+    void handleUpgrade(runtime, request, socket as net.Socket, Buffer.isBuffer(head) ? head : Buffer.from(head)).catch(
+      () => {
+        writeSocketHttpError(socket as net.Socket, 500, "Relaybase internal server error.");
+      }
+    );
   });
 
   httpServer.on("clientError", (error, socket) => {
@@ -141,6 +147,18 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
       return { host, port };
     }
   };
+}
+
+function finishFailedHttpRequest(response: http.ServerResponse, error: unknown): void {
+  if (response.headersSent) {
+    response.destroy(error instanceof Error ? error : undefined);
+    return;
+  }
+
+  sendJson(response, 500, {
+    error: "Relaybase internal server error.",
+    code: "RELAYBASE_INTERNAL_SERVER_ERROR"
+  });
 }
 
 function wireDaemonEvents(runtime: RelaybaseRuntime): void {

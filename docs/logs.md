@@ -63,7 +63,7 @@ Responses include legacy `logs` and `events` fields plus page metadata:
 }
 ```
 
-Live log SSE behavior remains available at `/__hub/api/apps/<id>/logs/stream`.
+Live log SSE behavior remains available at `/__hub/api/apps/<id>/logs/stream`. App log snapshot and stream reads require the local Relaybase token through `Authorization: Bearer <token>` or `x-relaybase-token: <token>`.
 
 ## Retention
 

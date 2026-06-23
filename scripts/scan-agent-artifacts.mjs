@@ -17,6 +17,10 @@ const checks = [
   [
     "secret_assignment",
     /\b(?:OPENROUTER_API_KEY|RELAYBASE_TOKEN|password|secret|token|api[_-]?key)\s*=\s*(?!\[redacted\]|redacted|<redacted>)[^\s"',}]+/i
+  ],
+  [
+    "secret_json_field",
+    /"(?:OPENROUTER_API_KEY|RELAYBASE_TOKEN|password|passwd|pwd|secret|token|api[_-]?key|apiKey|auth[_-]?token|authorization|cookie|session)"\s*:\s*"(?!\[redacted\]|redacted|<redacted>|env:)[^"]{4,}"/i
   ]
 ];
 

@@ -247,9 +247,11 @@ export class ChildMcpSupervisor {
     child.lastStartedAt = new Date().toISOString();
     child.lastError = undefined;
     child.nextRestartAt = undefined;
+    let client: Client | undefined;
+    let transport: ChildTransport | undefined;
 
     try {
-      const client = new Client(
+      client = new Client(
         {
           name: `relaybase-${child.app.id}-${child.config.id}`,
           version: "0.1.0"
@@ -271,7 +273,7 @@ export class ChildMcpSupervisor {
           }
         }
       );
-      const transport = await this.#createTransport(child);
+      transport = await this.#createTransport(child);
       transport.onclose = () => void this.#handleChildClosed(child);
       transport.onerror = (error) => {
         child.lastError = error.message;
@@ -300,6 +302,17 @@ export class ChildMcpSupervisor {
       });
       this.#emitListChanged(child);
     } catch (error) {
+      if (client && child.client === client) {
+        child.client = undefined;
+      }
+      if (transport && child.transport === transport) {
+        child.transport = undefined;
+      }
+      try {
+        await client?.close();
+      } catch {
+        // The failed connect path is already reported below.
+      }
       child.status = "errored";
       child.acceptingCalls = false;
       child.lastError = error instanceof Error ? error.message : String(error);
@@ -491,6 +504,9 @@ export class ChildMcpSupervisor {
 
   #scheduleRestart(child: ChildRuntime): void {
     if (child.closing) {
+      return;
+    }
+    if (child.restartTimer) {
       return;
     }
 

@@ -3,6 +3,7 @@ import { closeSync, openSync, promises as fs } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { redactDiagnosticText } from "./redaction.ts";
 
 export interface RelaybaseCommandOptions {
   cwd: string;
@@ -355,13 +356,6 @@ async function readDaemonLogTail(logPath: string, maxLines = 12): Promise<string
   } catch {
     return [];
   }
-}
-
-function redactDiagnosticText(value: string): string {
-  return value.replace(
-    /(?:token|password|passwd|secret|api[_-]?key|authorization|bearer|relaybase_token|session-token)(\s*[:=]\s*)?\S*/gi,
-    "[redacted]"
-  );
 }
 
 async function ensureDir(dirPath: string): Promise<void> {

@@ -69,7 +69,14 @@ export function relaybaseAgentToolDefinitions(): RelaybaseAgentToolDefinition[] 
 }
 
 export function createRelaybaseAgentToolRegistry(context: AgentToolExecutionContext): RelaybaseAgentToolRegistry {
-  const definitions = relaybaseAgentToolDefinitions();
+  const allDefinitions = relaybaseAgentToolDefinitions();
+  const allowlist = context.config?.toolAllowlist ? new Set(context.config.toolAllowlist) : undefined;
+  const definitions = allDefinitions.filter((definition) => {
+    if (allowlist && !allowlist.has(definition.name)) {
+      return false;
+    }
+    return context.config?.approvalPolicy !== "read_only_only" || !definition.approvalRequired;
+  });
   return {
     definitions,
     sdkTools: definitions.map((definition) => createSdkTool(definition, context)),

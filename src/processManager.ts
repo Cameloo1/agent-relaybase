@@ -313,7 +313,13 @@ export class ProcessManager {
   async restart(id: string): Promise<RuntimeView> {
     const active = this.#mutations.get(id);
     if (active) {
-      return active.promise;
+      if (active.action === "restart") {
+        return active.promise;
+      }
+
+      const entry = this.#runtime.get(id) ?? this.#entry("stopped", "unknown");
+      entry.blockingReason = `${active.action}_in_progress`;
+      return this.#view(entry, id);
     }
 
     const promise = (async () => {

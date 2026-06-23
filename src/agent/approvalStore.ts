@@ -94,6 +94,9 @@ export class ApprovalStore {
       }
       return persisted;
     }
+    if (this.#threadStore) {
+      return undefined;
+    }
     const approval = this.#approvals.get(approvalId);
     if (!approval) {
       return undefined;

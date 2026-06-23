@@ -5,6 +5,7 @@ import { AgentGatewayRequestError } from "./gateway.ts";
 import type { AgentMessageRequest } from "./types.ts";
 
 type RequireToken = (options?: { code?: string; message?: string; userAction?: string }) => void;
+const MAX_JSON_BODY_BYTES = 1024 * 1024;
 
 export async function handleAgentApiRequest(input: {
   runtime: RelaybaseRuntime;
@@ -227,8 +228,17 @@ function sequenceFromEventId(value: string): string | undefined {
 
 async function readJsonBody(request: http.IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.byteLength;
+    if (totalBytes > MAX_JSON_BODY_BYTES) {
+      request.destroy();
+      throw new AgentGatewayRequestError(413, "REQUEST_BODY_TOO_LARGE", "Request body exceeds the 1 MB limit.", {
+        retryable: false
+      });
+    }
+    chunks.push(buffer);
   }
 
   if (chunks.length === 0) {

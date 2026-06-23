@@ -1830,7 +1830,13 @@ async function getLogsViaApi(
   options: RelaybaseCommandOptions,
   id: string
 ): Promise<{ ok: boolean; logs: string[]; events: unknown[]; streamUrl?: string; error?: string }> {
-  const response = await httpRequest(options, "GET", `/__hub/api/apps/${encodeURIComponent(id)}/logs`);
+  const response = await httpRequest(
+    options,
+    "GET",
+    `/__hub/api/apps/${encodeURIComponent(id)}/logs`,
+    undefined,
+    await getOrCreateSessionToken(options.stateDir)
+  );
   if (!response.ok) {
     return { ok: false, logs: [], events: [], error: response.body };
   }
@@ -2574,7 +2580,7 @@ function startCommandFor(detection: ProjectDetection): string {
   const runtimeCommand = detection.primaryRuntime?.startCommandCandidates.find(
     (candidate) => candidate.confidence === "high" || candidate.confidence === "medium"
   );
-  if (runtimeCommand && !/[<>]/.test(runtimeCommand.commandPreview)) {
+  if (runtimeCommand && !/[&|<>;$`]/.test(runtimeCommand.commandPreview)) {
     return runtimeCommand.commandPreview;
   }
   if (detection.primaryRuntime && detection.primaryRuntime.runtime !== "javascript-typescript") {

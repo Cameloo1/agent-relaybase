@@ -17,9 +17,15 @@ export function createInspectManifestTool(): RelaybaseAgentToolDefinition<z.infe
     parameters,
     approvalRequired: false,
     risk: "low",
-    execute: (input, _context) =>
+    execute: (input, context) =>
       safeToolExecute(definition, input, async () =>
-        successResult(definition.name, await inspectManifest({ manifestPath: input.manifestPath, cwd: input.cwd }))
+        successResult(
+          definition.name,
+          await inspectManifest({
+            manifestPath: input.manifestPath,
+            cwd: input.cwd ?? context.tuiContext.currentCwd
+          })
+        )
       )
   };
   return definition;

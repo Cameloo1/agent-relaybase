@@ -6,7 +6,7 @@ import type { RelaybaseRuntime } from "../../server.ts";
 import type { AppComponentRole, AppRecord, AppState } from "../../types.ts";
 import { sanitizeAgentPayload } from "../errors.ts";
 import { loadOpenAIAgentsSdk } from "../openrouterProvider.ts";
-import type { AgentRunEventType, AgentToolRisk, TuiAgentContext } from "../types.ts";
+import type { AgentConfig, AgentRunEventType, AgentToolRisk, TuiAgentContext } from "../types.ts";
 
 export const componentRoleSchema = z.enum(["frontend", "backend", "worker", "database", "service", "other"]);
 
@@ -21,6 +21,7 @@ export const confirmationContextSchema = z
 export interface AgentToolExecutionContext {
   runtime: RelaybaseRuntime;
   tuiContext: TuiAgentContext;
+  config?: AgentConfig;
   approved?: boolean;
   correlationId?: string;
   emit?: (event: { type: AgentRunEventType; data: unknown }) => void;

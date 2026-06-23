@@ -1,5 +1,6 @@
 .codex-tools/
 .codex/
+.claude/settings.local.json
 .tmp/
 .relaybase/
 .env
@@ -12,6 +13,10 @@ node_modules/
 npm-debug.log*
 *.tgz
 artifacts/
+docs/relaybase-title-old.png
+reports/agent/AUDIT-LOOP-charter.md
+reports/agent/audit-loop/
+reports/agent/hardening-tracker.md
 bin/relaybase-tui/relaybase-tui-*
 !bin/relaybase-tui/README.md
 

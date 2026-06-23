@@ -28,7 +28,7 @@ npm.cmd run doctor:tui
 
 If `go` is not found, TUI scripts fail closed with a Relaybase diagnostic and a retry command. Missing Go is an environment/tooling blocker, not a Node daemon product failure.
 
-The TUI Go wrapper keeps `GOCACHE` under the repo-local ignored `.relaybase/go-build-cache` directory, but defaults `GOTMPDIR` to the OS temp directory under `relaybase-go-build-tmp`. Go test binaries execute from `GOTMPDIR`; keeping that execution path outside the checkout avoids Windows Application Control policies that can block newly compiled test executables from workspace-local temp folders.
+The TUI Go wrapper defaults both `GOCACHE` and `GOTMPDIR` to OS temp directories under `relaybase-go-build-cache` and `relaybase-go-build-tmp`. Go test binaries execute from `GOTMPDIR`; keeping cache and execution paths outside the checkout avoids hidden repo-local mutations and Windows Application Control policies that can block newly compiled test executables from workspace-local temp folders.
 
 ## macOS Setup
 

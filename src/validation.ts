@@ -187,8 +187,21 @@ function normalizeHealthUrl(value: unknown): string | undefined {
     return undefined;
   }
 
-  if (healthUrl.startsWith("/") || healthUrl.startsWith("http://") || healthUrl.startsWith("https://")) {
+  if (healthUrl.startsWith("/")) {
     return healthUrl;
+  }
+
+  if (healthUrl.startsWith("http://") || healthUrl.startsWith("https://")) {
+    try {
+      const parsed = new URL(healthUrl);
+      if (!isLocalhost(parsed.hostname)) {
+        throw new Error();
+      }
+
+      return parsed.toString();
+    } catch {
+      throw new Error("Manifest field healthUrl must target localhost for absolute http(s) URLs.");
+    }
   }
 
   throw new Error("Manifest field healthUrl must be an absolute http(s) URL or a path starting with '/'.");
@@ -544,4 +557,8 @@ function normalizeHttpUrl(value: unknown, field: string): string | undefined {
   } catch {
     throw new Error(`Manifest field ${field} must be an absolute http(s) URL.`);
   }
+}
+
+function isLocalhost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
 }

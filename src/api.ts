@@ -16,6 +16,7 @@ import type { LifecycleAttempt, RuntimeView } from "./types.ts";
 
 const DAEMON_EVENTS_HEARTBEAT_MS = 1000;
 const DAEMON_EVENTS_RETRY_MS = 3000;
+const MAX_JSON_BODY_BYTES = 1024 * 1024;
 
 class ApiError extends Error {
   readonly statusCode: number;
@@ -213,6 +214,11 @@ export async function handleApiRequest(
       parts[4] === "logs" &&
       parts[5] === "stream"
     ) {
+      requireToken(runtime, request, {
+        code: "UNAUTHORIZED_APP_LOG_STREAM",
+        message: "Unauthorized Relaybase app log stream.",
+        userAction: "Use the session token from this daemon state directory before streaming app logs."
+      });
       await streamAppLogs(runtime, request, response, parts[3]);
       return;
     }
@@ -225,6 +231,11 @@ export async function handleApiRequest(
       parts[2] === "apps" &&
       parts[4] === "logs"
     ) {
+      requireToken(runtime, request, {
+        code: "UNAUTHORIZED_APP_LOGS",
+        message: "Unauthorized Relaybase app logs.",
+        userAction: "Use the session token from this daemon state directory before reading app logs."
+      });
       const query = parseLogQuery(url);
       const result = await runtime.processes.queryLogs({ appId: parts[3], ...query });
       sendJson(response, 200, {
@@ -706,8 +717,17 @@ function tokenDiagnostics(runtime: RelaybaseRuntime): Record<string, unknown> {
 
 async function readJsonBody(request: http.IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.byteLength;
+    if (totalBytes > MAX_JSON_BODY_BYTES) {
+      request.destroy();
+      throw new ApiError(413, "REQUEST_BODY_TOO_LARGE", "Request body exceeds the 1 MB limit.", {
+        retryable: false
+      });
+    }
+    chunks.push(buffer);
   }
 
   if (chunks.length === 0) {

@@ -18,8 +18,16 @@ export function createValidateManifestTool(): RelaybaseAgentToolDefinition<z.inf
     parameters,
     approvalRequired: false,
     risk: "low",
-    execute: (input, _context) =>
-      safeToolExecute(definition, input, async () => successResult(definition.name, await validateManifest(input)))
+    execute: (input, context) =>
+      safeToolExecute(definition, input, async () =>
+        successResult(
+          definition.name,
+          await validateManifest({
+            ...input,
+            cwd: input.cwd ?? context.tuiContext.currentCwd
+          })
+        )
+      )
   };
   return definition;
 }

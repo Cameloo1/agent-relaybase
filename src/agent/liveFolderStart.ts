@@ -1322,6 +1322,13 @@ async function secretScan(pathsToScan: string[], knownSecrets: string[], outputP
       if (/\b(token|secret|password|api[_-]?key)\s*[:=]\s*(?!\[redacted\])[^\s,;]+/gi.test(text)) {
         findings.push({ file, category: "secret_assignment_pattern" });
       }
+      if (
+        /"(?:OPENROUTER_API_KEY|RELAYBASE_TOKEN|password|passwd|pwd|secret|token|api[_-]?key|apiKey|auth[_-]?token|authorization|cookie|session)"\s*:\s*"(?!\[redacted\]|redacted|<redacted>|env:)[^"]{4,}"/i.test(
+          text
+        )
+      ) {
+        findings.push({ file, category: "secret_json_field_pattern" });
+      }
     }
   }
   await fsp.mkdir(path.dirname(outputPath), { recursive: true });

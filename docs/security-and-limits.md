@@ -36,7 +36,7 @@ If discovery works but mutations return `401` with `UNAUTHORIZED_MUTATION`, the 
 
 Relaybase does not intentionally print the mutation token in discovery or normal CLI output.
 
-Process hook output is redacted on a best-effort basis for environment keys containing `token`, `secret`, `password`, or `key` when the value is at least four characters. Docker generated scripts use a broader redaction key list for saved evidence.
+Process hook output is redacted on a best-effort basis. Relaybase redacts configured secret-like environment values whose keys look sensitive, including token, secret, password/pass/passwd/pwd, auth, cookie, session, credential, key, and certificate names, when the value is at least four characters. Inline text redaction also covers common assignment and bearer-token patterns such as `token=...`, `api_key=...`, `password=...`, `passwd=...`, and `pwd=...`. Docker generated scripts use their own broader redaction key list for saved evidence.
 
 This is not a replacement for app-level secret hygiene. Apps should avoid printing secrets to stdout, stderr, Docker logs, or health responses.
 
@@ -61,7 +61,9 @@ Legacy SSE exists for compatibility. Streamable HTTP MCP is the preferred HTTP M
 TCP support uses an explicit Relaybase handshake:
 
 ```text
-RELAYBASE-TCP <app-id>\n\n
+RELAYBASE-TCP <app-id>
+X-Relaybase-Token: <session-token>
+
 ```
 
 ## Docker Boundaries

@@ -431,7 +431,13 @@ async function mutateApp(action: string, id: string, options: CliOptions): Promi
 }
 
 async function logs(id: string, options: CliOptions): Promise<void> {
-  const response = await apiRequest(options, "GET", `/__hub/api/apps/${encodeURIComponent(id)}/logs`);
+  const response = await apiRequest(
+    options,
+    "GET",
+    `/__hub/api/apps/${encodeURIComponent(id)}/logs`,
+    undefined,
+    await getOrCreateSessionToken(options.stateDir)
+  );
   if (!response.ok) {
     throw new Error(response.body || `Could not read logs for ${id}.`);
   }

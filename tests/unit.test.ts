@@ -9,10 +9,12 @@ import test from "node:test";
 import { aggregateComponentStatus, buildAppComponentState } from "../src/appComponents.ts";
 import { namespaceChildName, relaybaseChildResourceUri } from "../src/childMcp.ts";
 import { relaybaseErrorResponse } from "../src/apiErrors.ts";
+import { sanitizeAgentPayload } from "../src/agent/errors.ts";
 import { composeAppState } from "../src/appState.ts";
 import { dashboardHtml } from "../src/dashboard.ts";
 import { LogStore } from "../src/logStore.ts";
-import { redactSecretLikeValues } from "../src/redaction.ts";
+import { ProcessManager } from "../src/processManager.ts";
+import { redactDiagnosticText, redactSecretLikeValues, redactValueForExport } from "../src/redaction.ts";
 import { Registry } from "../src/registry.ts";
 import { appIdFromHost, resolveRoute } from "../src/router.ts";
 import {
@@ -85,17 +87,22 @@ test("normalizes API errors and redacts secret-like details", () => {
       token: "super-secret-token",
       tokenPath: "C:\\relaybase\\session-token",
       tokenPresent: true,
+      cookie: "cookie-secret",
+      session: "session-secret",
       nested: {
-        password: "hunter2"
+        password: "hunter2",
+        authToken: "auth-token-secret"
       },
       header: "Authorization: Bearer bearer-secret",
-      note: "api_key=key-secret"
+      note: "api_key=key-secret cookie=cookie-inline session=session-inline auth_token=auth-inline"
     }
   });
   const details = body.details as {
     token: string;
     tokenPath: string;
     tokenPresent: boolean;
+    cookie: string;
+    session: string;
     nested: { password: string };
   };
   const rendered = JSON.stringify(body);
@@ -107,8 +114,31 @@ test("normalizes API errors and redacts secret-like details", () => {
   assert.equal(details.token, "[redacted]");
   assert.equal(details.tokenPath, "C:\\relaybase\\session-token");
   assert.equal(details.tokenPresent, true);
+  assert.equal(details.cookie, "[redacted]");
+  assert.equal(details.session, "[redacted]");
   assert.equal(details.nested.password, "[redacted]");
-  assert.doesNotMatch(rendered, /super-secret-token|hunter2|bearer-secret|key-secret/);
+  assert.doesNotMatch(
+    rendered,
+    /super-secret-token|hunter2|bearer-secret|key-secret|cookie-secret|session-secret|auth-token-secret|cookie-inline|session-inline|auth-inline/
+  );
+});
+
+test("agent payload sanitizer redacts cookie and session object keys", () => {
+  const sanitized = sanitizeAgentPayload({
+    session: "raw-session-value",
+    nested: {
+      cookie: "raw-cookie-value",
+      authToken: "raw-auth-token"
+    }
+  });
+
+  assert.deepEqual(sanitized, {
+    session: "[redacted]",
+    nested: {
+      cookie: "[redacted]",
+      authToken: "[redacted]"
+    }
+  });
 });
 
 test("redacts obvious secret-like log values", () => {
@@ -124,6 +154,15 @@ test("redacts obvious secret-like log values", () => {
   assert.match(result.value, /\[redacted\]/);
 });
 
+test("redacts diagnostic token text with the shared daemon pattern", () => {
+  const redacted = redactDiagnosticText(
+    "spawn failed token=relaybase-token password=hunter2 authorization=abcdefgh session-token=secret"
+  );
+
+  assert.match(redacted, /\[redacted\]/);
+  assert.doesNotMatch(redacted, /relaybase-token|hunter2|abcdefgh|secret/);
+});
+
 test("redaction reports counts without exposing secret values", () => {
   const result = redactSecretLikeValues("API_KEY='inline-key' token=inline-token relay token is relaybase-secret", {
     RELAYBASE_TOKEN: "relaybase-secret"
@@ -134,6 +173,61 @@ test("redaction reports counts without exposing secret values", () => {
   assert.equal(result.report.categories.env_assignment, 2);
   assert.equal(result.report.categories.environment_value, 1);
   assert.doesNotMatch(JSON.stringify(result.report), /inline-key|inline-token|relaybase-secret/);
+});
+
+test("redacts bare env values for common password aliases", () => {
+  const result = redactSecretLikeValues("database password is db-pass-secret and pwd is db-pwd-secret", {
+    DB_PASS: "db-pass-secret",
+    DB_PWD: "db-pwd-secret"
+  });
+
+  assert.equal(result.redacted, true);
+  assert.equal(result.report.categories.environment_value, 2);
+  assert.doesNotMatch(result.value, /db-pass-secret|db-pwd-secret/);
+});
+
+test("redacts cookie and session object fields in export bundles", () => {
+  const result = redactValueForExport({
+    cookie: "raw-cookie-value",
+    nested: {
+      session: "raw-session-value",
+      visible: "safe"
+    }
+  });
+
+  assert.equal(result.redacted, true);
+  assert.deepEqual(result.value, {
+    cookie: "[redacted]",
+    nested: {
+      session: "[redacted]",
+      visible: "safe"
+    }
+  });
+  assert.equal(result.report.categories.sensitive_key, 2);
+  assert.doesNotMatch(JSON.stringify(result.value), /raw-cookie-value|raw-session-value/);
+});
+
+test("process restart returns blocked view when stop is already in progress", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-restart-dedupe-"));
+  const registry = new Registry(stateDir);
+  await registry.load();
+  await registry.upsertManifest({
+    id: "restart-race",
+    name: "Restart Race",
+    command: `${JSON.stringify(process.execPath)} -e "setTimeout(() => process.exit(0), 250)"`,
+    cwd: process.cwd(),
+    stopCommand: `${JSON.stringify(process.execPath)} -e "setTimeout(() => process.exit(0), 250)"`,
+    stopTimeoutMs: 1000
+  });
+  const processes = new ProcessManager(registry);
+
+  const stopPromise = processes.stop("restart-race");
+  const restartView = await processes.restart("restart-race");
+  const stopped = await stopPromise;
+
+  assert.equal(restartView.blockingReason, "stop_in_progress");
+  assert.notEqual(restartView.status, "running");
+  assert.equal(stopped.status, "stopped");
 });
 
 test("TUI bridge resolves RELAYBASE_TUI_BIN first", async () => {
@@ -612,7 +706,7 @@ test("TUI bridge falls back to go run only after Windows development binary spaw
   assert.equal(calls[1]?.command, "go");
   assert.deepEqual(calls[1]?.args.slice(0, 2), ["run", "./cmd/relaybase-tui"]);
   assert.equal(calls[1]?.options.cwd, path.join(packageRoot, "tui"));
-  assert.match(calls[1]?.options.env.GOCACHE ?? "", /\.relaybase[\\/]go-build-cache$/);
+  assert.match(calls[1]?.options.env.GOCACHE ?? "", /relaybase-go-build-cache$/);
   assert.match(calls[1]?.options.env.GOTMPDIR ?? "", /relaybase-go-build-tmp$/);
   assert.match(stderr, /falling back to `go run \.\/cmd\/relaybase-tui`/);
 });
@@ -907,10 +1001,10 @@ test("TUI Go wrapper exposes repo-local development launch binary path", () => {
   );
 });
 
-test("TUI Go wrapper defaults to repo-local build cache and OS temp execution dir", () => {
+test("TUI Go wrapper defaults to OS temp build cache and execution dir", () => {
   const env = goCommandEnv({}, {});
 
-  assert.match(env.GOCACHE, /\.relaybase[\\/]go-build-cache$/);
+  assert.match(env.GOCACHE, /relaybase-go-build-cache$/);
   assert.match(env.GOTMPDIR, /relaybase-go-build-tmp$/);
 });
 
@@ -1383,6 +1477,27 @@ test("normalizes manifests with relative cwd and env", () => {
   assert.equal(app.cwd, path.join(os.tmpdir(), "relaybase-manifest", "app"));
   assert.equal(app.env.NODE_ENV, "development");
   assert.equal(app.upstreamPort, 18001);
+});
+
+test("restricts absolute health URLs to localhost targets", () => {
+  const app = normalizeManifest({
+    id: "local-health",
+    name: "Local Health",
+    command: "node server.js",
+    healthUrl: "http://127.0.0.1:18001/health"
+  });
+
+  assert.equal(app.healthUrl, "http://127.0.0.1:18001/health");
+  assert.throws(
+    () =>
+      normalizeManifest({
+        id: "external-health",
+        name: "External Health",
+        command: "node server.js",
+        healthUrl: "http://169.254.169.254/latest/meta-data/"
+      }),
+    /healthUrl must target localhost/
+  );
 });
 
 test("normalizes lifecycle hook fields and rejects invalid timeouts", () => {

@@ -9,6 +9,7 @@ import { AgentAuditStore } from "./auditStore.ts";
 import { previewSetup } from "../setupApi.ts";
 import {
   diagnosticsForAgentConfig,
+  mergeRedactionReport,
   redactAgentText,
   sanitizeAgentPayload,
   sanitizeAgentPayloadWithReport
@@ -68,6 +69,7 @@ const DEFAULT_TOOL_ALLOWLIST = [
   "set_component_metadata",
   "add_env_override_safe",
   "open_project_or_app",
+  "setup_and_start_project",
   "prove_app_health",
   "repair_app_setup",
   "propose_tui_action"
@@ -114,6 +116,7 @@ export class AgentGatewayService {
   #stateDir?: string;
   #subscribers = new Map<string, Set<AgentSubscriber>>();
   #sequence = 0;
+  #budgetReservations = new Map<string, { sessionId: string; estimatedUsd: number; createdAt: string }>();
 
   constructor(options: AgentGatewayServiceOptions = {}) {
     this.#stateDir = options.stateDir;
@@ -329,20 +332,23 @@ export class AgentGatewayService {
       "exports",
       `${exportId}.${format === "markdown" ? "md" : "json"}`
     );
-    const sanitized = sanitizeAgentPayloadWithReport({
+    const sanitizedSession = sanitizeAgentPayloadWithReport(session);
+    const sanitizedAuditEvents = sanitizeAgentPayloadWithReport(auditEvents);
+    const report = mergeRedactionReport(sanitizedSession.report, sanitizedAuditEvents.report);
+    const sanitized = {
       version: 1,
       generatedAt,
-      session,
-      auditEvents
-    });
+      session: sanitizedSession.value,
+      auditEvents: sanitizedAuditEvents.value
+    };
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     fs.writeFileSync(
       outputPath,
       format === "markdown"
         ? markdownThreadExport(
-            sanitized.value as { session: AgentSession; auditEvents: AgentAuditEvent[]; generatedAt: string }
+            sanitized as { session: AgentSession; auditEvents: AgentAuditEvent[]; generatedAt: string }
           )
-        : JSON.stringify(sanitized.value, null, 2),
+        : JSON.stringify(sanitized, null, 2),
       "utf8"
     );
     const result: AgentSessionExportResult = {
@@ -354,7 +360,7 @@ export class AgentGatewayService {
       messageCount: session.messages.length,
       auditEventCount: auditEvents.length,
       generatedAt,
-      redactionReport: sanitized.report
+      redactionReport: report
     };
     this.#sessions.recordExport(result);
     this.#auditEvent("agent.session_exported", result, { sessionId });
@@ -472,7 +478,7 @@ export class AgentGatewayService {
       return { message, run, diagnostics: [blockingDiagnostic] };
     }
 
-    const budgetDiagnostic = this.#budgetDiagnostic(config, sessionId);
+    const budgetDiagnostic = this.#reserveBudget(config, sessionId, run.id);
     if (budgetDiagnostic) {
       run.status = "failed";
       run.diagnostic = budgetDiagnostic;
@@ -502,29 +508,34 @@ export class AgentGatewayService {
       return { message, run, diagnostics: [budgetDiagnostic] };
     }
 
-    this.#auditEvent(
-      "agent.run_requested",
-      {
-        sessionId,
-        runId: run.id,
-        userIntentSummary: summarizeUserIntent(content)
-      },
-      { sessionId, runId: run.id, modelSlug: config.provider.modelSlug, knownSecrets }
-    );
+    let result: Awaited<ReturnType<OperatorAgentRuntime["execute"]>>;
+    try {
+      this.#auditEvent(
+        "agent.run_requested",
+        {
+          sessionId,
+          runId: run.id,
+          userIntentSummary: summarizeUserIntent(content)
+        },
+        { sessionId, runId: run.id, modelSlug: config.provider.modelSlug, knownSecrets }
+      );
 
-    const result = await this.#agentRuntime.execute({
-      relaybase: runtime,
-      config,
-      session,
-      message,
-      run,
-      context,
-      threadContext,
-      knownSecrets,
-      emit: (event: AgentRuntimeEvent) => {
-        this.#publishRunEvent(session, run, event.type, event.data, knownSecrets);
-      }
-    });
+      result = await this.#agentRuntime.execute({
+        relaybase: runtime,
+        config,
+        session,
+        message,
+        run,
+        context,
+        threadContext,
+        knownSecrets,
+        emit: (event: AgentRuntimeEvent) => {
+          this.#publishRunEvent(session, run, event.type, event.data, knownSecrets);
+        }
+      });
+    } finally {
+      this.#releaseBudget(run.id);
+    }
 
     if (result.status === "waiting_for_approval") {
       run.status = "waiting_for_approval";
@@ -648,6 +659,7 @@ export class AgentGatewayService {
         }
       );
     }
+    const config = this.#safeConfig();
     if (approval.status === "recovered_pending" && status === "approved") {
       const reconfirmed = raw.reconfirm === true || raw.resume === true;
       if (!reconfirmed) {
@@ -676,6 +688,14 @@ export class AgentGatewayService {
       }
       const savedArguments = this.#approvals.rawArguments(approval.id) ?? approval.arguments;
       const decision = evaluateToolPolicy(approval.toolName ?? approval.action, savedArguments);
+      const configDiagnostic = this.#toolConfigDiagnostic(config, approval.toolName ?? approval.action, decision);
+      if (configDiagnostic) {
+        throw new AgentGatewayRequestError(409, configDiagnostic.code, configDiagnostic.message, {
+          retryable: false,
+          detail: configDiagnostic.detail,
+          userAction: configDiagnostic.userAction
+        });
+      }
       if (decision.status === "blocked" && decision.diagnostic) {
         throw new AgentGatewayRequestError(409, decision.diagnostic.code, decision.diagnostic.message, {
           retryable: false,
@@ -718,11 +738,32 @@ export class AgentGatewayService {
 
     const session = this.getSession(approval.sessionId);
     const run = session.runs.find((entry) => entry.id === approval.runId);
-    const resolved = this.#approvals.resolve(approvalId, status) ?? approval;
+    const knownSecrets = [process.env[config.provider.apiKeySource.envVar] ?? "", runtime.token].filter(
+      (secret) => secret.length > 0
+    );
+    const resolved = this.#approvals.resolve(approvalId, status);
+    if (!resolved) {
+      throw new AgentGatewayRequestError(
+        409,
+        "AGENT_APPROVAL_ALREADY_RESOLVED",
+        "Agent approval is already resolved.",
+        {
+          retryable: false,
+          detail: { approvalId, status: approval.status },
+          userAction: "Refresh the pending approval state."
+        }
+      );
+    }
     if (run) {
-      this.#publishRunEvent(session, run, status === "approved" ? "tool.approved" : "tool.rejected", {
-        approval: resolved
-      });
+      this.#publishRunEvent(
+        session,
+        run,
+        status === "approved" ? "tool.approved" : "tool.rejected",
+        {
+          approval: resolved
+        },
+        knownSecrets
+      );
     }
 
     if (status === "rejected") {
@@ -738,27 +779,39 @@ export class AgentGatewayService {
         run.status = "cancelled";
         run.completedAt = new Date().toISOString();
         run.diagnostic = diagnostic;
-        this.#publishRunEvent(session, run, "action_result", {
-          kind: "action_result",
-          status: "rejected",
-          approvalId,
-          diagnostic
-        });
-        this.#publishRunEvent(session, run, "run.failed", {
-          diagnostic,
-          modelOutputProduced: false
-        });
+        this.#publishRunEvent(
+          session,
+          run,
+          "action_result",
+          {
+            kind: "action_result",
+            status: "rejected",
+            approvalId,
+            diagnostic
+          },
+          knownSecrets
+        );
+        this.#publishRunEvent(
+          session,
+          run,
+          "run.failed",
+          {
+            diagnostic,
+            modelOutputProduced: false
+          },
+          knownSecrets
+        );
       }
       this.#auditEvent(
         "agent.approval_rejected",
         { approval: resolved, reason: raw.reason },
-        { sessionId: session.id, runId: run?.id, modelSlug: run?.modelSlug }
+        { sessionId: session.id, runId: run?.id, modelSlug: run?.modelSlug, knownSecrets }
       );
       return resolved;
     }
 
     if (run) {
-      await this.#executeApprovedTool(runtime, session, run, resolved);
+      await this.#executeApprovedTool(runtime, session, run, resolved, knownSecrets);
     }
     this.#auditEvent(
       "agent.approval_approved",
@@ -766,7 +819,8 @@ export class AgentGatewayService {
       {
         sessionId: session.id,
         runId: run?.id,
-        modelSlug: run?.modelSlug
+        modelSlug: run?.modelSlug,
+        knownSecrets
       }
     );
     return resolved;
@@ -810,22 +864,24 @@ export class AgentGatewayService {
     knownSecrets: string[]
   ): Promise<AgentApproval> {
     const decision = evaluateToolPolicy(pending.toolName, pending.arguments);
-    if (decision.status === "blocked" && decision.diagnostic) {
+    const configDiagnostic = this.#toolConfigDiagnostic(this.#safeConfig(), pending.toolName, decision);
+    const blockingDiagnostic = configDiagnostic ?? (decision.status === "blocked" ? decision.diagnostic : undefined);
+    if (blockingDiagnostic) {
       run.status = "failed";
-      run.diagnostic = decision.diagnostic;
+      run.diagnostic = blockingDiagnostic;
       run.completedAt = new Date().toISOString();
-      this.#publishRunEvent(session, run, "diagnostic", decision.diagnostic, knownSecrets);
+      this.#publishRunEvent(session, run, "diagnostic", blockingDiagnostic, knownSecrets);
+      this.#publishRunEvent(session, run, "blocked", { kind: "blocked", diagnostic: blockingDiagnostic }, knownSecrets);
       this.#publishRunEvent(
         session,
         run,
-        "blocked",
-        { kind: "blocked", diagnostic: decision.diagnostic },
+        "run.failed",
+        {
+          diagnostic: blockingDiagnostic,
+          modelOutputProduced: false
+        },
         knownSecrets
       );
-      this.#publishRunEvent(session, run, "run.failed", {
-        diagnostic: decision.diagnostic,
-        modelOutputProduced: false
-      });
       return this.#approvals.create({
         sessionId: session.id,
         runId: run.id,
@@ -837,7 +893,7 @@ export class AgentGatewayService {
         arguments: sanitizeAgentPayload(pending.arguments, knownSecrets) as Record<string, unknown>,
         argumentsHash: stableArgumentsHash(pending.arguments),
         context,
-        diagnostic: decision.diagnostic
+        diagnostic: blockingDiagnostic
       });
     }
 
@@ -881,19 +937,25 @@ export class AgentGatewayService {
       pending.arguments
     );
 
-    this.#publishRunEvent(session, run, "tool.call_requested", {
-      approvalId: approval.id,
-      toolCallId: approval.toolCallId,
-      toolName: pending.toolName,
-      arguments: approval.arguments,
-      rawItem: sanitizeAgentPayload(pending.rawItem, knownSecrets)
-    });
-    this.#publishRunEvent(session, run, "tool.approval_required", { approval });
+    this.#publishRunEvent(
+      session,
+      run,
+      "tool.call_requested",
+      {
+        approvalId: approval.id,
+        toolCallId: approval.toolCallId,
+        toolName: pending.toolName,
+        arguments: approval.arguments,
+        rawItem: sanitizeAgentPayload(pending.rawItem, knownSecrets)
+      },
+      knownSecrets
+    );
+    this.#publishRunEvent(session, run, "tool.approval_required", { approval }, knownSecrets);
     if (policy.category === "setup") {
-      this.#publishRunEvent(session, run, "setup.file_write_approval_required", { approval });
+      this.#publishRunEvent(session, run, "setup.file_write_approval_required", { approval }, knownSecrets);
     }
     if (policy.category === "manifest") {
-      this.#publishRunEvent(session, run, "setup.manifest_patch_approval_required", { approval });
+      this.#publishRunEvent(session, run, "setup.manifest_patch_approval_required", { approval }, knownSecrets);
     }
     this.#auditEvent(
       "agent.approval_required",
@@ -912,32 +974,57 @@ export class AgentGatewayService {
     return approval;
   }
 
-  async #executeApprovedTool(runtime: RelaybaseRuntime, session: AgentSession, run: AgentRun, approval: AgentApproval) {
+  async #executeApprovedTool(
+    runtime: RelaybaseRuntime,
+    session: AgentSession,
+    run: AgentRun,
+    approval: AgentApproval,
+    knownSecrets: string[]
+  ) {
     const toolName = approval.toolName ?? approval.action;
     const savedArguments = this.#approvals.rawArguments(approval.id) ?? approval.arguments;
-    this.#publishRunEvent(session, run, "tool.started", {
-      approvalId: approval.id,
-      toolName,
-      arguments: approval.arguments
-    });
+    this.#publishRunEvent(
+      session,
+      run,
+      "tool.started",
+      {
+        approvalId: approval.id,
+        toolName,
+        arguments: approval.arguments
+      },
+      knownSecrets
+    );
     const result = await executeRelaybaseAgentTool(toolName, savedArguments, {
       runtime,
       tuiContext: approval.context ?? session.context ?? { daemonHasZeroApps: false, diagnostics: [] },
+      config: this.#safeConfig(),
       approved: true,
       correlationId: approval.id,
-      emit: (event) => this.#publishRunEvent(session, run, event.type, event.data)
+      emit: (event) => this.#publishRunEvent(session, run, event.type, event.data, knownSecrets)
     });
-    this.#publishRunEvent(session, run, result.status === "succeeded" ? "tool.completed" : "tool.failed", {
-      approvalId: approval.id,
-      toolName,
-      result
-    });
-    this.#publishRunEvent(session, run, "action_result", {
-      kind: "action_result",
-      approvalId: approval.id,
-      toolName,
-      result
-    });
+    this.#publishRunEvent(
+      session,
+      run,
+      result.status === "succeeded" ? "tool.completed" : "tool.failed",
+      {
+        approvalId: approval.id,
+        toolName,
+        result
+      },
+      knownSecrets
+    );
+    this.#publishRunEvent(
+      session,
+      run,
+      "action_result",
+      {
+        kind: "action_result",
+        approvalId: approval.id,
+        toolName,
+        result
+      },
+      knownSecrets
+    );
     run.status = result.status === "succeeded" ? "completed" : "failed";
     run.completedAt = new Date().toISOString();
     if (result.diagnostic) {
@@ -951,12 +1038,18 @@ export class AgentGatewayService {
         detail: result.diagnostic.detail
       };
     }
-    this.#publishRunEvent(session, run, result.status === "succeeded" ? "run.completed" : "run.failed", {
-      approvalId: approval.id,
-      toolName,
-      toolResultProduced: true,
-      result
-    });
+    this.#publishRunEvent(
+      session,
+      run,
+      result.status === "succeeded" ? "run.completed" : "run.failed",
+      {
+        approvalId: approval.id,
+        toolName,
+        toolResultProduced: true,
+        result
+      },
+      knownSecrets
+    );
     this.#auditEvent(
       result.status === "succeeded" ? "agent.tool_completed" : "agent.tool_failed",
       {
@@ -964,7 +1057,7 @@ export class AgentGatewayService {
         toolName,
         result: summarizeToolResult(result)
       },
-      { sessionId: session.id, runId: run.id, modelSlug: run.modelSlug }
+      { sessionId: session.id, runId: run.id, modelSlug: run.modelSlug, knownSecrets }
     );
   }
 
@@ -996,6 +1089,55 @@ export class AgentGatewayService {
     };
   }
 
+  #reserveBudget(config: AgentConfig, sessionId: string, runId: string): AgentDiagnostic | undefined {
+    const reservation = budgetReservationUsd(config.budgets);
+    if (reservation > 0) {
+      this.#budgetReservations.set(runId, {
+        sessionId,
+        estimatedUsd: reservation,
+        createdAt: new Date().toISOString()
+      });
+    }
+
+    const diagnostic = this.#budgetDiagnostic(config, sessionId);
+    if (diagnostic) {
+      this.#releaseBudget(runId);
+    }
+    return diagnostic;
+  }
+
+  #releaseBudget(runId: string): void {
+    this.#budgetReservations.delete(runId);
+  }
+
+  #toolConfigDiagnostic(
+    config: AgentConfig,
+    toolName: string,
+    decision: ReturnType<typeof evaluateToolPolicy>
+  ): AgentDiagnostic | undefined {
+    if (!config.toolAllowlist.includes(toolName)) {
+      return {
+        id: "agent.tool.disallowed_by_config",
+        severity: "error",
+        code: "AGENT_TOOL_NOT_ALLOWED_BY_CONFIG",
+        message: `Tool ${toolName} is not in the configured agent tool allowlist.`,
+        checkedAt: new Date().toISOString(),
+        userAction: "Add the tool to toolAllowlist or choose a permitted tool."
+      };
+    }
+    if (config.approvalPolicy === "read_only_only" && decision.policy?.approvalRequired) {
+      return {
+        id: "agent.tool.read_only_only_blocked",
+        severity: "error",
+        code: "AGENT_READ_ONLY_POLICY_BLOCKED",
+        message: `Tool ${toolName} is blocked by read-only agent policy.`,
+        checkedAt: new Date().toISOString(),
+        userAction: "Switch approvalPolicy to always_for_mutations before using mutation tools."
+      };
+    }
+    return undefined;
+  }
+
   #budgetUsage(sessionId: string): { sessionUsd: number; dailyUsd: number; monthlyUsd: number } {
     const now = new Date();
     const startOfDay = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
@@ -1015,6 +1157,18 @@ export class AgentGatewayService {
       }
       if (Number.isFinite(at) && at >= startOfMonth) {
         monthlyUsd += cost;
+      }
+    }
+    for (const reservation of this.#budgetReservations.values()) {
+      const at = Date.parse(reservation.createdAt);
+      if (reservation.sessionId === sessionId) {
+        sessionUsd += reservation.estimatedUsd;
+      }
+      if (Number.isFinite(at) && at >= startOfDay) {
+        dailyUsd += reservation.estimatedUsd;
+      }
+      if (Number.isFinite(at) && at >= startOfMonth) {
+        monthlyUsd += reservation.estimatedUsd;
       }
     }
     return { sessionUsd, dailyUsd, monthlyUsd };
@@ -1348,6 +1502,19 @@ function usageCost(data: unknown): number {
   const record = usage && typeof usage === "object" ? (usage as Record<string, unknown>) : {};
   const value = record.estimatedCostUsd;
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function budgetReservationUsd(budgets: AgentConfig["budgets"]): number {
+  if (!budgets) {
+    return 0;
+  }
+  const limits = [budgets.sessionLimitUsd, budgets.dailyLimitUsd, budgets.monthlyLimitUsd].filter(
+    (limit): limit is number => typeof limit === "number" && Number.isFinite(limit) && limit > 0
+  );
+  if (!limits.length) {
+    return 0;
+  }
+  return Math.min(0.05, Math.min(...limits) / 2);
 }
 
 function summarizeTraceData(type: AgentRunEventType, data: unknown): unknown {

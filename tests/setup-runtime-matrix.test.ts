@@ -7,6 +7,7 @@ import test from "node:test";
 import { createRelaybaseServer } from "../src/server.ts";
 import { detectProject, proposeSetupPlans } from "../src/setup.ts";
 import { detectSetup, previewManifestPatch, previewSetup, repairSetup, SetupApiRequestError } from "../src/setupApi.ts";
+import { detectRuntimeMatrix } from "../src/setupRuntimeAdapters.ts";
 import type { RuntimeId } from "../src/setupRuntimeTypes.ts";
 
 interface RuntimeFixture {
@@ -240,6 +241,43 @@ test("setup detect and preview expose runtime matrix without writing files", asy
     assert.ok(preview.selectedPlan.choice.runtimeStartCommandCandidates?.length);
     assert.equal(await exists(path.join(project, "relaybase.app.json")), before);
   }
+});
+
+test("runtime matrix skips command candidates from unsafe filesystem names", async () => {
+  const relativeFiles = [
+    "go.mod",
+    "cmd/server&&whoami/main.go",
+    "Cargo.toml",
+    "src/bin/server&&whoami.rs",
+    "Program.cs",
+    "src/web&&whoami.csproj"
+  ];
+  const matrix = await detectRuntimeMatrix({
+    root: os.tmpdir(),
+    packageJson: undefined,
+    files: relativeFiles,
+    relativeFiles,
+    scripts: {},
+    dependencies: {},
+    envFiles: [],
+    portEnvKeys: [],
+    detectedPorts: [],
+    dockerComposeFiles: [],
+    snippets: {
+      "go.mod": "module example.com/unsafe\n",
+      "Cargo.toml": "[package]\nname='unsafe'\n[dependencies]\naxum='0.8'\n",
+      "Program.cs": "var builder = WebApplication.CreateBuilder(args);\n"
+    }
+  });
+
+  const commands = matrix.runtimes.flatMap((runtime) =>
+    runtime.startCommandCandidates.map((candidate) => candidate.commandPreview)
+  );
+  assert.equal(
+    commands.some((command) => /[&|<>;$`]/.test(command)),
+    false
+  );
+  assert.ok(commands.includes("dotnet run"));
 });
 
 test("empty folders produce unsupported runtime diagnostics without guessing a command", async () => {

@@ -10,7 +10,7 @@ const EXECUTION_CLAIM_PATTERN =
 const PREVIEW_ONLY_WRITE_CLAIM_PATTERN =
   /\b(?:preview|dry[- ]?run|plan)\s+(?:has\s+|have\s+)?(?:wrote|written|created|updated|applied)\b|\b(?:wrote|written|created|updated|applied)\b[\s\S]{0,80}\b(?:during|in|from)\s+(?:the\s+)?(?:preview|dry[- ]?run|plan)\b/i;
 const UNSUPPORTED_PORT_STRATEGY_PATTERN = /\b(assume|invent|guess)\b[\s\S]*\b(port|framework|flag)\b/i;
-const SHELL_META_PATTERN = /(&&|\|\||[<>]|`|\$\(|;\s*\S)/;
+const SHELL_META_PATTERN = /[&|<>]|`|\$\(|;\s*\S/;
 
 export interface PolicyDecision {
   status: "allowed" | "approval_required" | "blocked";
@@ -171,7 +171,7 @@ function findPathTraversal(value: unknown, path: string[] = []): string | undefi
 function findUnsafeCommand(value: unknown, path: string[] = []): string | undefined {
   if (typeof value === "string") {
     const key = path.at(-1)?.toLowerCase() ?? "";
-    return key === "command" && SHELL_META_PATTERN.test(value) ? path.join(".") : undefined;
+    return (key === "command" || key === "commandhint") && SHELL_META_PATTERN.test(value) ? path.join(".") : undefined;
   }
   if (!value || typeof value !== "object") {
     return undefined;

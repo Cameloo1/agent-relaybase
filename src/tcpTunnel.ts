@@ -32,10 +32,16 @@ export async function maybeHandleTcpTunnel(
   const markerIndex = buffer.indexOf(marker);
   const preface = buffer.subarray(0, markerIndex).toString("utf8").trim();
   const remainder = buffer.subarray(markerIndex + Buffer.byteLength(marker));
-  const [, appId] = preface.split(/\s+/, 2);
+  const lines = preface.split(/\r?\n/);
+  const [, appId] = (lines[0] ?? "").split(/\s+/, 2);
 
   if (!appId) {
     socket.end("Relaybase TCP handshake missing app id.\n");
+    return true;
+  }
+
+  if (tcpTunnelToken(lines) !== runtime.token) {
+    socket.end("Unauthorized Relaybase TCP tunnel.\n");
     return true;
   }
 
@@ -60,11 +66,30 @@ export async function maybeHandleTcpTunnel(
     socket.pipe(upstream);
     upstream.pipe(socket);
   });
+  socket.once("error", () => upstream.destroy());
   upstream.once("error", (error) => {
     socket.end(`Relaybase TCP proxy failed: ${error.message}\n`);
   });
+  upstream.once("close", () => socket.destroy());
 
   return true;
+}
+
+function tcpTunnelToken(lines: string[]): string | undefined {
+  for (const line of lines.slice(1)) {
+    const separator = line.indexOf(":");
+    if (separator < 0) {
+      continue;
+    }
+
+    const name = line.slice(0, separator).trim().toLowerCase();
+    if (name === "x-relaybase-token" || name === "authorization") {
+      const value = line.slice(separator + 1).trim();
+      return value.replace(/^Bearer\s+/i, "");
+    }
+  }
+
+  return undefined;
 }
 
 function readOnce(socket: net.Socket): Promise<Buffer | undefined> {

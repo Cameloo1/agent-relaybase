@@ -2,7 +2,7 @@ import type { RelaybaseRuntime } from "../server.ts";
 import { buildOperatorPromptContext, type OperatorPromptContext } from "./context.ts";
 import { AgentRuntimeError, diagnosticFromRuntimeError, redactAgentText, sanitizeAgentPayload } from "./errors.ts";
 import type { AgentRuntimeEvent } from "./events.ts";
-import { createOperatorAgent, operatorAgentToolNames } from "./operatorAgent.ts";
+import { createOperatorAgent, operatorAgentReadOnlyToolNames, operatorAgentToolNames } from "./operatorAgent.ts";
 import { evaluateToolPolicy, outputGuardrail } from "./policy.ts";
 import { createOpenRouterAgentProvider } from "./provider/openrouter.ts";
 import { buildOperatorPromptInput } from "./prompts.ts";
@@ -102,6 +102,7 @@ export class OperatorAgentRuntime {
         modelSlug: input.config.provider.modelSlug,
         runtime: input.relaybase,
         tuiContext: input.context,
+        config: input.config,
         emit: input.emit
       });
       const runner =
@@ -180,22 +181,24 @@ export class OperatorAgentRuntime {
         const blocked = interruptions
           .map((interruption) => ({
             interruption,
-            decision: evaluateToolPolicy(interruption.toolName, interruption.arguments)
+            decision: evaluateToolPolicy(interruption.toolName, interruption.arguments),
+            configDiagnostic: toolConfigDiagnostic(input.config, interruption.toolName)
           }))
-          .find((entry) => entry.decision.status === "blocked");
-        if (blocked?.decision.diagnostic) {
-          input.emit({ type: "diagnostic", data: blocked.decision.diagnostic });
+          .find((entry) => entry.configDiagnostic || entry.decision.status === "blocked");
+        const blockedDiagnostic = blocked?.configDiagnostic ?? blocked?.decision.diagnostic;
+        if (blockedDiagnostic) {
+          input.emit({ type: "diagnostic", data: blockedDiagnostic });
           input.emit({
             type: "blocked",
             data: {
               kind: "blocked",
-              content: blocked.decision.diagnostic.message,
-              diagnostic: blocked.decision.diagnostic
+              content: blockedDiagnostic.message,
+              diagnostic: blockedDiagnostic
             }
           });
           return {
             status: "failed",
-            diagnostics: [blocked.decision.diagnostic],
+            diagnostics: [blockedDiagnostic],
             promptContext,
             toolNames
           };
@@ -332,6 +335,31 @@ export class OperatorAgentRuntime {
       clearTimeout(timer);
     }
   }
+}
+
+function toolConfigDiagnostic(config: AgentConfig, toolName: string): AgentDiagnostic | undefined {
+  if (!config.toolAllowlist.includes(toolName)) {
+    return {
+      id: "agent.tool.disallowed_by_config",
+      severity: "error",
+      code: "AGENT_TOOL_NOT_ALLOWED_BY_CONFIG",
+      message: `Tool ${toolName} is not in the configured agent tool allowlist.`,
+      checkedAt: new Date().toISOString(),
+      userAction: "Add the tool to toolAllowlist or choose a permitted tool."
+    };
+  }
+  const readOnlyTools = new Set(operatorAgentReadOnlyToolNames());
+  if (config.approvalPolicy === "read_only_only" && !readOnlyTools.has(toolName)) {
+    return {
+      id: "agent.tool.read_only_only_blocked",
+      severity: "error",
+      code: "AGENT_READ_ONLY_POLICY_BLOCKED",
+      message: `Tool ${toolName} is blocked by read-only agent policy.`,
+      checkedAt: new Date().toISOString(),
+      userAction: "Switch approvalPolicy to always_for_mutations before using mutation tools."
+    };
+  }
+  return undefined;
 }
 
 function usageFromResult(result: unknown): AgentUsage {

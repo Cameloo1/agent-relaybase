@@ -399,9 +399,14 @@ export class ThreadStore {
     }
     const resolvedAt = new Date().toISOString();
     this.#transaction(() => {
-      this.#db
-        .prepare("UPDATE approvals SET status = ?, resolved_at = ?, recovery_state = ? WHERE id = ?")
+      const result = this.#db
+        .prepare(
+          "UPDATE approvals SET status = ?, resolved_at = ?, recovery_state = ? WHERE id = ? AND status IN ('pending', 'recovered_pending')"
+        )
         .run(status, resolvedAt, "live", approvalId);
+      if (result.changes === 0) {
+        return undefined;
+      }
       this.#refreshThreadSummary(approval.sessionId);
     });
     return this.getApproval(approvalId);

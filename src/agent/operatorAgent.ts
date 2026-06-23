@@ -1,7 +1,7 @@
 import { loadOpenAIAgentsSdk } from "./openrouterProvider.ts";
 import { OPERATOR_AGENT_NAME, operatorAgentInstructions } from "./prompts.ts";
 import type { RelaybaseRuntime } from "../server.ts";
-import type { AgentRunEventType, TuiAgentContext } from "./types.ts";
+import type { AgentConfig, AgentRunEventType, TuiAgentContext } from "./types.ts";
 import {
   createRelaybaseAgentToolRegistry,
   relaybaseAgentReadOnlyToolNames,
@@ -16,6 +16,7 @@ export function createOperatorAgent(input: {
   modelSlug: string;
   runtime: RelaybaseRuntime;
   tuiContext: TuiAgentContext;
+  config?: AgentConfig;
   reasoningEffort?: OperatorAgentReasoningEffort;
   emit?: (event: { type: AgentRunEventType; data: unknown }) => void;
 }): {
@@ -26,6 +27,7 @@ export function createOperatorAgent(input: {
   const registry = createRelaybaseAgentToolRegistry({
     runtime: input.runtime,
     tuiContext: input.tuiContext,
+    config: input.config,
     emit: input.emit
   });
   const agent = new Agent({

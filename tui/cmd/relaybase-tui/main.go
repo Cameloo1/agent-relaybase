@@ -30,12 +30,18 @@ func main() {
 	smokeWidth := flag.Int("smoke-width", 100, "smoke-render terminal width")
 	smokeHeight := flag.Int("smoke-height", 30, "smoke-render terminal height")
 	flag.Parse()
+	stateDirExplicit := false
+	flag.Visit(func(parsed *flag.Flag) {
+		if parsed.Name == "state-dir" {
+			stateDirExplicit = true
+		}
+	})
 
 	cfg.BaseURL = *baseURL
 	cfg.StateDir = *stateDir
 	cfg.CurrentDirectory = *currentDirectory
 	cfg.ThemeMode = *theme
-	cfg.ReloadToken()
+	cfg.ReloadTokenForStateDir(stateDirExplicit)
 
 	httpClient := &http.Client{Timeout: 20 * time.Second}
 	client := relaybaseclient.New(cfg.BaseURL, cfg.Token, httpClient)

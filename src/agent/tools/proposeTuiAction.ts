@@ -32,6 +32,22 @@ export function createProposeTuiActionTool(): RelaybaseAgentToolDefinition<z.inf
     risk: "low",
     execute: (input, context) =>
       safeToolExecute(definition, input, async () => {
+        if (input.kind === "copy_route" && context.config?.allowCopyRoute === false) {
+          return unavailableResult(
+            definition.name,
+            "AGENT_TUI_COPY_ROUTE_DISABLED",
+            "Copy route actions are disabled by the agent configuration.",
+            "Enable allowCopyRoute in agent config or show the route as text."
+          );
+        }
+        if (input.kind === "open_browser" && context.config?.allowBrowserOpen === false) {
+          return unavailableResult(
+            definition.name,
+            "AGENT_TUI_BROWSER_OPEN_DISABLED",
+            "Browser open actions are disabled by the agent configuration.",
+            "Enable allowBrowserOpen in agent config or show the route as text."
+          );
+        }
         if (input.kind === "copy_route" && context.tuiContext.terminalCapabilities?.clipboard !== "available") {
           return unavailableResult(
             definition.name,

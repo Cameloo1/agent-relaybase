@@ -63,7 +63,7 @@ MCP client -> relaybase mcp or /mcp -> Relaybase lifecycle tools -> daemon state
 TCP:
 
 ```text
-socket -> RELAYBASE-TCP <app-id> preface -> Relaybase TCP proxy -> app backend
+socket -> RELAYBASE-TCP <app-id> + session token preface -> Relaybase TCP proxy -> app backend
 ```
 
 ## Lifecycle

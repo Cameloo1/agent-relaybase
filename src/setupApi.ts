@@ -72,6 +72,7 @@ const SAFE_MANIFEST_FIELDS = new Set([
   "relaybase"
 ]);
 const SAFE_RELAYBASE_FIELDS = new Set(["groupId", "componentRole", "displayName", "paneLabel", "paneOrder"]);
+const MAX_JSON_BODY_BYTES = 1024 * 1024;
 
 export class SetupApiRequestError extends Error {
   readonly statusCode: number;
@@ -1153,12 +1154,39 @@ function patchManifest(manifest: AppManifestInput, patch: Record<string, unknown
       output.relaybase = patchRelaybase(output.relaybase, value);
     } else if (key === "env") {
       output.env = patchEnv(output.env, value);
+    } else if (key === "command") {
+      output.command = patchCommand(value);
     } else {
       output[key] = value;
     }
   }
 
   return output as AppManifestInput;
+}
+
+function patchCommand(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new SetupApiRequestError(
+      400,
+      "SETUP_COMMAND_PATCH_INVALID",
+      "Manifest command patch must be a non-empty string.",
+      {
+        retryable: false
+      }
+    );
+  }
+  if (/[&|<>;$`]/.test(value)) {
+    throw new SetupApiRequestError(
+      400,
+      "SETUP_COMMAND_PATCH_UNSAFE",
+      "Manifest command patch contains shell metacharacters.",
+      {
+        retryable: false,
+        userAction: "Use setup command selection or a simple command without pipes, redirection, or backgrounding."
+      }
+    );
+  }
+  return value;
 }
 
 function patchRelaybase(current: unknown, patch: unknown): Record<string, unknown> {
@@ -1408,11 +1436,9 @@ async function resolveManifestPath(manifestPath: string, cwd: string | undefined
       userAction: "Provide the relaybase.app.json path."
     });
   }
-  const root = cwd ? await resolveProjectDirectory(cwd) : undefined;
-  const resolved = path.resolve(root ?? process.cwd(), manifestPath);
-  if (root) {
-    ensureInside(root, resolved, "manifestPath");
-  }
+  const root = await resolveProjectDirectory(cwd ?? process.cwd());
+  const resolved = path.resolve(root, manifestPath);
+  ensureInside(root, resolved, "manifestPath");
   return resolved;
 }
 
@@ -1474,8 +1500,17 @@ function sanitizeSetupValue(value: unknown): unknown {
 
 async function readJsonBody(request: http.IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.byteLength;
+    if (totalBytes > MAX_JSON_BODY_BYTES) {
+      request.destroy();
+      throw new SetupApiRequestError(413, "REQUEST_BODY_TOO_LARGE", "Request body exceeds the 1 MB limit.", {
+        retryable: false
+      });
+    }
+    chunks.push(buffer);
   }
   if (!chunks.length) {
     return {};

@@ -8,6 +8,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { discovery, ensureDaemon, type DaemonEnsureResult, type RelaybaseCommandOptions } from "./daemonLauncher.ts";
+import { redactDiagnosticText } from "./redaction.ts";
 
 export interface TuiBridgeOptions {
   host: string;
@@ -445,7 +446,7 @@ async function developmentGoRunFallback(options: {
 }
 
 async function developmentGoRunEnv(packageRoot: string, baseEnv: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
-  const goCache = path.join(packageRoot, ".relaybase", "go-build-cache");
+  const goCache = path.join(os.tmpdir(), "relaybase-go-build-cache");
   const goTmp = path.join(os.tmpdir(), "relaybase-go-build-tmp");
   await mkdir(goCache, { recursive: true });
   await mkdir(goTmp, { recursive: true });
@@ -607,13 +608,6 @@ function safeBootstrapReport(result: DaemonEnsureResult): DaemonEnsureResult {
     ...(result.error ? { error: redactDiagnosticText(result.error) } : {}),
     ...(result.logTail ? { logTail: result.logTail.map(redactDiagnosticText) } : {})
   };
-}
-
-function redactDiagnosticText(value: string): string {
-  return value.replace(
-    /(?:token|password|passwd|secret|api[_-]?key|authorization|bearer|relaybase_token|session-token)(\s*[:=]\s*)?\S*/gi,
-    "[redacted]"
-  );
 }
 
 export function checkDaemonReachable(baseURL: string, timeoutMs = 2000): Promise<DaemonReachability> {

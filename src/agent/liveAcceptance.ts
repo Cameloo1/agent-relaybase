@@ -1601,6 +1601,13 @@ async function secretScan(pathsToScan: string[], knownSecrets: string[], outputP
       if (/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi.test(text)) {
         findings.push({ file, category: "bearer_token_pattern" });
       }
+      if (
+        /"(?:OPENROUTER_API_KEY|RELAYBASE_TOKEN|password|passwd|pwd|secret|token|api[_-]?key|apiKey|auth[_-]?token|authorization|cookie|session)"\s*:\s*"(?!\[redacted\]|redacted|<redacted>|env:)[^"]{4,}"/i.test(
+          text
+        )
+      ) {
+        findings.push({ file, category: "secret_json_field_pattern" });
+      }
     }
   }
   const content = findings.length

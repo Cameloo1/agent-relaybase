@@ -15,7 +15,8 @@ interface RelaybaseErrorInput {
 
 const CORRELATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SAFE_TOKEN_DETAIL_KEYS = new Set(["tokenpath", "tokenpresent"]);
-const SECRET_ASSIGNMENT_PATTERN = /\b(token|secret|password|api[_-]?key)(\s*[:=]\s*)(?!<)([^\s&,;]+)/gi;
+const SECRET_ASSIGNMENT_PATTERN =
+  /\b(token|secret|password|passwd|pwd|api[_-]?key|auth[_-]?token|cookie|session)(\s*[:=]\s*)(?!<)([^\s&,;]+)/gi;
 const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
 const MAX_DETAIL_DEPTH = 8;
 
@@ -143,10 +144,32 @@ function isSensitiveDetailKey(key: string): boolean {
     normalized.endsWith("secret") ||
     normalized === "password" ||
     normalized.endsWith("password") ||
+    normalized === "pass" ||
+    normalized.endsWith("pass") ||
+    normalized === "passwd" ||
+    normalized.endsWith("passwd") ||
+    normalized === "pwd" ||
+    normalized.endsWith("pwd") ||
     normalized === "passphrase" ||
+    normalized.endsWith("passphrase") ||
     normalized === "authorization" ||
+    normalized.endsWith("authorization") ||
+    normalized === "auth" ||
+    normalized.endsWith("auth") ||
+    normalized === "cookie" ||
+    normalized.endsWith("cookie") ||
+    normalized === "session" ||
+    normalized.endsWith("session") ||
+    normalized === "credential" ||
+    normalized.endsWith("credential") ||
+    normalized === "credentials" ||
+    normalized.endsWith("credentials") ||
     normalized === "apikey" ||
     normalized.endsWith("apikey") ||
+    normalized === "key" ||
+    normalized.endsWith("key") ||
+    normalized === "cert" ||
+    normalized.endsWith("cert") ||
     normalized === "privatekey" ||
     normalized.endsWith("privatekey")
   );
