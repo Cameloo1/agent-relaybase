@@ -18,6 +18,7 @@ import { LogExportService } from "./logExport.ts";
 import { LogStore } from "./logStore.ts";
 import { OperationStore } from "./operationStore.ts";
 import { ProcessManager } from "./processManager.ts";
+import { RegistrationVerificationService } from "./registrationVerificationService.ts";
 import { Registry } from "./registry.ts";
 import { RelaybaseMcpService } from "./relaybaseMcp.ts";
 import { proxyHttpRequest, proxyUpgrade, writeSocketHttpError } from "./proxy.ts";
@@ -46,6 +47,7 @@ export interface RelaybaseRuntime {
   agentGateway: AgentGatewayService;
   packages: AppPackageService;
   operations: OperationStore;
+  registrationVerification: RegistrationVerificationService;
   events: DaemonEventBus;
   mcp: RelaybaseMcpService;
 }
@@ -78,6 +80,7 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
     agentGateway: new AgentGatewayService({ stateDir }),
     packages: undefined as unknown as AppPackageService,
     operations: new OperationStore({ stateDir }),
+    registrationVerification: undefined as unknown as RegistrationVerificationService,
     events: new DaemonEventBus(),
     processes: new ProcessManager(registry, {
       hubHost: host,
@@ -94,6 +97,7 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
     listAppStatuses: () => runtime.processes.listStatuses(),
     enqueueLifecycle: ({ appId, correlationId }) => enqueueLifecycleOperation(runtime, appId, "start", correlationId)
   });
+  runtime.registrationVerification = new RegistrationVerificationService(runtime);
   runtime.exports = new LogExportService(runtime);
   runtime.mcp = new RelaybaseMcpService(runtime);
   wireDaemonEvents(runtime);

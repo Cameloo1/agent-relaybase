@@ -27,6 +27,13 @@ export type OperationStatus =
   | "timed_out";
 
 export type LifecycleOperationType = "start" | "stop" | "restart";
+export type RecordedOperationType =
+  | LifecycleOperationType
+  | "register"
+  | "registration_verification"
+  | "log-export"
+  | "diagnostics"
+  | "preferences";
 
 export interface OperationTarget {
   type: "app" | "component";
@@ -52,8 +59,8 @@ export interface RelaybaseState {
 export interface LifecycleOperation {
   id: string;
   operationId: string;
-  kind: LifecycleOperationType | "register" | "log-export" | "diagnostics" | "preferences";
-  operationType: LifecycleOperationType | "register" | "log-export" | "diagnostics" | "preferences";
+  kind: RecordedOperationType;
+  operationType: RecordedOperationType;
   target: OperationTarget;
   status: OperationStatus;
   appId?: string;

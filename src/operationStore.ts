@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createRelaybaseError } from "./apiErrors.ts";
-import type { LifecycleOperation, LifecycleOperationType, OperationStatus } from "./apiTypes.ts";
+import type { LifecycleOperation, LifecycleOperationType, OperationStatus, RecordedOperationType } from "./apiTypes.ts";
 import { redactValueForExport } from "./redaction.ts";
 
 type TerminalOperationStatus = Extract<OperationStatus, "succeeded" | "failed" | "timed_out" | "cancelled">;
@@ -38,6 +38,15 @@ export interface OperationHandle {
   deduplicated: boolean;
 }
 
+export interface RecordEvidenceInput {
+  kind: "registration_verification";
+  targetId: string;
+  correlationId: string;
+  status: "succeeded" | "failed" | "skipped";
+  retryable?: boolean;
+  result: unknown;
+}
+
 interface ActiveOperation {
   operationId: string;
   operationType: LifecycleOperationType;
@@ -47,7 +56,7 @@ interface ActiveOperation {
 
 export interface OperationListOptions {
   statuses?: readonly OperationStatus[];
-  operationType?: LifecycleOperationType;
+  operationType?: RecordedOperationType;
   targetId?: string;
   retryableOnly?: boolean;
   limit?: number;
@@ -201,6 +210,43 @@ export class OperationStore {
       created: true,
       deduplicated: false
     };
+  }
+
+  recordEvidence(input: RecordEvidenceInput): LifecycleOperation {
+    if (!this.#accepting || this.#closed) {
+      throw new OperationStoreClosedError();
+    }
+    const operationId = `op_${randomUUID()}`;
+    const at = new Date().toISOString();
+    const operation: LifecycleOperation = {
+      id: operationId,
+      operationId,
+      kind: input.kind,
+      operationType: input.kind,
+      target: { type: "app", id: input.targetId },
+      appId: input.targetId,
+      owner: "daemon",
+      status: input.status,
+      createdAt: at,
+      startedAt: at,
+      updatedAt: at,
+      finishedAt: at,
+      endedAt: at,
+      progress: 100,
+      message: `Registration verification ${input.status} for app ${input.targetId}.`,
+      messages: [`Registration verification ${input.status} for app ${input.targetId}.`],
+      events: [{ at, phase: input.status, progress: 100, message: `Registration verification ${input.status}.` }],
+      canAbort: false,
+      canRetry: input.status === "failed" && input.retryable === true,
+      retryable: input.status === "failed" && input.retryable === true,
+      result: redactValueForExport(input.result).value,
+      evidence: [input.correlationId]
+    };
+    this.#operations.set(operationId, operation);
+    this.#persist(operation);
+    this.#emit(operation);
+    this.#prune();
+    return snapshotOperation(operation);
   }
 
   get(operationId: string): LifecycleOperation | undefined {

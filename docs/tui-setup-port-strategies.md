@@ -47,6 +47,8 @@ Best for apps that cannot bind a daemon-assigned port.
 
 Risk: fixed ports can conflict with stale processes. Stop verification differs because Relaybase may not own an external process.
 
+Quick registration preflights fixed-port availability. An occupied fixed port returns `REGISTER_VERIFY_PORT_CONFLICT` before process start.
+
 ## Generic PORT Env Strategy
 
 Behavior:
@@ -128,6 +130,15 @@ The wrapper should:
 - avoid printing secrets
 
 The wrapper must be previewed and approved before writing.
+
+## Verification failure to repair mapping
+
+- Managed port open plus alternate route `2xx`: preview only a `healthUrl` repair.
+- Process alive but assigned port closed: preview explicit runtime host/port binding when the adapter has high-confidence evidence.
+- Runtime cannot accept dynamic binding: preview an explicit fixed `upstreamPort`; do not make this the default.
+- No deterministic adapter evidence: request executable, arguments, port binding, and health route as structured fields rather than an opaque shell command.
+
+No repair writes automatically. A confirmed repair applies the exact bound manifest diff and runs one new quick proof. Relaybase recommends at most three repairs, does not repeat a failed launch-plan digest, and blocks retry while cleanup is unresolved.
 
 ## Docker Compose Wrapper
 

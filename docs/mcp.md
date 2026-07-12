@@ -77,7 +77,9 @@ Token-gated mutation tools:
 
 `configure_project` uses the same setup engine as `relaybase configure`. With `apply: false`, it returns a dry-run plan. With `apply: true`, it may write project files, register the app, and optionally start verification.
 
-`plan_registration` is read-only and returns the same folder-or-manifest preview used by the CLI and TUI. Apply its exact `previewId` with `register_app { previewId, confirm: true }`. Drift invalidates the preview and performs zero writes or registry updates. Registration does not start the app.
+`plan_registration` is read-only and requires an explicit `verificationMode: "quick" | "none"` for automation. It returns the same folder-or-manifest preview used by the CLI and TUI, including whether confirmation will briefly start and stop the app. Apply its exact `previewId` with `register_app { previewId, confirm: true }`. Drift invalidates the preview and performs zero writes, registry updates, or starts.
+
+With `quick`, `register_app` returns `registration.verification` containing the attempt status, assigned port, health target, stop/closure result, classified failure, and up to three ordered preview-only repairs. Successful proof ends stopped. With `none`, it performs zero lifecycle mutation and returns an honest unverified state. A caller may pass `selectedRepairId` when applying a separately approved repair retry.
 
 `list_apps` is read-only. It accepts `all`, `running`, `active`, `stopped`, `ready`, and `attention` filters. Its compact items include id, name, readiness, runtime, health, route, port, action, and attention state.
 

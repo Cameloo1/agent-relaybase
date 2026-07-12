@@ -86,6 +86,17 @@ func TestParseSetupCommandDetails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse configure: %v", err)
 	}
+
+	register, err := Parse("/register C:/project --no-verify")
+	if err != nil {
+		t.Fatalf("Parse register --no-verify: %v", err)
+	}
+	if register.Path != "C:/project" || !register.NoVerify {
+		t.Fatalf("unexpected register verification parse: %#v", register)
+	}
+	if _, err := Parse("/launch notes --no-verify"); err == nil {
+		t.Fatal("expected --no-verify outside /register to fail closed")
+	}
 	if configure.Path != "current" || !configure.DryRun {
 		t.Fatalf("unexpected configure parse: %#v", configure)
 	}

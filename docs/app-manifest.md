@@ -76,7 +76,21 @@ relaybase
 
 `upstreamPort` pins the app to a fixed backend port. Without it, Relaybase chooses a runtime port.
 
+## Registration verification implications
+
+Quick registration verification compiles this exact manifest, starts it once, checks the declared health target, stops it, and verifies closure of a Relaybase-owned backend port. Confirmation text names this lifecycle work before it happens. `--no-verify` performs no lifecycle mutation and leaves the app registered but unverified.
+
+Port ownership affects proof behavior:
+
+- `environment` and `arguments`: Relaybase assigns and owns a temporary backend port; successful proof requires that port to close after stop.
+- `fixed`: Relaybase preflights `upstreamPort` for conflicts, starts the configured process, and requires cleanup of the owned backend.
+- `external`: Relaybase does not spawn or own the external process. Verification checks reachability but does not claim closure of a port it does not own.
+
+When the declared HTTP health route fails while the managed backend is open, Relaybase may issue at most three read-only, one-second, localhost-only `GET` probes from adapter-supplied candidates. It never follows a candidate to a non-local host and never rewrites `healthUrl` automatically. A successful alternate route becomes an approval-bound repair preview.
+
 Lifecycle timeout fields are milliseconds and must be between `100` and `3600000`.
+
+Registration quick proof uses bounded policy defaults rather than silently adopting an unbounded manifest timeout. Ordinary-process verification is capped at 30 seconds. Slow adapters must present an explicit extended-proof choice.
 
 `relaybase` is an optional metadata block for TUI grouping. It never changes lifecycle ownership: each app remains one command/process. See [app-components.md](app-components.md) for the implemented fields, roles, fallback behavior, and aggregate status rules.
 

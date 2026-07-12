@@ -451,7 +451,10 @@ export async function proposeSetupPlans(
     command: startCommand,
     cwd: ".",
     protocol: detection.framework === "websocket" ? "http+ws" : "http",
-    healthUrl: detection.healthCandidates[0] ?? "/"
+    healthUrl:
+      detection.primaryRuntime?.healthCandidates.find((candidate) => candidate.confidence === "high")?.path ??
+      detection.healthCandidates[0] ??
+      "/"
   };
   const selectedBaseManifest = options.componentMetadata
     ? withSetupComponentMetadata(baseManifest, options.componentMetadata)

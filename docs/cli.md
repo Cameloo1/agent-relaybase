@@ -158,12 +158,15 @@ The default verification gate runs formatting, lint, typecheck, Node tests, Jest
 relaybase register C:\path\to\project --plan
 relaybase register C:\path\to\project
 relaybase register C:\path\to\project --yes --json
+relaybase register C:\path\to\project --no-verify
 relaybase register C:\path\to\project\relaybase.app.json --plan
 ```
 
-Folder mode locates or proposes `relaybase.app.json`, compiles the launch plan, binds approval to the manifest and generated-file revisions, and registers only after confirmation. Exact manifest-file mode is strict. `--plan` and `--dry-run` never mutate; `--yes` applies the exact preview without an interactive prompt. Noninteractive apply without `--yes` fails closed. Registration never starts the app.
+Folder mode locates or proposes `relaybase.app.json`, compiles the launch plan, binds approval to the manifest, generated-file revisions, and verification policy, and registers only after confirmation. Exact manifest-file mode is strict. `--plan` and `--dry-run` never mutate; `--yes` applies the exact preview without an interactive prompt. Noninteractive apply without `--yes` fails closed.
 
-Stable registration codes include `REGISTER_MANIFEST_NOT_FOUND`, `REGISTER_MANIFEST_INVALID`, `REGISTER_INPUT_REQUIRED`, `REGISTER_PREVIEW_REQUIRED`, `REGISTER_CONFIRMATION_REQUIRED`, `REGISTER_PREVIEW_STALE`, `REGISTER_REGISTRY_FAILED`, and `REGISTER_ALREADY_CURRENT`.
+The default is one quick bounded proof: start, declared health, stop, and backend-port closure. Success ends with the app stopped. `--no-verify` performs zero lifecycle mutation and returns `registered_unverified`. JSON output includes the verification status, attempt and port metadata, health target, stop result, classified failure, and ordered repair previews.
+
+Stable registration codes include `REGISTER_MANIFEST_NOT_FOUND`, `REGISTER_MANIFEST_INVALID`, `REGISTER_INPUT_REQUIRED`, `REGISTER_PREVIEW_REQUIRED`, `REGISTER_CONFIRMATION_REQUIRED`, `REGISTER_PREVIEW_STALE`, `REGISTER_REGISTRY_FAILED`, and `REGISTER_ALREADY_CURRENT`. Verification failures use the stable `REGISTER_VERIFY_*` codes documented in [Troubleshooting](troubleshooting.md).
 
 ```powershell
 relaybase configure

@@ -193,6 +193,46 @@ test("MCP configure_project uses the shared setup flow and gates writes behind t
   }
 });
 
+test("MCP registration requires explicit verification intent and returns the typed result", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-mcp-registration-state-"));
+  const project = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-mcp-registration-project-"));
+  const manifestPath = path.join(project, "relaybase.app.json");
+  await fs.writeFile(
+    manifestPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      id: "mcp-registration",
+      name: "MCP Registration",
+      command: "external",
+      cwd: "."
+    }),
+    "utf8"
+  );
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
+  try {
+    await hub.listen();
+    const client = await createHttpMcpClient(hub.address().port, hub.runtime.token);
+    await assert.rejects(
+      () => client.callTool({ name: "plan_registration", arguments: { path: manifestPath, mode: "manifest" } }),
+      /verificationMode|required/i
+    );
+    const planned = await client.callTool({
+      name: "plan_registration",
+      arguments: { path: manifestPath, mode: "manifest", verificationMode: "none" }
+    });
+    assert.equal(planned.structuredContent?.verificationIntent.mode, "none");
+    const registered = await client.callTool({
+      name: "register_app",
+      arguments: { previewId: planned.structuredContent?.previewId, confirm: true }
+    });
+    assert.equal(registered.structuredContent?.registration.status, "registered_unverified");
+    assert.equal(registered.structuredContent?.registration.verification.status, "not_requested");
+    await client.close();
+  } finally {
+    await hub.close();
+  }
+});
+
 test("stdio MCP fake client can list and start apps", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-mcp-stdio-"));
   const registry = new Registry(stateDir);

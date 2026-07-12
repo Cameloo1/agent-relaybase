@@ -10,7 +10,8 @@ Current implemented setup primitives:
 - `relaybase configure --dry-run`
 - `relaybase configure --profile <id>`
 - `relaybase configure --repair`
-- `relaybase register <manifest>`
+- `relaybase register <folder|manifest>`
+- `relaybase register <folder|manifest> --no-verify`
 - `relaybase open`
 - `relaybase health`
 - `relaybase health --prove`
@@ -44,6 +45,11 @@ RA001/RA002 expose these daemon-owned setup routes:
 - `POST /__hub/api/setup/preview`
 - `POST /__hub/api/setup/apply`
 - `POST /__hub/api/setup/register-manifest`
+- `POST /__hub/api/setup/register/preview`
+- `POST /__hub/api/setup/register/apply`
+- `POST /__hub/api/setup/register/repair/preview`
+- `POST /__hub/api/setup/register/repair/apply`
+- `POST /__hub/api/setup/register/verification/cancel`
 - `POST /__hub/api/setup/inspect-manifest`
 - `POST /__hub/api/setup/validate-manifest`
 - `POST /__hub/api/setup/patch-manifest/preview`
@@ -53,7 +59,7 @@ RA001/RA002 expose these daemon-owned setup routes:
 - `POST /__hub/api/setup/repair`
 - `GET /__hub/api/setup/operations/:operationId`
 
-Read-only routes return detection, choices, previews, manifest diagnostics, and repair previews without mutating the project. Apply, register, patch apply, open, and prove use existing daemon auth rules, and write/start/proof actions require explicit confirmation where they can mutate files or lifecycle state. Setup operations are synchronous today; `/setup/operations/:operationId` exists only as a normalized diagnostic route until async setup operation storage is implemented.
+Read-only routes return detection, choices, previews, manifest diagnostics, registration verification intent, and repair previews without mutating the project. Apply, register, patch apply, open, and prove use existing daemon auth rules, and write/start/proof actions require explicit confirmation where they can mutate files or lifecycle state. Registration apply completes during the request, but its daemon-owned verification can be cancelled through the dedicated token-gated cancel route. `/setup/operations/:operationId` remains a normalized diagnostic route; bounded registration verification evidence is stored in the existing operation ledger.
 
 Daemon setup routes emit safe setup events on the global event bus:
 
@@ -147,8 +153,9 @@ The current daemon/TUI behavior is:
 4. TUI shows manifest, wrapper, setup-profile, env write previews, runtime-specific command/port context, and ambiguity questions.
 5. User approves or cancels.
 6. Daemon applies approved writes and registers the manifest.
-7. User launches through a daemon lifecycle operation.
-8. TUI shows operation progress, route, logs, and health proof from daemon state/events.
+7. For normal registration, daemon performs one approved start, health, stop, and closure proof; `--no-verify` skips this lifecycle work.
+8. TUI reports verified, unverified, repairable failure, cancellation, or cleanup failure. Successful proof ends stopped.
+9. User launches through a separate daemon lifecycle operation.
 
 ## Implemented Slash Commands
 
@@ -159,6 +166,7 @@ Implemented TUI setup commands:
 /add <path> using <command>
 /add app <path> using <command>
 /register <manifest-or-project-path>
+/register <manifest-or-project-path> --no-verify
 /configure
 /configure cwd
 /configure current folder
@@ -178,7 +186,7 @@ Implemented TUI setup commands:
 /component label <app> <label>
 ```
 
-These commands call daemon setup/onboarding APIs. They must not write files or spawn app processes directly from the TUI. `/add <path>` without a command, `/configure <path>` when details are unclear, and `/register <project-path>` can route to the daemon Agent Gateway when the Operator Agent is enabled. The daemon-owned agent may inspect the explicitly selected project with bounded read-only tools, return command candidates, and prepare setup previews. When the daemon is connected but the Operator Agent is disabled or incompletely configured, `/add <path>` falls back to the deterministic read-only `/setup/preview` path and populates the same setup preview state; it does not auto-apply. The compatibility alias `/add app <path> using <command>` remains accepted temporarily for older instructions.
+These commands call daemon setup/onboarding APIs. They must not write files, spawn app processes, probe health, or stop processes directly from the TUI. `/register` always uses the deterministic daemon registration coordinator and shows whether confirmation will briefly start and stop the app. `/cancel` requests cancellation when a registration proof is active. The compatibility alias `/add app <path> using <command>` remains accepted temporarily for older instructions.
 
 ## Configure Current Folder
 
@@ -218,7 +226,7 @@ The daemon setup API returns setup candidates with:
 - setup questions
 - runtime repair candidates
 
-The TUI separates dry-run preview from apply. `/configure <path> --dry-run`, `/repair <app-or-path>`, and `/manifest inspect <app-or-path>` are read-only. `/configure <path>`, `/add <path>`, `/add <path> using <command>`, `/register`, `/open`, `/prove`, `/health --prove`, and manifest patch commands require confirmation or daemon approval before the daemon mutates files, registration state, proof artifacts, or lifecycle state.
+The TUI separates dry-run preview from apply. `/configure <path> --dry-run`, `/repair <app-or-path>`, and `/manifest inspect <app-or-path>` are read-only. `/configure <path>`, `/add <path>`, `/add <path> using <command>`, `/register`, `/open`, `/prove`, `/health --prove`, and manifest patch commands require confirmation or daemon approval before the daemon mutates files, registration state, proof artifacts, or lifecycle state. Registration confirmation shows the expected maximum duration, health candidates, and the guarantee that successful proof ends stopped.
 
 Runtime-specific setup choices now come through the daemon setup engine, not the TUI. The TUI should continue to render daemon-produced plan choices, setup questions, diffs, and diagnostics without detecting runtimes or writing files locally.
 
@@ -233,7 +241,7 @@ When an app ignores `PORT`, has a wrong health route, has stale manifest fields,
 - re-register manifest
 - prove route and stop behavior again
 
-The daemon performs repair writes and lifecycle proof after approval. The TUI currently requests repair previews and then routes approved setup apply or manifest patch requests back to the daemon.
+The daemon returns no more than three ordered, preview-only repairs. `register/repair/preview` binds the selected repair to the current manifest revision. Confirmed `register/repair/apply` writes the exact patch, re-registers, and runs one new quick proof. Drift performs zero repair writes and zero starts. Cleanup failure disables further repair/launch retries until the remaining process or port is resolved.
 
 ## Safe Manifest Fields
 

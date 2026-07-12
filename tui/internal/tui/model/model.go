@@ -124,6 +124,8 @@ type RootModel struct {
 	historyExpanded        bool
 	setupSession           setupwizard.State
 	registrationPreview    *relaybaseclient.RegistrationSetupResult
+	regRepairPreview       *relaybaseclient.RegistrationRepairPreviewResult
+	regVerifyAppID         string
 	pendingConfirm         *confirmationRequest
 	quitConfirmation       bool
 	agentConfig            *relaybaseclient.AgentConfig
@@ -1158,15 +1160,64 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.registrationPreview = msg.Result
 		m.addAssistantMessage(registrationPreviewMessage(msg.Result))
 		if msg.Result != nil && msg.Result.Approval.Required && msg.Result.PreviewID != "" {
-			command := slash.ParsedCommand{Raw: "/register " + quoteSetupPath(msg.Request.Path), Kind: slash.KindRegister, Path: msg.Request.Path, Target: msg.Request.Path}
+			command := slash.ParsedCommand{Raw: "/register " + quoteSetupPath(msg.Request.Path), Kind: slash.KindRegister, Path: msg.Request.Path, Target: msg.Request.Path, NoVerify: msg.Request.VerificationMode == "none"}
 			confirmation, err := m.prepareConfirmation(command)
 			if err == nil {
+				if msg.Result.VerificationIntent.WillStart {
+					confirmation.Action = "confirm and verify registration"
+					confirmation.Risk = "Daemon writes the approved manifest or registry update, starts the app once on a managed port, probes health, stops it, and verifies backend-port closure."
+					confirmation.Expected = "The app ends stopped and is reported verified only when health, stop, and port closure all pass."
+					confirmation.Details = []string{
+						fmt.Sprintf("expected maximum: %dms", msg.Result.VerificationIntent.ExpectedMaximumMS),
+						"no app will be left running after a successful proof",
+					}
+					for _, target := range msg.Result.VerificationIntent.HealthCandidates {
+						confirmation.Details = append(confirmation.Details, "health candidate: "+target)
+					}
+				} else {
+					confirmation.Action = "register without verification"
+					confirmation.Risk = "Daemon writes the approved manifest or registry update without proving launch readiness."
+					confirmation.Expected = "The app remains stopped and is honestly marked registered but unverified."
+				}
 				m.pendingConfirm = confirmation
 				m.refreshAssistantPrompt()
 			}
 		}
 		return m, nil
 	case commands.SetupRegistrationApplyCompletedMsg:
+		m.regVerifyAppID = ""
+		m.registrationPreview = msg.Result
+		m.addAssistantMessage(registrationPreviewMessage(msg.Result))
+		return m, commands.FetchStateCmd(m.ctx, m.client)
+	case commands.SetupRegistrationCancelCompletedMsg:
+		if msg.Result != nil && msg.Result.Cancelled {
+			m.addAssistantMessage(msg.Result.Message)
+		} else {
+			m.regVerifyAppID = ""
+			m.addAssistantMessage("No active registration verification attempt was found.")
+		}
+		return m, nil
+	case commands.SetupRegistrationRepairPreviewCompletedMsg:
+		m.regRepairPreview = msg.Result
+		if msg.Result == nil {
+			m.addAssistantMessage("Registration repair preview was unavailable. No files or processes changed.")
+			return m, nil
+		}
+		m.addAssistantMessage("Registration repair preview ready: " + msg.Result.Repair.Label + ".")
+		m.pendingConfirm = &confirmationRequest{
+			Action:       "apply repair and verify",
+			Target:       slash.ResolvedTarget{Description: "app " + msg.Result.AppID},
+			Risk:         "Daemon writes the exact previewed manifest patch, re-registers the app, and runs one new bounded start/health/stop proof.",
+			Expected:     "The app ends stopped; verification passes only when health, stop, and backend-port closure pass.",
+			Command:      slash.ParsedCommand{Kind: slash.KindRepair, Target: msg.Result.AppID},
+			SetupCommand: &slash.ParsedCommand{Kind: slash.KindRepair, Target: msg.Result.AppID},
+			Details:      []string{msg.Result.Repair.Reason, fmt.Sprintf("files: %d", len(msg.Result.FileWritePlan.Writes))},
+		}
+		m.refreshAssistantPrompt()
+		return m, nil
+	case commands.SetupRegistrationRepairApplyCompletedMsg:
+		m.regVerifyAppID = ""
+		m.regRepairPreview = nil
 		m.registrationPreview = msg.Result
 		m.addAssistantMessage(registrationPreviewMessage(msg.Result))
 		return m, commands.FetchStateCmd(m.ctx, m.client)
@@ -1198,6 +1249,9 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.addAssistantMessage(fmt.Sprintf("Repair preview ready with %d choice(s).", setupRepairChoiceCount(msg.Result)))
 		return m, nil
 	case commands.SetupFailedMsg:
+		if msg.Action == "apply registration" || msg.Action == "apply registration repair" || msg.Action == "cancel registration verification" {
+			m.regVerifyAppID = ""
+		}
 		message := fmt.Sprintf("%s failed: %s", msg.Action, assistant.SanitizeText(fmt.Sprint(msg.Err)))
 		m.addDiagnostic("setup_action_failed", "error", message)
 		m.addAssistantMessage(message)
@@ -2245,6 +2299,11 @@ func (m RootModel) submitSlashCommand(input string) (RootModel, tea.Cmd) {
 		}
 		return m, m.executePendingConfirmation()
 	case slash.KindCancel:
+		if m.regVerifyAppID != "" {
+			appID := m.regVerifyAppID
+			m.addAssistantMessage("Requesting cancellation for registration verification of " + appID + ".")
+			return m, commands.SetupRegistrationCancelCmd(m.ctx, m.client, appID)
+		}
 		m.pendingConfirm = nil
 		m.interaction.CloseModal()
 		m.resetBodyScroll()
@@ -2285,7 +2344,7 @@ func (m RootModel) submitSlashCommand(input string) (RootModel, tea.Cmd) {
 	}
 
 	if command.Kind == slash.KindRegister && !command.Confirm {
-		request, err := m.registrationPreviewRequest(command.Path)
+		request, err := m.registrationPreviewRequest(command.Path, command.NoVerify)
 		if err != nil {
 			m.addAssistantMessage(err.Error())
 			m.restorePendingSubmissionDraft()
@@ -2659,8 +2718,12 @@ func (m *RootModel) executePendingConfirmation() tea.Cmd {
 		return commands.ExportLogsCmd(m.ctx, m.client, *confirmation.ExportRequest)
 	}
 	if confirmation.SetupCommand != nil {
+		if confirmation.SetupCommand.Kind == slash.KindRegister && m.registrationPreview != nil && m.registrationPreview.App != nil && m.registrationPreview.VerificationIntent.WillStart {
+			m.regVerifyAppID = m.registrationPreview.App.ID
+		}
 		cmd, err := m.setupCmdForCommand(*confirmation.SetupCommand, true)
 		if err != nil {
+			m.regVerifyAppID = ""
 			m.addAssistantMessage(err.Error())
 			return nil
 		}
@@ -2927,7 +2990,7 @@ func (m RootModel) setupCmdForCommand(command slash.ParsedCommand, confirmed boo
 		}), nil
 	case slash.KindRegister:
 		if !confirmed {
-			request, err := m.registrationPreviewRequest(command.Path)
+			request, err := m.registrationPreviewRequest(command.Path, command.NoVerify)
 			if err != nil {
 				return nil, err
 			}
@@ -2961,6 +3024,30 @@ func (m RootModel) setupCmdForCommand(command slash.ParsedCommand, confirmed boo
 		request.Confirmation = &relaybaseclient.SetupConfirmation{Confirmed: true, Reason: "TUI health proof confirmation"}
 		return commands.SetupProveCmd(m.ctx, m.client, request), nil
 	case slash.KindRepair:
+		if m.registrationPreview != nil && m.registrationPreview.App != nil && m.registrationPreview.Verification != nil && len(m.registrationPreview.Verification.Repairs) > 0 {
+			if confirmed {
+				if m.regRepairPreview == nil || m.regRepairPreview.PreviewID == "" {
+					return nil, fmt.Errorf("Registration repair preview is unavailable or stale; run /repair again.")
+				}
+				m.regVerifyAppID = m.regRepairPreview.AppID
+				return commands.SetupRegistrationRepairApplyCmd(m.ctx, m.client, relaybaseclient.RegistrationRepairApplyRequest{
+					PreviewID:    m.regRepairPreview.PreviewID,
+					Confirm:      true,
+					Confirmation: &relaybaseclient.SetupConfirmation{Confirmed: true, Reason: "TUI registration repair confirmation"},
+				}), nil
+			}
+			repair := m.registrationPreview.Verification.Repairs[0]
+			for _, candidate := range m.registrationPreview.Verification.Repairs {
+				if candidate.Recommended {
+					repair = candidate
+					break
+				}
+			}
+			return commands.SetupRegistrationRepairPreviewCmd(m.ctx, m.client, relaybaseclient.RegistrationRepairPreviewRequest{
+				AppID:    m.registrationPreview.App.ID,
+				RepairID: repair.ID,
+			}), nil
+		}
 		cwd, err := m.cwdForSetupTarget(command.Target)
 		if err != nil {
 			return nil, err
@@ -3102,7 +3189,7 @@ func (m RootModel) registerManifestRequest(target string) (relaybaseclient.Regis
 	return relaybaseclient.RegisterManifestRequest{ManifestPath: manifestPath, CWD: setupwizard.CWDFromManifestPath(manifestPath), Mode: "manifest"}, nil
 }
 
-func (m RootModel) registrationPreviewRequest(target string) (relaybaseclient.RegistrationPreviewRequest, error) {
+func (m RootModel) registrationPreviewRequest(target string, noVerify ...bool) (relaybaseclient.RegistrationPreviewRequest, error) {
 	request, err := m.registerManifestRequest(target)
 	if err != nil {
 		return relaybaseclient.RegistrationPreviewRequest{}, err
@@ -3111,7 +3198,11 @@ func (m RootModel) registrationPreviewRequest(target string) (relaybaseclient.Re
 	if request.Mode == "folder" {
 		pathValue = request.CWD
 	}
-	return relaybaseclient.RegistrationPreviewRequest{Path: pathValue, CWD: request.CWD, Mode: request.Mode}, nil
+	verificationMode := "quick"
+	if len(noVerify) > 0 && noVerify[0] {
+		verificationMode = "none"
+	}
+	return relaybaseclient.RegistrationPreviewRequest{Path: pathValue, CWD: request.CWD, Mode: request.Mode, VerificationMode: verificationMode}, nil
 }
 
 func (m RootModel) proveRequestForTarget(target string) (relaybaseclient.ProveHealthRequest, error) {
@@ -5573,8 +5664,35 @@ func registrationPreviewMessage(preview *relaybaseclient.RegistrationSetupResult
 	if preview.Registered {
 		parts = append(parts, "registered")
 	}
+	if preview.Verification != nil {
+		parts = append(parts, "verification "+preview.Verification.Status)
+		if preview.Verification.AssignedPort > 0 {
+			parts = append(parts, fmt.Sprintf("temporary port %d", preview.Verification.AssignedPort))
+		}
+		if preview.Verification.Failure != nil {
+			parts = append(parts,
+				"failed boundary "+preview.Verification.Failure.Boundary,
+				preview.Verification.Failure.Message,
+				"next "+preview.Verification.Failure.RecommendedAction,
+			)
+			if preview.Verification.Failure.ProcessRunning {
+				parts = append(parts, "process still running")
+			}
+			if preview.Verification.Failure.BackendPortOpen != nil && *preview.Verification.Failure.BackendPortOpen {
+				parts = append(parts, "backend port still open")
+			}
+		}
+		for _, repair := range preview.Verification.Repairs {
+			if repair.Recommended {
+				parts = append(parts, "recommended repair "+repair.Label)
+				break
+			}
+		}
+	} else if preview.VerificationIntent.WillStart {
+		parts = append(parts, "confirmation briefly starts, checks, and stops the app")
+	}
 	if !preview.Started {
-		parts = append(parts, "app not started")
+		parts = append(parts, "app ends stopped")
 	}
 	return assistant.SanitizeText(strings.Join(parts, "; ") + ".")
 }

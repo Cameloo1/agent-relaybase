@@ -414,6 +414,31 @@ func (c *Client) ApplyRegistration(ctx context.Context, request RegistrationAppl
 	return &result, nil
 }
 
+func (c *Client) CancelRegistrationVerification(ctx context.Context, appID string) (*RegistrationVerificationCancelResult, error) {
+	var result RegistrationVerificationCancelResult
+	request := RegistrationVerificationCancelRequest{AppID: appID}
+	if err := c.postSetupJSON(ctx, "/__hub/api/setup/register/verification/cancel", request, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (c *Client) PreviewRegistrationRepair(ctx context.Context, request RegistrationRepairPreviewRequest) (*RegistrationRepairPreviewResult, error) {
+	var result RegistrationRepairPreviewResult
+	if err := c.postSetupJSON(ctx, "/__hub/api/setup/register/repair/preview", request, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (c *Client) ApplyRegistrationRepair(ctx context.Context, request RegistrationRepairApplyRequest) (*RegistrationSetupResult, error) {
+	var result RegistrationSetupResult
+	if err := c.postSetupJSON(ctx, "/__hub/api/setup/register/repair/apply", request, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 func (c *Client) InspectManifest(ctx context.Context, request RegisterManifestRequest) (*ExistingManifestAnalysis, error) {
 	var result ExistingManifestAnalysis
 	if err := c.postSetupJSON(ctx, "/__hub/api/setup/inspect-manifest", request, &result); err != nil {

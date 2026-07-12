@@ -3,7 +3,7 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:chil
 import type { Registry } from "./registry.ts";
 import { DEFAULT_HOST, DEFAULT_PORT, DEFAULT_PORT_RANGE_END, DEFAULT_PORT_RANGE_START } from "./state.ts";
 import { ChildMcpSupervisor } from "./childMcp.ts";
-import { checkAppHealth, waitForHealthy } from "./health.ts";
+import { checkAppHealth, probeLocalHealthTarget, waitForHealthy } from "./health.ts";
 import { type DurableLogEvent, type LogStore, type LogStoreQuery, type LogStoreQueryResult } from "./logStore.ts";
 import { canBindPort, isPortOpen } from "./ports.ts";
 import { redactSecretLikeValues } from "./redaction.ts";
@@ -109,6 +109,16 @@ export interface ProcessManagerOptions {
 
 export interface LifecycleRunOptions {
   signal?: AbortSignal;
+  verification?: {
+    registrationPreviewId?: string;
+    policyDigest?: string;
+    startupBudgetMs: number;
+    probeTimeoutMs: number;
+    stopBudgetMs: number;
+    closureBudgetMs: number;
+    candidateHealthTargets: string[];
+    candidateHealthProbeLimit: number;
+  };
 }
 
 export class ProcessManager {
@@ -151,14 +161,15 @@ export class ProcessManager {
       return this.#view(entry, id);
     }
 
-    const promise = this.#startLocked(id, options.signal).finally(() => {
+    const promise = this.#startLocked(id, options).finally(() => {
       this.#mutations.delete(id);
     });
     this.#mutations.set(id, { action: "start", promise });
     return promise;
   }
 
-  async #startLocked(id: string, signal?: AbortSignal): Promise<RuntimeView> {
+  async #startLocked(id: string, options: LifecycleRunOptions = {}): Promise<RuntimeView> {
+    const signal = options.signal;
     throwIfLifecycleAborted(signal);
     const app = await this.registry.get(id);
     if (!app) {
@@ -189,6 +200,16 @@ export class ProcessManager {
     const entry = this.#entry("starting", "unknown", assignedPort, undefined, "prestarting");
     entry.cleanupStatus = "not_needed";
     const attempt = this.#startAttempt(app, assignedPort);
+    if (options.verification) {
+      attempt.verification = {
+        ...(options.verification.registrationPreviewId
+          ? { registrationPreviewId: options.verification.registrationPreviewId }
+          : {}),
+        ...(options.verification.policyDigest ? { policyDigest: options.verification.policyDigest } : {}),
+        ...(app.healthUrl ? { declaredTarget: app.healthUrl } : {}),
+        candidateTargetsChecked: []
+      };
+    }
     const launchPlan = compileLaunchPlan(app, { host: this.hubHost, port: assignedPort, hubPort: this.hubPort });
     attempt.launchPlan = {
       source: launchPlan.source,
@@ -306,7 +327,14 @@ export class ProcessManager {
 
     entry.phase = "waiting_for_health";
     const healthy = await waitForHealthyOrAbort(
-      () => waitForHealthy(app, assignedPort, this.hubHost, app.healthTimeoutMs ?? app.startTimeoutMs ?? 8000),
+      () =>
+        waitForHealthy(
+          app,
+          assignedPort,
+          this.hubHost,
+          options.verification?.startupBudgetMs ?? app.healthTimeoutMs ?? app.startTimeoutMs ?? 8000,
+          signal
+        ),
       signal
     );
     if (signal?.aborted) {
@@ -325,6 +353,35 @@ export class ProcessManager {
       entry.lastError = undefined;
       this.#finishAttempt(attempt, "succeeded", entry.phase);
     } else {
+      if (options.verification && child.exitCode === null) {
+        if (attempt.verification) {
+          attempt.verification.assignedPortOpen = await isPortOpen(
+            assignedPort,
+            this.hubHost,
+            options.verification.probeTimeoutMs
+          );
+        }
+        const targets = [...new Set(options.verification.candidateHealthTargets)]
+          .filter((target) => target !== app.healthUrl)
+          .slice(0, options.verification.candidateHealthProbeLimit);
+        for (const target of targets) {
+          attempt.verification?.candidateTargetsChecked.push(target);
+          const probe = await probeLocalHealthTarget(
+            target,
+            assignedPort,
+            this.hubHost,
+            options.verification.probeTimeoutMs,
+            signal
+          );
+          if (probe.ok) {
+            if (attempt.verification) {
+              attempt.verification.successfulTarget = target;
+              attempt.verification.statusCode = probe.statusCode;
+            }
+            break;
+          }
+        }
+      }
       entry.status = "errored";
       entry.health = "unhealthy";
       entry.phase = "errored";
@@ -348,14 +405,14 @@ export class ProcessManager {
       return this.#view(entry, id);
     }
 
-    const promise = this.#stopLocked(id, options.signal).finally(() => {
+    const promise = this.#stopLocked(id, options).finally(() => {
       this.#mutations.delete(id);
     });
     this.#mutations.set(id, { action: "stop", promise });
     return promise;
   }
 
-  async #stopLocked(id: string, signal?: AbortSignal): Promise<RuntimeView> {
+  async #stopLocked(id: string, options: LifecycleRunOptions = {}): Promise<RuntimeView> {
     const app = await this.registry.get(id);
     const entry = this.#runtime.get(id);
     if (!app) {
@@ -375,7 +432,7 @@ export class ProcessManager {
       stopped.cleanupStatus = app.stopCommand ? "pending" : "not_needed";
       this.#runtime.set(id, stopped);
       stopped.mcpDrain = await this.mcp.stopApp(id);
-      return this.#finalizeStop(app, stopped, attempt, assignedPort, signal);
+      return this.#finalizeStop(app, stopped, attempt, assignedPort, options);
     }
 
     const assignedPort = entry.assignedPort;
@@ -388,7 +445,7 @@ export class ProcessManager {
 
     await this.#terminateChild(entry.child);
     entry.stoppedAt = new Date().toISOString();
-    return this.#finalizeStop(app, entry, attempt, assignedPort, signal);
+    return this.#finalizeStop(app, entry, attempt, assignedPort, options);
   }
 
   async restart(id: string, options: LifecycleRunOptions = {}): Promise<RuntimeView> {
@@ -404,9 +461,9 @@ export class ProcessManager {
     }
 
     const promise = (async () => {
-      await this.#stopLocked(id, options.signal);
+      await this.#stopLocked(id, options);
       throwIfLifecycleAborted(options.signal);
-      return this.#startLocked(id, options.signal);
+      return this.#startLocked(id, options);
     })().finally(() => {
       this.#mutations.delete(id);
     });
@@ -562,15 +619,24 @@ export class ProcessManager {
     entry: RuntimeEntry,
     attempt: LifecycleAttempt,
     assignedPort?: number,
-    signal?: AbortSignal
+    options: LifecycleRunOptions = {}
   ): Promise<RuntimeView> {
+    const signal = options.signal;
     const env = this.#appEnv(app, assignedPort ?? app.upstreamPort ?? 0);
     let stopHook: LifecycleHookAttempt | undefined;
     let verifyHook: LifecycleHookAttempt | undefined;
     let failureReason: string | undefined;
 
     if (app.stopCommand) {
-      stopHook = await this.#runHook(app, entry, "stop", app.stopCommand, app.stopTimeoutMs ?? 60_000, env, signal);
+      stopHook = await this.#runHook(
+        app,
+        entry,
+        "stop",
+        app.stopCommand,
+        Math.min(app.stopTimeoutMs ?? 60_000, options.verification?.stopBudgetMs ?? Number.POSITIVE_INFINITY),
+        env,
+        signal
+      );
       attempt.hooks.push(stopHook);
       if (stopHook.status !== "succeeded") {
         entry.cleanupStatus = stopHook.timedOut ? "timeout" : "failed";
@@ -588,7 +654,7 @@ export class ProcessManager {
         entry,
         "verifyStopped",
         app.verifyStoppedCommand,
-        app.stopTimeoutMs ?? 60_000,
+        Math.min(app.stopTimeoutMs ?? 60_000, options.verification?.stopBudgetMs ?? Number.POSITIVE_INFINITY),
         env,
         signal
       );
@@ -602,7 +668,7 @@ export class ProcessManager {
 
     const checkedAt = new Date().toISOString();
     const shouldCheckPort = Boolean(assignedPort && this.#ownsBackendPort(app, entry));
-    const portCloseTimeoutMs = signal?.aborted ? 500 : 3000;
+    const portCloseTimeoutMs = signal?.aborted ? 500 : (options.verification?.closureBudgetMs ?? 3000);
     let portStillOpen =
       shouldCheckPort && assignedPort ? !(await this.#waitForPortClosed(assignedPort, portCloseTimeoutMs)) : false;
     if (!failureReason && portStillOpen && assignedPort && process.platform === "win32" && !app.stopCommand) {
@@ -660,14 +726,26 @@ export class ProcessManager {
     child: ChildProcessWithoutNullStreams,
     options: { shutdown?: boolean } = {}
   ): Promise<void> {
+    const assignedPort = entry.assignedPort;
     entry.mcpDrain = await this.mcp.stopApp(app.id);
     await this.#terminateChild(child);
     entry.pid = undefined;
     entry.stoppedAt = new Date().toISOString();
     if (!app.stopCommand) {
       entry.cleanupStatus = "not_needed";
-      if (entry.assignedPort && (await this.#waitForPortClosed(entry.assignedPort, 3000))) {
-        this.#releasePortReservation(app.id, entry.assignedPort);
+      const portClosed = Boolean(assignedPort && (await this.#waitForPortClosed(assignedPort, 3000)));
+      entry.stopVerification = {
+        attempted: true,
+        checkedAt: new Date().toISOString(),
+        ...(assignedPort ? { backendPort: assignedPort } : {}),
+        backendPortOpen: assignedPort ? !portClosed : null,
+        portClosureVerified: portClosed,
+        ok: !assignedPort || portClosed,
+        cleanupStatus: entry.cleanupStatus,
+        ...(entry.mcpDrain?.length ? { mcpDrain: entry.mcpDrain } : {})
+      };
+      if (assignedPort && portClosed) {
+        this.#releasePortReservation(app.id, assignedPort);
         entry.assignedPort = undefined;
       }
       return;
@@ -689,12 +767,24 @@ export class ProcessManager {
       return;
     }
 
-    if (entry.assignedPort && (await this.#waitForPortClosed(entry.assignedPort, 3000))) {
-      this.#releasePortReservation(app.id, entry.assignedPort);
+    const portClosed = Boolean(assignedPort && (await this.#waitForPortClosed(assignedPort, 3000)));
+    entry.stopVerification = {
+      attempted: true,
+      checkedAt: new Date().toISOString(),
+      ...(assignedPort ? { backendPort: assignedPort } : {}),
+      backendPortOpen: assignedPort ? !portClosed : null,
+      portClosureVerified: portClosed,
+      ok: hook.status === "succeeded" && (!assignedPort || portClosed),
+      cleanupStatus: entry.cleanupStatus,
+      stopCommand: hook,
+      ...(entry.mcpDrain?.length ? { mcpDrain: entry.mcpDrain } : {})
+    };
+    if (assignedPort && portClosed) {
+      this.#releasePortReservation(app.id, assignedPort);
       entry.assignedPort = undefined;
-    } else if (entry.assignedPort) {
+    } else if (assignedPort) {
       entry.cleanupStatus = "verification_failed";
-      entry.lastError = `${entry.lastError} Cleanup ran, but backend port ${entry.assignedPort} is still open.`;
+      entry.lastError = `${entry.lastError} Cleanup ran, but backend port ${assignedPort} is still open.`;
     }
   }
 

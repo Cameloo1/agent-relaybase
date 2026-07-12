@@ -78,6 +78,7 @@ interface CliOptions {
   yes: boolean;
   dryRun: boolean;
   noStart: boolean;
+  noVerify: boolean;
   noBrowser: boolean;
   repair: boolean;
   mcpInstall: boolean;
@@ -826,7 +827,9 @@ function printAgentApiResponse(response: Record<string, unknown>, options: CliOp
 
 async function register(manifestPath: string | undefined, options: CliOptions): Promise<void> {
   if (!manifestPath) {
-    throw new Error("Usage: relaybase register <project-folder|relaybase.app.json> [--plan|--yes] [--json]");
+    throw new Error(
+      "Usage: relaybase register <project-folder|relaybase.app.json> [--plan|--yes] [--no-verify] [--json]"
+    );
   }
   const daemon = await ensureDaemon(options, options.daemonStartPolicy === "auto");
   if (!daemon.reachable) {
@@ -837,7 +840,7 @@ async function register(manifestPath: string | undefined, options: CliOptions): 
     options,
     "POST",
     "/__hub/api/setup/register/preview",
-    { path: manifestPath, mode, cwd: options.cwd },
+    { path: manifestPath, mode, cwd: options.cwd, verificationMode: options.noVerify ? "none" : "quick" },
     undefined,
     STATE_API_TIMEOUT_MS
   );
@@ -851,14 +854,20 @@ async function register(manifestPath: string | undefined, options: CliOptions): 
   } else {
     printRegistrationPreview(preview);
   }
-  if (preview.status === "registered" || options.plan || options.dryRun) {
+  if (String(preview.status).startsWith("registered_") || options.plan || options.dryRun) {
     return;
   }
   if (preview.approval && (preview.approval as { required?: boolean }).required !== true) {
     throw new Error(String(preview.message ?? "Registration cannot continue from this state."));
   }
   const confirmed =
-    options.yes || (process.stdin.isTTY && (await askConfirmation("Apply this exact registration preview?")));
+    options.yes ||
+    (process.stdin.isTTY &&
+      (await askConfirmation(
+        options.noVerify
+          ? "Register without lifecycle verification?"
+          : "Register, start once, check health, stop, and verify backend-port closure?"
+      )));
   if (!confirmed) {
     throw new Error(
       "REGISTER_CONFIRMATION_REQUIRED: no files or registry state were changed. Re-run with --yes after reviewing --plan."
@@ -885,8 +894,7 @@ async function register(manifestPath: string | undefined, options: CliOptions): 
     console.log(JSON.stringify(applied, null, 2));
     return;
   }
-  const app = applied.app as { id?: string; name?: string } | undefined;
-  console.log(`Registered ${app?.id ?? "app"}${app?.name ? ` (${app.name})` : ""}. App not started.`);
+  printRegistrationResult(applied);
 }
 
 function printRegistrationPreview(preview: Record<string, unknown>): void {
@@ -902,7 +910,72 @@ function printRegistrationPreview(preview: Record<string, unknown>): void {
     }
   }
   console.log(`Manifest: ${String(preview.manifestPath ?? "unknown")}`);
-  console.log("No app will be started by registration.");
+  const verification = preview.verificationIntent as
+    | {
+        mode?: string;
+        willStart?: boolean;
+        willStop?: boolean;
+        expectedMaximumMs?: number;
+        healthCandidates?: string[];
+      }
+    | undefined;
+  if (verification?.mode === "quick") {
+    console.log("Verification: one bounded start, health check, stop, and backend-port closure check.");
+    if (verification.healthCandidates?.length) {
+      console.log(`Health targets: ${verification.healthCandidates.join(", ")}`);
+    }
+    console.log(`Expected maximum: ${verification.expectedMaximumMs ?? "unknown"}ms. No app will be left running.`);
+  } else {
+    console.log("Verification: disabled. The app will be registered without a launch-readiness claim.");
+  }
+}
+
+function printRegistrationResult(applied: Record<string, unknown>): void {
+  const app = applied.app as { id?: string; name?: string } | undefined;
+  const label = `${app?.id ?? "app"}${app?.name ? ` (${app.name})` : ""}`;
+  const verification = applied.verification as
+    | {
+        status?: string;
+        assignedPort?: number;
+        health?: { successfulTarget?: string; statusCode?: number };
+        stop?: { portClosureVerified?: boolean; backendPortOpen?: boolean | null };
+        failure?: {
+          message?: string;
+          recommendedAction?: string;
+          processRunning?: boolean;
+          backendPortOpen?: boolean | null;
+        };
+        repairs?: Array<{ label?: string }>;
+      }
+    | undefined;
+  if (verification?.status === "verified") {
+    console.log(`Registered and verified ${label}.`);
+    console.log(`Started on port ${verification.assignedPort ?? "unknown"}.`);
+    console.log(
+      `Health ${verification.health?.successfulTarget ?? "target"} returned ${verification.health?.statusCode ?? "2xx"}.`
+    );
+    console.log("Stopped successfully; backend port closure verified.");
+    return;
+  }
+  if (verification?.status === "not_requested") {
+    console.log(`Registered ${label} without launch verification.`);
+    return;
+  }
+  console.log(`Registered ${label}, but launch verification did not pass.`);
+  if (verification?.failure) {
+    console.log(verification.failure.message ?? "Verification failed.");
+    console.log(`Process running: ${Boolean(verification.failure.processRunning)}.`);
+    console.log(`Backend port open: ${String(verification.failure.backendPortOpen)}.`);
+    console.log(`Next action: ${verification.failure.recommendedAction ?? "Inspect logs and preview a repair."}`);
+  }
+  if (verification?.repairs?.length) {
+    console.log(
+      `Repair previews: ${verification.repairs
+        .map((repair) => repair.label)
+        .filter(Boolean)
+        .join("; ")}`
+    );
+  }
 }
 
 async function listApps(options: CliOptions): Promise<void> {
@@ -1081,6 +1154,7 @@ function parseOptions(args: string[]): CliOptions {
     yes: false,
     dryRun: false,
     noStart: false,
+    noVerify: false,
     noBrowser: false,
     repair: false,
     mcpInstall: false,
@@ -1146,6 +1220,8 @@ function parseOptions(args: string[]): CliOptions {
       options.dryRun = true;
     } else if (arg === "--no-start") {
       options.noStart = true;
+    } else if (arg === "--no-verify") {
+      options.noVerify = true;
     } else if (arg === "--no-browser") {
       options.noBrowser = true;
     } else if (arg === "--repair") {
@@ -1532,7 +1608,7 @@ Advanced:
   repair-prefix                 Diagnose or explicitly repair the source-checkout command prefix
   serve                         Start the localhost hub daemon
   mcp                           Run Relaybase as a stdio MCP server
-  register <manifest>           Register or update an app manifest
+  register <folder|manifest>    Preview, register, and run one bounded launch proof
   stop <app-id>                  Stop an app through the daemon
   restart <app-id>               Restart an app through the daemon
   status                        Alias for list
@@ -1563,6 +1639,11 @@ Configure options:
   --service <name>               Docker Compose app-facing service for the setup flow
   --target-port <number>         Docker target container port for the selected service
   --health-path <path>           Health route for readiness checks, for example /api/health
+
+Register options:
+  --plan                         Print the exact registration and verification preview only
+  --yes                          Approve the exact preview without an interactive prompt
+  --no-verify                    Register without start/health/stop verification
   --start-timeout-ms <number>    Docker cold-start/build timeout budget
   --health-timeout-ms <number>   Docker health wait timeout budget
   --stop-timeout-ms <number>     Docker stop/cleanup timeout budget

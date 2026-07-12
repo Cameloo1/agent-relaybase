@@ -1,5 +1,11 @@
 import type { AppManifestInput, AppRecord, AppComponentRole } from "./types.ts";
 import type {
+  RegisteredVerificationState,
+  RegistrationVerificationMode,
+  RegistrationVerificationPolicy,
+  RegistrationVerificationResult
+} from "./registrationVerificationTypes.ts";
+import type {
   HealthCandidate,
   PortBindingStrategy,
   RepairCandidate,
@@ -256,6 +262,7 @@ export type RegistrationSetupState =
   | "drifted"
   | "registering"
   | "registered"
+  | RegisteredVerificationState
   | "failed"
   | "cancelled";
 
@@ -269,6 +276,9 @@ export interface RegistrationPreviewRequest {
   commandHint?: string;
   portStrategyHint?: PortStrategy;
   componentMetadata?: ComponentSetupMetadata;
+  verificationMode: RegistrationVerificationMode;
+  verificationPolicy?: Partial<Omit<RegistrationVerificationPolicy, "mode">>;
+  selectedRepairId?: string;
 }
 
 export interface RegistrationSetupResult {
@@ -284,6 +294,14 @@ export interface RegistrationSetupResult {
   selectedPlan?: SetupPlan;
   fileWritePlan?: FileWritePlan;
   launchPlan?: unknown;
+  verificationIntent: {
+    mode: RegistrationVerificationMode;
+    willStart: boolean;
+    willStop: boolean;
+    expectedMaximumMs: number;
+    healthCandidates: string[];
+  };
+  verification?: RegistrationVerificationResult;
   questions: SetupQuestion[];
   risks: SetupApprovalRisk[];
   approval: { required: boolean; previewId?: string };
@@ -296,6 +314,29 @@ export interface RegistrationSetupResult {
 }
 
 export interface RegistrationApplyRequest {
+  previewId: string;
+  confirm?: boolean;
+  confirmation?: { confirmed?: boolean; reason?: string };
+  selectedRepairId?: string;
+}
+
+export interface RegistrationRepairPreviewRequest {
+  appId: string;
+  repairId: string;
+}
+
+export interface RegistrationRepairPreviewResult {
+  previewId: string;
+  appId: string;
+  repairId: string;
+  repair: import("./registrationVerificationTypes.ts").RegistrationRepairOption;
+  fileWritePlan: FileWritePlan;
+  approval: { required: true; previewId: string };
+  verificationIntent: RegistrationSetupResult["verificationIntent"];
+  actions: string[];
+}
+
+export interface RegistrationRepairApplyRequest {
   previewId: string;
   confirm?: boolean;
   confirmation?: { confirmed?: boolean; reason?: string };

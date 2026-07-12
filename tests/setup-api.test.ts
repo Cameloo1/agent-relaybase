@@ -68,7 +68,7 @@ test("setup detect, generic plans, and preview are read-only", async () => {
   }
 });
 
-test("one-file folder registration previews, binds drift, registers, and never starts", async () => {
+test("one-file folder registration can explicitly register without lifecycle verification", async () => {
   const project = await tempProject("relaybase-register-one-file-");
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-register-one-file-state-"));
   await fs.writeFile(
@@ -82,7 +82,8 @@ test("one-file folder registration previews, binds drift, registers, and never s
     const port = hub.address().port;
     const preview = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
       path: project,
-      mode: "folder"
+      mode: "folder",
+      verificationMode: "none"
     });
     assert.equal(preview.statusCode, 200);
     assert.equal(preview.json.setup.status, "approval_required");
@@ -109,13 +110,562 @@ test("one-file folder registration previews, binds drift, registers, and never s
       { "x-relaybase-token": hub.runtime.token }
     );
     assert.equal(applied.statusCode, 202, applied.body);
-    assert.equal(applied.json.setup.status, "registered");
+    assert.equal(applied.json.setup.status, "registered_unverified");
+    assert.equal(applied.json.setup.verification.status, "not_requested");
     assert.equal(applied.json.setup.started, false);
     const status = (await hub.runtime.processes.listStatuses()).find((item) => item.id === applied.json.setup.app.id);
     assert.equal(status?.runtime.status, "stopped");
     const manifest = JSON.parse(await fs.readFile(path.join(project, "relaybase.app.json"), "utf8"));
     assert.equal(manifest.command, undefined);
     assert.equal(manifest.launch.portBinding, "arguments");
+  } finally {
+    await hub.close();
+  }
+});
+
+test("quick registration visibly proves start, health, stop, and backend port closure", async () => {
+  const project = await tempProject("relaybase-register-quick-proof-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-register-quick-proof-state-"));
+  const serverPath = path.join(project, "server.cjs");
+  await fs.writeFile(
+    serverPath,
+    `const http=require("node:http");const port=Number(process.argv[2]);http.createServer((q,r)=>{r.statusCode=q.url==="/api/ping"?200:404;r.end("ok")}).listen(port,"127.0.0.1");`,
+    "utf8"
+  );
+  const manifestPath = path.join(project, "relaybase.app.json");
+  await fs.writeFile(
+    manifestPath,
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "quick-proof",
+        name: "Quick Proof",
+        cwd: ".",
+        protocol: "http",
+        healthUrl: "/api/ping",
+        launch: {
+          executable: process.execPath,
+          args: [serverPath, "{relaybase.port}"],
+          environment: {},
+          portBinding: "arguments"
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18400, portRangeEnd: 18450 });
+  try {
+    await hub.listen();
+    const port = hub.address().port;
+    const preview = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
+      path: manifestPath,
+      mode: "manifest",
+      verificationMode: "quick"
+    });
+    assert.equal(preview.statusCode, 200, preview.body);
+    assert.equal(preview.json.setup.verificationIntent.willStart, true);
+    assert.equal(preview.json.setup.verificationIntent.willStop, true);
+    assert.match(preview.json.setup.message, /briefly start/i);
+
+    const applied = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/setup/register/apply",
+      { previewId: preview.json.setup.previewId, confirm: true, confirmation: { confirmed: true } },
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(applied.statusCode, 202, applied.body);
+    assert.equal(applied.json.setup.status, "registered_verified", applied.body);
+    assert.equal(applied.json.setup.verification.status, "verified");
+    assert.equal(applied.json.setup.verification.health.successfulTarget, "/api/ping");
+    assert.equal(applied.json.setup.verification.stop.portClosureVerified, true);
+    assert.equal(applied.json.setup.started, false);
+    const status = (await hub.runtime.processes.listStatuses()).find((item) => item.id === "quick-proof");
+    assert.equal(status?.runtime.status, "stopped");
+    const firstAttemptID = status?.runtime.lastStartAttempt?.id;
+    assert.equal(
+      hub.runtime.operations
+        .list({ targetId: "quick-proof" })
+        .some(
+          (operation) => operation.operationType === "registration_verification" && operation.status === "succeeded"
+        ),
+      true
+    );
+
+    const repeatPreview = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
+      path: manifestPath,
+      mode: "manifest",
+      verificationMode: "quick"
+    });
+    const repeated = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/setup/register/apply",
+      { previewId: repeatPreview.json.setup.previewId, confirm: true },
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(repeated.json.setup.verification.status, "verified");
+    assert.equal(repeated.json.setup.verification.reused, true);
+    assert.equal(repeated.json.setup.verification.attempted, false);
+    const repeatedStatus = (await hub.runtime.processes.listStatuses()).find((item) => item.id === "quick-proof");
+    assert.equal(repeatedStatus?.runtime.lastStartAttempt?.id, firstAttemptID);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("computer-stats PowerShell folder flow creates, verifies /api/ping, stops, and closes", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("Windows PowerShell lifecycle fixture");
+    return;
+  }
+  const project = await tempProject("relaybase-computer-stats-proof-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-computer-stats-proof-state-"));
+  await fs.writeFile(
+    path.join(project, "Start-Dashboard.ps1"),
+    `param([string]$HostName, [int]$Port)
+$address = [Net.IPAddress]::Parse($HostName)
+$listener = New-Object Net.Sockets.TcpListener -ArgumentList $address, $Port
+$listener.Start()
+try {
+  while ($true) {
+    $client = $listener.AcceptTcpClient()
+    try {
+      $stream = $client.GetStream()
+      $reader = New-Object IO.StreamReader -ArgumentList $stream
+      $request = $reader.ReadLine()
+      while (($line = $reader.ReadLine()) -ne $null -and $line -ne "") {}
+      if ($request -match "^GET /api/ping ") { $status = "200 OK" } else { $status = "404 Not Found" }
+      $crlf = [char]13 + [char]10
+      $response = "HTTP/1.1 $status" + $crlf + "Content-Length: 2" + $crlf + "Connection: close" + $crlf + $crlf + "ok"
+      $bytes = [Text.Encoding]::ASCII.GetBytes($response)
+      $stream.Write($bytes, 0, $bytes.Length)
+    } finally {
+      $client.Close()
+    }
+  }
+} finally { $listener.Stop() }
+`,
+    "utf8"
+  );
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18530, portRangeEnd: 18550 });
+  try {
+    await hub.listen();
+    const port = hub.address().port;
+    const preview = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
+      path: project,
+      mode: "folder",
+      verificationMode: "quick"
+    });
+    assert.equal(preview.json.setup.selectedPlan.id, "structured-argument-launch");
+    assert.equal(preview.json.setup.app.healthUrl, "/api/ping");
+    const applied = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/setup/register/apply",
+      { previewId: preview.json.setup.previewId, confirm: true },
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(applied.statusCode, 202, applied.body);
+    assert.equal(applied.json.setup.status, "registered_verified", applied.body);
+    assert.equal(applied.json.setup.verification.health.successfulTarget, "/api/ping");
+    assert.equal(applied.json.setup.verification.stop.portClosureVerified, true);
+    assert.equal(
+      (await hub.runtime.processes.listStatuses()).find((item) => item.id === applied.json.setup.app.id)?.runtime
+        .status,
+      "stopped"
+    );
+    assert.equal(await exists(path.join(project, "relaybase.app.json")), true);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("wrong health route returns a preview-only repair after bounded localhost diagnosis", async () => {
+  const project = await tempProject("relaybase-register-health-repair-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-register-health-repair-state-"));
+  const serverPath = path.join(project, "server.cjs");
+  await fs.writeFile(
+    serverPath,
+    `const http=require("node:http");http.createServer((q,r)=>{r.statusCode=q.url==="/api/ping"?200:404;r.end("ok")}).listen(Number(process.argv[2]),"127.0.0.1");`,
+    "utf8"
+  );
+  const manifestPath = path.join(project, "relaybase.app.json");
+  await fs.writeFile(
+    manifestPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      id: "health-repair",
+      name: "Health Repair",
+      cwd: ".",
+      protocol: "http",
+      healthUrl: "/wrong",
+      launch: {
+        executable: process.execPath,
+        args: [serverPath, "{relaybase.port}"],
+        environment: {},
+        portBinding: "arguments"
+      }
+    }),
+    "utf8"
+  );
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18460, portRangeEnd: 18490 });
+  try {
+    await hub.listen();
+    const port = hub.address().port;
+    const preview = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
+      path: manifestPath,
+      mode: "manifest",
+      verificationMode: "quick",
+      verificationPolicy: { startupBudgetMs: 500, probeTimeoutMs: 200 }
+    });
+    const applied = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/setup/register/apply",
+      { previewId: preview.json.setup.previewId, confirm: true },
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(applied.statusCode, 202, applied.body);
+    assert.equal(applied.json.setup.status, "registered_verification_failed");
+    assert.equal(applied.json.setup.verification.failure.code, "REGISTER_VERIFY_HEALTH_ROUTE");
+    assert.equal(applied.json.setup.verification.health.successfulTarget, "/api/ping");
+    assert.deepEqual(applied.json.setup.verification.repairs[0].patch, { healthUrl: "/api/ping" });
+    assert.equal(applied.json.setup.verification.repairs[0].previewOnly, true);
+    assert.equal(
+      (await hub.runtime.processes.listStatuses()).find((item) => item.id === "health-repair")?.runtime.status,
+      "stopped"
+    );
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    assert.equal(manifest.healthUrl, "/wrong");
+
+    const repairPreview = await apiRequest(port, "POST", "/__hub/api/setup/register/repair/preview", {
+      appId: "health-repair",
+      repairId: applied.json.setup.verification.repairs[0].id
+    });
+    assert.equal(repairPreview.statusCode, 200, repairPreview.body);
+    assert.equal(repairPreview.json.setup.approval.required, true);
+    assert.equal(JSON.parse(await fs.readFile(manifestPath, "utf8")).healthUrl, "/wrong");
+
+    const attemptsBeforeStale = hub.runtime.registrationVerification.attempts("health-repair").length;
+    await fs.writeFile(
+      manifestPath,
+      JSON.stringify(JSON.parse(await fs.readFile(manifestPath, "utf8")), null, 2),
+      "utf8"
+    );
+    const staleRepair = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/setup/register/repair/apply",
+      { previewId: repairPreview.json.setup.previewId, confirm: true },
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(staleRepair.statusCode, 409);
+    assert.equal(staleRepair.json.code, "REGISTER_REPAIR_PREVIEW_STALE");
+    assert.equal(hub.runtime.registrationVerification.attempts("health-repair").length, attemptsBeforeStale);
+    assert.equal(JSON.parse(await fs.readFile(manifestPath, "utf8")).healthUrl, "/wrong");
+
+    const currentRepairPreview = await apiRequest(port, "POST", "/__hub/api/setup/register/repair/preview", {
+      appId: "health-repair",
+      repairId: applied.json.setup.verification.repairs[0].id
+    });
+
+    const repaired = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/setup/register/repair/apply",
+      { previewId: currentRepairPreview.json.setup.previewId, confirm: true },
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(repaired.statusCode, 202, repaired.body);
+    assert.equal(repaired.json.setup.status, "registered_verified");
+    assert.equal(repaired.json.setup.verification.status, "verified");
+    assert.equal(JSON.parse(await fs.readFile(manifestPath, "utf8")).healthUrl, "/api/ping");
+    assert.equal(
+      (await hub.runtime.processes.listStatuses()).find((item) => item.id === "health-repair")?.runtime.status,
+      "stopped"
+    );
+  } finally {
+    await hub.close();
+  }
+});
+
+test("verification cleanup failure blocks retries and reports the remaining port risk", async () => {
+  const project = await tempProject("relaybase-register-cleanup-failure-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-register-cleanup-failure-state-"));
+  const serverPath = path.join(project, "server.cjs");
+  await fs.writeFile(
+    serverPath,
+    `require("node:http").createServer((_q,r)=>r.end("ok")).listen(Number(process.argv[2]),"127.0.0.1");`,
+    "utf8"
+  );
+  const manifestPath = path.join(project, "relaybase.app.json");
+  await fs.writeFile(
+    manifestPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      id: "cleanup-failure",
+      name: "Cleanup Failure",
+      cwd: ".",
+      protocol: "http",
+      healthUrl: "/",
+      launch: { executable: process.execPath, args: [serverPath, "{relaybase.port}"], portBinding: "arguments" }
+    }),
+    "utf8"
+  );
+  const hub = await createRelaybaseServer({
+    port: 0,
+    stateDir,
+    portRangeStart: 18500,
+    portRangeEnd: 18520,
+    stopPortOpenProbe: async () => true
+  });
+  try {
+    await hub.listen();
+    const port = hub.address().port;
+    const preview = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
+      path: manifestPath,
+      mode: "manifest",
+      verificationMode: "quick",
+      verificationPolicy: { closureBudgetMs: 100 }
+    });
+    const applied = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/setup/register/apply",
+      { previewId: preview.json.setup.previewId, confirm: true },
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(applied.json.setup.status, "registered_cleanup_failed");
+    assert.equal(applied.json.setup.retrySafe, false);
+    assert.equal(applied.json.setup.verification.failure.code, "REGISTER_VERIFY_PORT_STILL_OPEN");
+    assert.deepEqual(applied.json.setup.actions, ["View logs", "Retry stop", "Inspect cleanup"]);
+    const operation = hub.runtime.operations
+      .list({ targetId: "cleanup-failure" })
+      .find((candidate) => candidate.operationType === "registration_verification");
+    assert.equal(operation?.canRetry, false);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("registration verification classifies command, dependency, port, exit, timeout, and stop boundaries", async (t) => {
+  const scenarios: Array<{
+    name: string;
+    id: string;
+    executable?: string;
+    script: string;
+    expectedCode: string;
+    launch?: Record<string, unknown>;
+    upstreamPort?: number;
+    stopCommand?: string;
+  }> = [
+    {
+      name: "command not found",
+      id: "verify-command-missing",
+      executable: "relaybase-definitely-missing-runtime",
+      script: "",
+      expectedCode: "REGISTER_VERIFY_COMMAND_NOT_FOUND"
+    },
+    {
+      name: "dependency missing",
+      id: "verify-dependency-missing",
+      script: `require("relaybase-definitely-missing-package");`,
+      expectedCode: "REGISTER_VERIFY_DEPENDENCY_MISSING"
+    },
+    {
+      name: "managed port ignored",
+      id: "verify-port-ignored",
+      script: `setInterval(()=>{},1000);`,
+      expectedCode: "REGISTER_VERIFY_PORT_IGNORED"
+    },
+    {
+      name: "early exit",
+      id: "verify-early-exit",
+      script: `process.exit(2);`,
+      expectedCode: "REGISTER_VERIFY_EARLY_EXIT"
+    },
+    {
+      name: "external readiness timeout",
+      id: "verify-timeout",
+      script: "",
+      expectedCode: "REGISTER_VERIFY_TIMEOUT",
+      upstreamPort: 18991,
+      launch: { executable: "external", args: [], environment: {}, portBinding: "external" }
+    },
+    {
+      name: "stop hook failure",
+      id: "verify-stop-failure",
+      script: `require("node:http").createServer((_q,r)=>r.end("ok")).listen(Number(process.argv[2]),"127.0.0.1");`,
+      expectedCode: "REGISTER_VERIFY_STOP_FAILED",
+      stopCommand: `"${process.execPath}" -e "process.exit(3)"`
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const project = await tempProject(`relaybase-${scenario.id}-`);
+      const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), `relaybase-${scenario.id}-state-`));
+      const scriptPath = path.join(project, "server.cjs");
+      await fs.writeFile(scriptPath, scenario.script, "utf8");
+      const manifestPath = path.join(project, "relaybase.app.json");
+      const launch = scenario.launch ?? {
+        executable: scenario.executable ?? process.execPath,
+        args: scenario.executable ? [] : [scriptPath, "{relaybase.port}"],
+        environment: {},
+        portBinding: "arguments"
+      };
+      await fs.writeFile(
+        manifestPath,
+        JSON.stringify({
+          schemaVersion: 1,
+          id: scenario.id,
+          name: scenario.name,
+          cwd: ".",
+          protocol: "http",
+          healthUrl: "/",
+          launch,
+          ...(scenario.upstreamPort ? { upstreamPort: scenario.upstreamPort } : {}),
+          ...(scenario.stopCommand ? { stopCommand: scenario.stopCommand } : {})
+        }),
+        "utf8"
+      );
+      const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18600, portRangeEnd: 18700 });
+      try {
+        await hub.listen();
+        const port = hub.address().port;
+        const preview = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
+          path: manifestPath,
+          mode: "manifest",
+          verificationMode: "quick",
+          verificationPolicy: {
+            startupBudgetMs: 1500,
+            probeTimeoutMs: 100,
+            stopBudgetMs: 300,
+            closureBudgetMs: 200
+          }
+        });
+        const applied = await apiRequest(
+          port,
+          "POST",
+          "/__hub/api/setup/register/apply",
+          { previewId: preview.json.setup.previewId, confirm: true },
+          { "x-relaybase-token": hub.runtime.token }
+        );
+        assert.equal(applied.statusCode, 202, applied.body);
+        assert.equal(applied.json.setup.verification.failure.code, scenario.expectedCode, applied.body);
+        assert.equal(typeof applied.json.setup.verification.failure.recommendedAction, "string");
+        assert.equal(applied.json.setup.started, false);
+      } finally {
+        await hub.close();
+      }
+    });
+  }
+});
+
+test("fixed-port conflict fails in preflight without starting a process", async () => {
+  const occupied = http.createServer((_request, response) => response.end("occupied"));
+  await new Promise<void>((resolve) => occupied.listen(0, "127.0.0.1", resolve));
+  const address = occupied.address();
+  assert.ok(address && typeof address === "object");
+  const occupiedPort = address.port;
+  const project = await tempProject("relaybase-register-fixed-conflict-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-register-fixed-conflict-state-"));
+  const scriptPath = path.join(project, "server.cjs");
+  await fs.writeFile(scriptPath, "setInterval(()=>{},1000);", "utf8");
+  const manifestPath = path.join(project, "relaybase.app.json");
+  await fs.writeFile(
+    manifestPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      id: "fixed-conflict",
+      name: "Fixed Conflict",
+      cwd: ".",
+      protocol: "http",
+      healthUrl: "/",
+      upstreamPort: occupiedPort,
+      launch: { executable: process.execPath, args: [scriptPath], environment: {}, portBinding: "fixed" }
+    }),
+    "utf8"
+  );
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
+  try {
+    await hub.listen();
+    const port = hub.address().port;
+    const preview = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
+      path: manifestPath,
+      mode: "manifest",
+      verificationMode: "quick"
+    });
+    const applied = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/setup/register/apply",
+      { previewId: preview.json.setup.previewId, confirm: true },
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(applied.json.setup.verification.status, "preflight_failed");
+    assert.equal(applied.json.setup.verification.failure.code, "REGISTER_VERIFY_PORT_CONFLICT");
+    assert.equal(applied.json.setup.verification.startedAt, undefined);
+  } finally {
+    await hub.close();
+    await new Promise<void>((resolve) => occupied.close(() => resolve()));
+  }
+});
+
+test("active registration verification is cancellable and reaches a stopped terminal result", async () => {
+  const project = await tempProject("relaybase-register-cancel-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-register-cancel-state-"));
+  const scriptPath = path.join(project, "server.cjs");
+  await fs.writeFile(scriptPath, "setInterval(()=>{},1000);", "utf8");
+  const manifestPath = path.join(project, "relaybase.app.json");
+  await fs.writeFile(
+    manifestPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      id: "cancel-proof",
+      name: "Cancel Proof",
+      cwd: ".",
+      protocol: "http",
+      healthUrl: "/",
+      launch: { executable: process.execPath, args: [scriptPath, "{relaybase.port}"], portBinding: "arguments" }
+    }),
+    "utf8"
+  );
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18800, portRangeEnd: 18820 });
+  try {
+    await hub.listen();
+    const port = hub.address().port;
+    const preview = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
+      path: manifestPath,
+      mode: "manifest",
+      verificationMode: "quick"
+    });
+    const applyPromise = apiRequest(
+      port,
+      "POST",
+      "/__hub/api/setup/register/apply",
+      { previewId: preview.json.setup.previewId, confirm: true },
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const cancelled = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/setup/register/verification/cancel",
+      { appId: "cancel-proof" },
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(cancelled.statusCode, 202, cancelled.body);
+    assert.equal(cancelled.json.setup.cancelled, true);
+    const applied = await applyPromise;
+    assert.equal(applied.statusCode, 202, applied.body);
+    assert.equal(applied.json.setup.registered, true);
+    assert.notEqual(applied.json.setup.status, "registered_verified");
+    const status = (await hub.runtime.processes.listStatuses()).find((item) => item.id === "cancel-proof");
+    assert.notEqual(status?.runtime.status, "running");
   } finally {
     await hub.close();
   }
@@ -129,9 +679,24 @@ test("explicit missing manifest is strict and stale registration preview perform
   try {
     await hub.listen();
     const port = hub.address().port;
+    const ambiguous = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
+      path: project,
+      mode: "folder"
+    });
+    assert.equal(ambiguous.statusCode, 400);
+    assert.equal(ambiguous.json.code, "REGISTER_VERIFICATION_MODE_INVALID");
+    const overBudget = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
+      path: project,
+      mode: "folder",
+      verificationMode: "quick",
+      verificationPolicy: { startupBudgetMs: 30_000, stopBudgetMs: 30_000 }
+    });
+    assert.equal(overBudget.statusCode, 400);
+    assert.equal(overBudget.json.code, "REGISTER_VERIFICATION_POLICY_INVALID");
     const missing = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
       path: manifestPath,
-      mode: "manifest"
+      mode: "manifest",
+      verificationMode: "quick"
     });
     assert.equal(missing.json.setup.code, "REGISTER_MANIFEST_NOT_FOUND");
     assert.equal(missing.json.setup.approval.required, false);
@@ -143,7 +708,8 @@ test("explicit missing manifest is strict and stale registration preview perform
     );
     const preview = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
       path: manifestPath,
-      mode: "manifest"
+      mode: "manifest",
+      verificationMode: "none"
     });
     await fs.writeFile(
       manifestPath,

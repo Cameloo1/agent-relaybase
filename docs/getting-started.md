@@ -31,12 +31,20 @@ relaybase register . --plan
 relaybase register .
 ```
 
-Relaybase locates `relaybase.app.json`, validates and compiles its launch behavior, then asks before updating registry state. When the manifest is missing, folder registration detects supported runtimes and previews the proposed manifest. It never writes or starts the app before approval.
+Relaybase locates `relaybase.app.json`, validates and compiles its launch behavior, then previews the exact registry/file changes and lifecycle proof. When the manifest is missing, folder registration detects supported runtimes and previews the proposed manifest. It never writes or starts the app before approval.
+
+After confirmation, quick verification performs one bounded start, health, stop, and backend-port closure check. Success means the app was healthy and is now stopped with its managed port closed. Starting the app for normal use remains a separate action.
 
 Use a dry run when you only want the plan:
 
 ```bash
 relaybase register . --plan
+```
+
+To register without a launch-readiness claim:
+
+```bash
+relaybase register . --no-verify
 ```
 
 Use `relaybase configure` when you explicitly want the broader setup/repair wizard. In the TUI, `/add <folder>` is the simplest discovery flow and `/register <folder>` is the one-command registration coordinator.
@@ -47,7 +55,7 @@ Use `relaybase configure` when you explicitly want the broader setup/repair wiza
 relaybase start <app-id>
 ```
 
-Registration and start remain separate approvals. `relaybase open` is still available as the daily configure/start/readiness/browser convenience flow after you understand that it crosses the lifecycle boundary.
+Registration proof and normal running remain separate boundaries. Verification briefly runs and then stops the app; `start` is the explicit normal-running action. `relaybase open` remains the daily configure/start/readiness/browser convenience flow after you understand that it leaves the app running.
 
 ## 5. Inspect and recover
 

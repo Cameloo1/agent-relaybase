@@ -39,6 +39,16 @@ const runtimeFixtures: RuntimeFixture[] = [
     expectedPlanCommand: /npm(?:\.cmd)? run dev|npm run dev/
   },
   {
+    runtime: "powershell",
+    tier: 1,
+    prefix: "relaybase-runtime-powershell-",
+    files: {
+      "Start-Dashboard.ps1":
+        'param([string]$HostName, [int]$Port)\n$listener = [System.Net.HttpListener]::new()\n$listener.Prefixes.Add("http://$HostName`:$Port/")\n'
+    },
+    expectedPlanCommand: /Start-Dashboard\.ps1.*-HostName.*-Port/
+  },
+  {
     runtime: "python",
     tier: 1,
     prefix: "relaybase-runtime-python-",
@@ -202,6 +212,7 @@ test("runtime matrix detects and plans all supported setup adapters", async () =
 
     assert.ok(runtime, `${fixture.runtime} should be detected`);
     assert.notEqual(runtime.confidence, "unsupported");
+    assert.equal(runtime.adapterVersion, 1);
     assert.equal(runtime.tier, fixture.tier);
     assert.ok(runtime.detectionFiles.length, `${fixture.runtime} should report detection files`);
     assert.ok(runtime.startCommandCandidates.length, `${fixture.runtime} should report start command candidates`);
@@ -226,6 +237,31 @@ test("runtime matrix detects and plans all supported setup adapters", async () =
       assert.match(commandSurface, fixture.expectedPlanCommand, fixture.runtime);
     }
   }
+});
+
+test("PowerShell and Python confidence requires converging web and host-port evidence", async () => {
+  const powershell = await runtimeProject({
+    runtime: "powershell",
+    tier: 1,
+    prefix: "relaybase-runtime-powershell-non-web-",
+    files: { "Report.ps1": "param([string]$Name)\nWrite-Output $Name\n" }
+  });
+  const python = await runtimeProject({
+    runtime: "python",
+    tier: 1,
+    prefix: "relaybase-runtime-python-non-web-",
+    files: { "report.py": "print('report')\n" }
+  });
+  const powershellDetection = await detectProject(powershell);
+  const pythonDetection = await detectProject(python);
+  const psRuntime = powershellDetection.runtimeMatrix.runtimes.find((runtime) => runtime.runtime === "powershell");
+  const pyRuntime = pythonDetection.runtimeMatrix.runtimes.find((runtime) => runtime.runtime === "python");
+  assert.ok(psRuntime);
+  assert.notEqual(psRuntime.confidence, "high");
+  assert.equal(psRuntime.startCommandCandidates.length, 0);
+  assert.ok(pyRuntime);
+  assert.notEqual(pyRuntime.confidence, "high");
+  assert.equal(pyRuntime.startCommandCandidates.length, 0);
 });
 
 test("setup detect and preview expose runtime matrix without writing files", async () => {

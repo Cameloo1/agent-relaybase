@@ -4,7 +4,13 @@ import { handleAgentApiRequest } from "./agent/api.ts";
 import { AgentGatewayRequestError } from "./agent/gateway.ts";
 import { handleAppPackageApiRequest } from "./appPackageApi.ts";
 import { correlationIdForRequest, relaybaseErrorResponse, setCorrelationHeader } from "./apiErrors.ts";
-import type { AppState, DaemonEvent, LifecycleOperationType, OperationStatus } from "./apiTypes.ts";
+import type {
+  AppState,
+  DaemonEvent,
+  LifecycleOperationType,
+  OperationStatus,
+  RecordedOperationType
+} from "./apiTypes.ts";
 import { getAppState, getRelaybaseState } from "./appState.ts";
 import { appRecordEventData } from "./daemonEvents.ts";
 import { dashboardInventory } from "./dashboard.ts";
@@ -426,10 +432,10 @@ function operationListOptions(url: URL): OperationListOptions {
   }
 
   const operationType = url.searchParams.get("type")?.trim();
-  if (operationType && !isLifecycleOperationType(operationType)) {
-    throw new ApiError(400, "OPERATION_TYPE_FILTER_INVALID", `Unknown lifecycle operation type: ${operationType}`, {
+  if (operationType && !isRecordedOperationType(operationType)) {
+    throw new ApiError(400, "OPERATION_TYPE_FILTER_INVALID", `Unknown operation type: ${operationType}`, {
       retryable: false,
-      userAction: "Use start, stop, or restart."
+      userAction: "Use start, stop, restart, or registration_verification."
     });
   }
 
@@ -460,7 +466,7 @@ function operationListOptions(url: URL): OperationListOptions {
 
   return {
     ...(statusValues.length ? { statuses: statusValues as OperationStatus[] } : {}),
-    ...(operationType ? { operationType: operationType as LifecycleOperationType } : {}),
+    ...(operationType ? { operationType: operationType as RecordedOperationType } : {}),
     ...(targetId ? { targetId } : {}),
     retryableOnly: retryable === "true",
     limit
@@ -545,6 +551,10 @@ function headerText(value: string | string[] | undefined): string {
 
 function isLifecycleOperationType(action: string): action is LifecycleOperationType {
   return action === "start" || action === "stop" || action === "restart";
+}
+
+function isRecordedOperationType(action: string): action is RecordedOperationType {
+  return isLifecycleOperationType(action) || action === "registration_verification";
 }
 
 function isLifecycleOperationResult(result: unknown): result is LifecycleOperationResult {

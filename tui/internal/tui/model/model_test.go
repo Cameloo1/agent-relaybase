@@ -1601,6 +1601,52 @@ func TestExplicitAgentManagedSlashSerializesOnlyCanonicalAuthorizedProjectRoot(t
 	}
 }
 
+func TestRegistrationPreviewNamesQuickLifecycleAndNoVerifyOptOut(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		command          string
+		verificationMode string
+		willStart        bool
+	}{
+		{name: "quick", command: "/register C:/project", verificationMode: "quick", willStart: true},
+		{name: "no verify", command: "/register C:/project --no-verify", verificationMode: "none", willStart: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requestBody string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				requestBody = string(body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"setup":{"schemaVersion":1,"status":"approval_required","message":"Ready","projectRoot":"C:/project","manifestPath":"C:/project/relaybase.app.json","manifestState":"valid","previewId":"preview-1","app":{"id":"notes","name":"Notes"},"verificationIntent":{"mode":%q,"willStart":%t,"willStop":%t,"expectedMaximumMs":12000,"healthCandidates":["/api/ping"]},"approval":{"required":true,"previewId":"preview-1"},"registered":false,"started":false,"filesWritten":false,"retrySafe":true}}`, test.verificationMode, test.willStart, test.willStart)))
+			}))
+			defer server.Close()
+
+			cfg := config.Config{BaseURL: server.URL, StateDir: t.TempDir(), Token: "test-token", ThemeMode: "auto", CurrentDirectory: "C:/project"}
+			root := NewRoot(cfg, relaybaseclient.New(cfg.BaseURL, cfg.Token, server.Client()))
+			updated, cmd := root.submitSlashCommand(test.command)
+			if cmd == nil {
+				t.Fatal("expected registration preview command")
+			}
+			msg := cmd()
+			updatedModel, _ := updated.Update(msg)
+			model := updatedModel.(RootModel)
+			if !strings.Contains(requestBody, `"verificationMode":"`+test.verificationMode+`"`) {
+				t.Fatalf("unexpected registration preview body: %s", requestBody)
+			}
+			confirmation := model.confirmationForView()
+			if confirmation == nil {
+				t.Fatal("expected registration confirmation")
+			}
+			if test.willStart && !strings.Contains(confirmation.Risk, "starts the app once") {
+				t.Fatalf("quick confirmation did not name lifecycle work: %#v", confirmation)
+			}
+			if !test.willStart && !strings.Contains(confirmation.ExpectedResult, "unverified") {
+				t.Fatalf("no-verify confirmation did not name unverified result: %#v", confirmation)
+			}
+		})
+	}
+}
+
 func TestAddPathFallsBackToDeterministicDaemonPreviewWhenAgentUnavailable(t *testing.T) {
 	configs := []struct {
 		name   string

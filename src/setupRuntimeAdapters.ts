@@ -13,6 +13,8 @@ import type {
   RuntimePlanInput,
   RuntimePlanResult,
   RuntimeRepairInput,
+  RuntimeVerifyInput,
+  RuntimeVerifyObservation,
   SetupConfidence,
   SetupQuestion,
   StartCommandCandidate
@@ -70,6 +72,7 @@ export class RuntimeAdapterRegistry {
       const repairCandidates = await adapter.repair({ detection: detected });
       runtimes.push({
         ...detected,
+        adapterVersion: adapter.version,
         startCommandCandidates: planResult.startCommandCandidates,
         portStrategies: planResult.portStrategies,
         healthCandidates: planResult.healthCandidates,
@@ -1177,6 +1180,7 @@ function adapter(
   return {
     id,
     tier,
+    version: 1,
     detect,
     plan(input: RuntimePlanInput): RuntimePlanResult {
       return {
@@ -1186,6 +1190,17 @@ function adapter(
         questions: input.detection.questions
       };
     },
+    verify(input: RuntimeVerifyInput): RuntimeVerifyObservation {
+      return {
+        adapterId: id,
+        adapterVersion: 1,
+        processStayedAlive: input.processStayedAlive,
+        ...(input.assignedPort ? { assignedPort: input.assignedPort } : {}),
+        ...(input.declaredHealthTarget ? { declaredHealthTarget: input.declaredHealthTarget } : {}),
+        ...(input.successfulHealthTarget ? { successfulHealthTarget: input.successfulHealthTarget } : {}),
+        healthCandidates: input.detection.healthCandidates.map((candidate) => candidate.path)
+      };
+    },
     repair(input: RuntimeRepairInput): RepairCandidate[] {
       return defaultRepairs(input.detection, input.reason);
     }
@@ -1193,13 +1208,14 @@ function adapter(
 }
 
 function result(
-  input: Omit<RuntimeDetectionResult, "repairCandidates" | "diagnostics"> & {
+  input: Omit<RuntimeDetectionResult, "adapterVersion" | "repairCandidates" | "diagnostics"> & {
     diagnostics?: RuntimeDetectionResult["diagnostics"];
     repairCandidates?: RepairCandidate[];
   }
 ): RuntimeDetectionResult {
   return {
     ...input,
+    adapterVersion: 1,
     repairCandidates: input.repairCandidates ?? defaultRepairs(input),
     diagnostics: input.diagnostics ?? []
   };

@@ -43,6 +43,24 @@ relaybase logs <app-id>
 
 Check the app command, assigned port, health path, and recent redacted logs. A failed health check does not count as a successful start.
 
+## Registration verification failed
+
+Relaybase reports the failed boundary, whether the process is still running, whether a backend port remains open, a recommended repair, and a bounded redacted log excerpt or `View logs` action.
+
+The normal repair order is:
+
+1. Correct the health route when a bounded localhost candidate returned `2xx`.
+2. Use an explicit structured host/port binding when the app ignored the managed port.
+3. Use a pinned upstream port only when the runtime cannot accept dynamic binding.
+
+Every repair is preview-only until separately confirmed. A confirmed repair creates a new verification attempt; Relaybase does not silently cycle through commands or rewrite the manifest.
+
+Use `relaybase register <folder> --no-verify` only when you accept a registered-but-unverified result.
+
+## Registration cleanup failed
+
+Do not retry verification while Relaybase reports `registered_cleanup_failed`. Use `View logs`, retry the stop action, or identify the remaining backend-port owner. `Keep registered without verification` and further launch retries remain blocked until cleanup is resolved.
+
 ## The stable hostname does not work
 
 Relaybase separately checks the human hostname route and the agent-header route. A `degraded` result means one works and one does not. Use the agent route while repairing local hostname resolution:

@@ -76,6 +76,7 @@ type ParsedCommand struct {
 	PageNumber  int
 	Confirm     bool
 	DryRun      bool
+	NoVerify    bool
 	Path        string
 	Command     string
 	Field       string
@@ -113,7 +114,7 @@ func Parse(input string) (ParsedCommand, error) {
 	if err != nil {
 		return ParsedCommand{}, err
 	}
-	fields, confirm, dryRun, err := stripCommandFlags(fields)
+	fields, confirm, dryRun, noVerify, err := stripCommandFlags(fields)
 	if err != nil {
 		return ParsedCommand{}, err
 	}
@@ -122,7 +123,7 @@ func Parse(input string) (ParsedCommand, error) {
 	}
 
 	command := strings.ToLower(fields[0])
-	parsed := ParsedCommand{Raw: raw, Confirm: confirm, DryRun: dryRun}
+	parsed := ParsedCommand{Raw: raw, Confirm: confirm, DryRun: dryRun, NoVerify: noVerify}
 	args := fields[1:]
 
 	switch command {
@@ -528,6 +529,9 @@ func Parse(input string) (ParsedCommand, error) {
 	default:
 		return ParsedCommand{}, ParseError{Message: fmt.Sprintf("Unknown slash command %q. Use /help.", command)}
 	}
+	if parsed.NoVerify && parsed.Kind != KindRegister {
+		return ParsedCommand{}, ParseError{Message: "Flag --no-verify is available only for /register."}
+	}
 
 	return parsed, nil
 }
@@ -904,27 +908,33 @@ func splitCommandFields(input string) ([]string, error) {
 	return fields, nil
 }
 
-func stripCommandFlags(fields []string) ([]string, bool, bool, error) {
+func stripCommandFlags(fields []string) ([]string, bool, bool, bool, error) {
 	filtered := []string{}
 	confirm := false
 	dryRun := false
+	noVerify := false
 	for _, field := range fields {
 		switch canonicalGlobalFlag(field) {
 		case "confirm":
 			if confirm {
-				return nil, false, false, ParseError{Message: "Flag --confirm was provided more than once."}
+				return nil, false, false, false, ParseError{Message: "Flag --confirm was provided more than once."}
 			}
 			confirm = true
 		case "dry-run":
 			if dryRun {
-				return nil, false, false, ParseError{Message: "Flag --dry-run was provided more than once."}
+				return nil, false, false, false, ParseError{Message: "Flag --dry-run was provided more than once."}
 			}
 			dryRun = true
+		case "no-verify":
+			if noVerify {
+				return nil, false, false, false, ParseError{Message: "Flag --no-verify was provided more than once."}
+			}
+			noVerify = true
 		default:
 			filtered = append(filtered, field)
 		}
 	}
-	return filtered, confirm, dryRun, nil
+	return filtered, confirm, dryRun, noVerify, nil
 }
 
 func canonicalGlobalFlag(field string) string {
@@ -933,6 +943,8 @@ func canonicalGlobalFlag(field string) string {
 		return "confirm"
 	case "--dry-run", "--dryrun", "dryrun=true", "dry-run=true":
 		return "dry-run"
+	case "--no-verify", "no-verify=true":
+		return "no-verify"
 	default:
 		return ""
 	}

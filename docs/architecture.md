@@ -38,6 +38,7 @@ Dashboards and other clients should consume Relaybase state and APIs instead of 
 - Router: maps human routes like `<app-id>.localhost` and agent header routes using `X-Relaybase-App`.
 - App state: combines manifest data, runtime state, backend-port checks, route health, readiness, logs, and action flags.
 - Setup engine: powers `relaybase configure`, `relaybase open`, `relaybase health`, and MCP setup tools.
+- Registration verification service: composes registry, launch compilation, process manager, health, stop verification, repairs, and bounded operation evidence. It never spawns, kills, probes, or writes setup files directly.
 - MCP layer: exposes Relaybase lifecycle tools, resources, prompts, and allowlisted child MCP capabilities.
 
 ## Request Paths
@@ -91,6 +92,20 @@ Stop order:
 8. Report stopped only when cleanup and verification pass.
 
 If cleanup fails, verification fails, or an owned backend port remains open, Relaybase reports an errored runtime instead of pretending the app stopped cleanly.
+
+## Registration verification
+
+Registration apply first completes its approval-bound file and registry work. When the bound preview selected `quick`, the daemon-owned registration verification service then:
+
+1. Re-reads the registered manifest and compiles the exact structured launch plan.
+2. Checks cwd, executable availability, fixed-port conflicts, and proof identity.
+3. Requests one bounded start through `ProcessManager`.
+4. Uses the existing health primitive and at most three bounded localhost candidate probes.
+5. Requests stop through `ProcessManager` after health success or terminal failure.
+6. Requires stop and owned-port closure before reporting `registered_verified`.
+7. Persists a bounded redacted `registration_verification` operation record.
+
+The service retains five in-memory attempt summaries per app and rejects repetition of an already-failed launch-plan digest. Repairs remain preview-only until another explicit approval. Cleanup failure blocks repair and launch retries.
 
 ## Setup
 

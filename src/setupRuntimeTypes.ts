@@ -59,8 +59,28 @@ export interface RuntimeDetector {
 }
 
 export interface RuntimeAdapter extends RuntimeDetector {
+  version: number;
   plan(input: RuntimePlanInput): RuntimePlanResult | Promise<RuntimePlanResult>;
+  verify(input: RuntimeVerifyInput): RuntimeVerifyObservation | Promise<RuntimeVerifyObservation>;
   repair(input: RuntimeRepairInput): RepairCandidate[] | Promise<RepairCandidate[]>;
+}
+
+export interface RuntimeVerifyInput {
+  detection: RuntimeDetectionResult;
+  assignedPort?: number;
+  declaredHealthTarget?: string;
+  successfulHealthTarget?: string;
+  processStayedAlive: boolean;
+}
+
+export interface RuntimeVerifyObservation {
+  adapterId: RuntimeId;
+  adapterVersion: number;
+  processStayedAlive: boolean;
+  assignedPort?: number;
+  declaredHealthTarget?: string;
+  successfulHealthTarget?: string;
+  healthCandidates: string[];
 }
 
 export interface RuntimePlanInput {
@@ -81,6 +101,7 @@ export interface RuntimeRepairInput {
 }
 
 export interface RuntimeDetectionResult {
+  adapterVersion: number;
   runtime: RuntimeId;
   label: string;
   tier: 1 | 2;

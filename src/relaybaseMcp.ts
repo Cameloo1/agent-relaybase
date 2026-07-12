@@ -385,9 +385,14 @@ export class RelaybaseMcpService {
         inputSchema: objectSchema(
           {
             path: stringSchema("Project folder or exact relaybase.app.json path."),
-            mode: { type: "string", enum: ["folder", "manifest"] }
+            mode: { type: "string", enum: ["folder", "manifest"] },
+            verificationMode: {
+              type: "string",
+              enum: ["quick", "none"],
+              description: "Explicitly choose one bounded lifecycle proof or no lifecycle mutation."
+            }
           },
-          ["path"]
+          ["path", "verificationMode"]
         ),
         annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false }
       },
@@ -398,7 +403,8 @@ export class RelaybaseMcpService {
           manifest: { type: "object", description: "Relaybase app manifest object." },
           manifestPath: stringSchema("Optional path to a relaybase.app.json file."),
           previewId: stringSchema("Exact preview id returned by plan_registration."),
-          confirm: { type: "boolean", description: "Must be true when applying previewId." }
+          confirm: { type: "boolean", description: "Must be true when applying previewId." },
+          selectedRepairId: stringSchema("Optional approved repair id associated with this new proof attempt.")
         }),
         annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false }
       },
@@ -484,10 +490,13 @@ export class RelaybaseMcpService {
         }
         return structuredToolResult(await this.#proveApp(requiredArg(args.id, "id"), args.lifecycle === true));
       case "plan_registration":
+        if (args.verificationMode !== "quick" && args.verificationMode !== "none") {
+          throw new Error("plan_registration requires explicit verificationMode=quick or verificationMode=none.");
+        }
         return structuredToolResult(await previewRegistration(this.runtime, args));
       case "register_app":
         this.#requireMutationToken(extra, mutationAuthMode);
-        return structuredToolResult({ app: await this.#registerApp(args) });
+        return structuredToolResult(await this.#registerApp(args));
       case "start_app":
         this.#requireMutationToken(extra, mutationAuthMode);
         return this.#lifecycleResult(requiredArg(args.id, "id"), "start");
@@ -513,31 +522,36 @@ export class RelaybaseMcpService {
     }
   }
 
-  async #registerApp(args: Record<string, unknown>): Promise<AppRecord> {
+  async #registerApp(args: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (typeof args.previewId === "string") {
       if (args.confirm !== true) {
         throw new Error("REGISTER_CONFIRMATION_REQUIRED: register_app preview application requires confirm=true.");
       }
       const result = await applyRegistration(
         this.runtime,
-        { previewId: args.previewId, confirm: true, confirmation: { confirmed: true, reason: "MCP confirmation" } },
+        {
+          previewId: args.previewId,
+          confirm: true,
+          confirmation: { confirmed: true, reason: "MCP confirmation" },
+          ...(typeof args.selectedRepairId === "string" ? { selectedRepairId: args.selectedRepairId } : {})
+        },
         randomUUID()
       );
       if (!result.app) {
         throw new Error("REGISTER_REGISTRY_FAILED: registration completed without an app record.");
       }
-      return result.app;
+      return { registration: result };
     }
     if (typeof args.manifestPath === "string") {
       const manifest = await readManifestFile(args.manifestPath);
-      return this.runtime.registry.upsertManifest(manifest, { manifestPath: args.manifestPath });
+      return { app: await this.runtime.registry.upsertManifest(manifest, { manifestPath: args.manifestPath }) };
     }
 
     if (typeof args.manifest !== "object" || args.manifest === null || Array.isArray(args.manifest)) {
       throw new Error("register_app requires manifest or manifestPath.");
     }
 
-    return this.runtime.registry.upsertManifest(args.manifest as Record<string, unknown>);
+    return { app: await this.runtime.registry.upsertManifest(args.manifest as Record<string, unknown>) };
   }
 
   async #listApps(args: Record<string, unknown>): Promise<Record<string, unknown>> {

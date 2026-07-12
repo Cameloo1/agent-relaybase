@@ -34,9 +34,15 @@ relaybase register .
 relaybase start <app-id>
 ```
 
-If the manifest is missing, folder registration detects the runtime and shows the proposed manifest and any Relaybase-owned files. Nothing is written until confirmation. Registration never starts the app; `start` is a separate lifecycle boundary.
+If the manifest is missing, folder registration detects the runtime and shows the proposed manifest and any Relaybase-owned files. Nothing is written or started until confirmation. The normal confirmation runs one bounded proof: Relaybase starts the app on a managed test port, checks health, stops it, and verifies that the backend port closed. A successful registration therefore ends with the app stopped and ready for the separate `start` action.
 
-Use `/add <folder>` in the operator console for the simplest project-discovery flow. Use `/register <folder>` when you want detection, preview, approval, and registration as one coordinated flow. An exact `/register <path>/relaybase.app.json` remains strict and does not search other folders.
+Use `--no-verify` when you intentionally want registry setup without a launch-readiness claim:
+
+```bash
+relaybase register . --no-verify
+```
+
+Use `/add <folder>` in the operator console for the simplest project-discovery flow. Use `/register <folder>` when you want detection, preview, approval, registration, and the bounded proof as one coordinated flow. Use `/register <folder> --no-verify` to opt out. An exact `/register <path>/relaybase.app.json` remains strict and does not search other folders.
 
 The normal loop is intentionally small:
 
@@ -109,6 +115,8 @@ Common recovery paths:
 - Missing TUI binary: reinstall `@cameloo/relaybase`; source contributors can run `npm run tui:build`.
 - Daemon unavailable: run `relaybase serve`, then retry `relaybase start`.
 - App will not become healthy: run `relaybase health` and inspect the reported logs and `nextActions`.
+- Registration verification failed: preview the recommended health-route, dynamic-binding, or pinned-port repair; Relaybase never applies the repair without another approval.
+- Registration cleanup failed: do not retry launch verification until the remaining process or backend-port owner is resolved.
 - Port conflict: let Relaybase choose a dynamic port or update the manifest’s explicit port strategy.
 - Token mismatch: use the state directory reported by `relaybase check`; never paste the token into logs or issues.
 

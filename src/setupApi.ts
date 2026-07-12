@@ -41,6 +41,9 @@ import type {
   RegisterManifestResult,
   RegistrationApplyRequest,
   RegistrationPreviewRequest,
+  RegistrationRepairApplyRequest,
+  RegistrationRepairPreviewRequest,
+  RegistrationRepairPreviewResult,
   RegistrationSetupResult,
   RepairSetupRequest,
   RepairSetupResult,
@@ -58,6 +61,10 @@ import type {
 import type { AppManifestInput, AppRecord } from "./types.ts";
 import { normalizeManifest } from "./validation.ts";
 import { compileLaunchPlan } from "./launchPlan.ts";
+import {
+  DEFAULT_REGISTRATION_VERIFICATION_POLICY,
+  type RegistrationVerificationPolicy
+} from "./registrationVerificationTypes.ts";
 
 const MANIFEST_FILE = "relaybase.app.json";
 const SETUP_DIR = ".relaybase";
@@ -85,9 +92,19 @@ interface RegistrationBinding {
   request: RegistrationPreviewRequest;
   manifestRevision: string;
   createdAt: number;
+  verificationPolicy: RegistrationVerificationPolicy;
+  healthCandidates: string[];
 }
 
 const registrationBindings = new Map<string, RegistrationBinding>();
+interface RegistrationRepairBinding {
+  preview: RegistrationRepairPreviewResult;
+  manifestPath: string;
+  patch: Record<string, unknown>;
+  revision: string;
+  createdAt: number;
+}
+const registrationRepairBindings = new Map<string, RegistrationRepairBinding>();
 
 export class SetupApiRequestError extends Error {
   readonly statusCode: number;
@@ -214,6 +231,51 @@ export async function handleSetupApiRequest(input: {
     const setup = await applyRegistration(runtime, body, correlationId);
     publishSetupEvent(runtime, "setup.registered", correlationId, setupEventSummary(setup));
     sendJson(response, 202, { setup });
+    return true;
+  }
+
+  if (route === "register/repair/preview") {
+    const setup = await previewRegistrationRepair(runtime, body);
+    publishSetupEvent(runtime, "setup.repair_plan_created", correlationId, setupEventSummary(setup));
+    sendJson(response, 200, { setup });
+    return true;
+  }
+
+  if (route === "register/repair/apply") {
+    requireToken({
+      code: "UNAUTHORIZED_SETUP_REGISTER_REPAIR",
+      message: "Unauthorized Relaybase registration repair apply.",
+      userAction: "Use the session token before applying a registration repair."
+    });
+    requireConfirmation(
+      body,
+      "REGISTER_REPAIR_CONFIRMATION_REQUIRED",
+      "Applying a registration repair writes the exact previewed manifest patch and runs one new quick proof."
+    );
+    const setup = await applyRegistrationRepair(runtime, body, correlationId);
+    publishSetupEvent(runtime, "setup.repair_applied", correlationId, setupEventSummary(setup));
+    sendJson(response, 202, { setup });
+    return true;
+  }
+
+  if (route === "register/verification/cancel") {
+    requireToken({
+      code: "UNAUTHORIZED_SETUP_REGISTER_CANCEL",
+      message: "Unauthorized registration verification cancellation.",
+      userAction: "Use the session token before cancelling an active verification attempt."
+    });
+    const appId = String(body.appId ?? "").trim();
+    const cancelled = runtime.registrationVerification.cancel(appId);
+    sendJson(response, cancelled ? 202 : 409, {
+      setup: {
+        appId,
+        cancelled,
+        status: cancelled ? "cancelled" : "not_active",
+        message: cancelled
+          ? "Cancellation requested; Relaybase will stop and finalize the active verification attempt."
+          : "No active registration verification attempt was found."
+      }
+    });
     return true;
   }
 
@@ -411,7 +473,8 @@ export async function previewRegistration(
   raw: Record<string, unknown>
 ): Promise<RegistrationSetupResult> {
   pruneRegistrationBindings();
-  const request = raw as RegistrationPreviewRequest;
+  const request = raw as unknown as RegistrationPreviewRequest;
+  const verificationPolicy = registrationVerificationPolicy(request);
   const suppliedPath = String(
     request.path ?? request.manifestPath ?? request.cwd ?? request.currentDirectory ?? ""
   ).trim();
@@ -492,9 +555,13 @@ export async function previewRegistration(
 
   if (app) {
     const existing = await runtime.registry.get(app.id);
-    if (existing && registrationAppIdentity(existing) === registrationAppIdentity(app)) {
+    if (
+      existing &&
+      registrationAppIdentity(existing) === registrationAppIdentity(app) &&
+      verificationPolicy.mode === "none"
+    ) {
       return registrationTerminal({
-        status: "registered",
+        status: "registered_unverified",
         code: "REGISTER_ALREADY_CURRENT",
         message: `${app.name} is already registered and the manifest revision is unchanged.`,
         projectRoot,
@@ -507,12 +574,16 @@ export async function previewRegistration(
         diagnostics: []
       });
     }
+    const healthCandidates = registrationHealthCandidates(app);
     return await bindRegistrationPreview(
       request,
       {
         schemaVersion: 1,
         status: "approval_required",
-        message: `Ready to register ${app.name}. The app will not be started.`,
+        message:
+          verificationPolicy.mode === "quick"
+            ? `Ready to register ${app.name}. Confirmation will briefly start it, check health, stop it, and verify backend-port closure.`
+            : `Ready to register ${app.name} without launch verification.`,
         projectRoot,
         manifestPath,
         manifestState: "valid",
@@ -522,6 +593,7 @@ export async function previewRegistration(
           port: app.upstreamPort ?? 17_000,
           hubPort: runtime.port
         }),
+        verificationIntent: verificationIntent(verificationPolicy, healthCandidates),
         questions: [],
         risks: [
           {
@@ -529,18 +601,33 @@ export async function previewRegistration(
             severity: "warning",
             message: "Confirmation updates daemon registry state.",
             requiresApproval: true
-          }
+          },
+          ...(verificationPolicy.mode === "quick"
+            ? [
+                {
+                  code: "registration_quick_verification",
+                  severity: "warning" as const,
+                  message: "Confirmation performs one bounded start, health, stop, and port-closure proof.",
+                  requiresApproval: true
+                }
+              ]
+            : [])
         ],
         approval: { required: true },
         registered: false,
         started: false,
         filesWritten: false,
         retrySafe: true,
-        actions: ["Confirm", "Inspect", "Cancel"],
+        actions:
+          verificationPolicy.mode === "quick"
+            ? ["Confirm and verify", "Register without verification", "Inspect", "Cancel"]
+            : ["Confirm without verification", "Inspect", "Cancel"],
         diagnostics: diagnosticsForApp(app)
       },
       manifestText ?? "<missing>",
-      []
+      [],
+      verificationPolicy,
+      healthCandidates
     );
   }
 
@@ -571,6 +658,10 @@ export async function previewRegistration(
     throw error;
   }
   const selectedApp = normalizeManifest(setup.selectedPlan.manifest, { manifestPath });
+  const healthCandidates = registrationHealthCandidates(
+    selectedApp,
+    setup.selectedPlan.choice.runtimeHealthCandidates?.map((candidate) => candidate.path)
+  );
   return await bindRegistrationPreview(
     request,
     {
@@ -586,18 +677,36 @@ export async function previewRegistration(
       selectedPlan: setup.selectedPlan,
       fileWritePlan: setup.fileWritePlan,
       launchPlan: compileLaunchPlan(selectedApp, { host: runtime.host, port: 17_000, hubPort: runtime.port }),
+      verificationIntent: verificationIntent(verificationPolicy, healthCandidates),
       questions: setup.selectedPlan.choice.setupQuestions ?? [],
-      risks: setup.fileWritePlan.risks,
+      risks: [
+        ...setup.fileWritePlan.risks,
+        ...(verificationPolicy.mode === "quick"
+          ? [
+              {
+                code: "registration_quick_verification",
+                severity: "warning" as const,
+                message: "Confirmation performs one bounded start, health, stop, and port-closure proof.",
+                requiresApproval: true
+              }
+            ]
+          : [])
+      ],
       approval: { required: true },
       registered: false,
       started: false,
       filesWritten: false,
       retrySafe: true,
-      actions: ["Review manifest", "Confirm", "Choose another plan", "Cancel"],
+      actions:
+        verificationPolicy.mode === "quick"
+          ? ["Review manifest", "Confirm and verify", "Register without verification", "Cancel"]
+          : ["Review manifest", "Confirm without verification", "Choose another plan", "Cancel"],
       diagnostics: setup.diagnostics
     },
     "<missing>",
-    setup.fileWritePlan.writes.map((write) => write.path)
+    setup.fileWritePlan.writes.map((write) => write.path),
+    verificationPolicy,
+    healthCandidates
   );
 }
 
@@ -666,28 +775,249 @@ export async function applyRegistration(
     runtime.events.publish({ type: "app.registered", appId: app.id, correlationId, data: appRecordEventData(app) });
   }
   registrationBindings.delete(request.previewId);
+  const verification = await runtime.registrationVerification.verify({
+    app,
+    previewId: request.previewId,
+    manifestRevision: binding.manifestRevision,
+    policy: binding.verificationPolicy,
+    healthCandidates: binding.healthCandidates,
+    ...(request.selectedRepairId ? { selectedRepairId: request.selectedRepairId } : {})
+  });
+  const status =
+    verification.status === "verified"
+      ? "registered_verified"
+      : verification.status === "cleanup_failed"
+        ? "registered_cleanup_failed"
+        : verification.status === "not_requested"
+          ? "registered_unverified"
+          : "registered_verification_failed";
+  const actions =
+    status === "registered_verified"
+      ? [`Start ${app.id}`, "Inspect", "Done"]
+      : status === "registered_cleanup_failed"
+        ? ["View logs", "Retry stop", "Inspect cleanup"]
+        : status === "registered_verification_failed"
+          ? ["Preview repair", "View logs", "Keep registered without verification", "Cancel"]
+          : [`Start ${app.id}`, "Verify", "Inspect", "Done"];
   return {
     ...binding.preview,
-    status: "registered",
+    status,
     code: undefined,
-    message: `${app.name} is registered and ready to start. Registration did not start the app.`,
+    message:
+      status === "registered_verified"
+        ? `${app.name} is registered and verified. The verification process was stopped and its backend port closed.`
+        : status === "registered_cleanup_failed"
+          ? `${app.name} is registered, but verification cleanup failed. Resolve the remaining process or port before retrying.`
+          : status === "registered_verification_failed"
+            ? `${app.name} is registered, but launch verification failed. Review the evidence and preview a safe repair.`
+            : `${app.name} is registered without launch verification.`,
     app,
+    verification,
     approval: { required: false },
     registered: true,
     started: false,
     filesWritten,
-    actions: [`Start ${app.id}`, "Inspect", "Cancel"]
+    retrySafe: status !== "registered_cleanup_failed",
+    actions
+  };
+}
+
+export async function previewRegistrationRepair(
+  runtime: RelaybaseRuntime,
+  raw: Record<string, unknown>
+): Promise<RegistrationRepairPreviewResult> {
+  pruneRegistrationBindings();
+  const request = raw as unknown as RegistrationRepairPreviewRequest;
+  const appId = String(request.appId ?? "").trim();
+  const repairId = String(request.repairId ?? "").trim();
+  const app = await runtime.registry.get(appId);
+  if (!app?.manifestPath) {
+    throw new SetupApiRequestError(
+      404,
+      "REGISTER_REPAIR_APP_NOT_FOUND",
+      "Repair requires a registered manifest-backed app.",
+      {
+        retryable: false,
+        userAction: "Choose a registered app with an inspectable relaybase.app.json."
+      }
+    );
+  }
+  if (!(await registrationCleanupResolved(runtime, appId))) {
+    throw new SetupApiRequestError(
+      409,
+      "REGISTER_REPAIR_CLEANUP_UNRESOLVED",
+      "A registration repair cannot start while verification cleanup remains unresolved.",
+      { retryable: true, userAction: "Resolve the remaining process or open port, then request a new repair preview." }
+    );
+  }
+  const repair = runtime.registrationVerification.repairOption(appId, repairId);
+  if (!repair) {
+    throw new SetupApiRequestError(
+      404,
+      "REGISTER_REPAIR_NOT_FOUND",
+      "The requested repair is not available for the latest attempt.",
+      {
+        retryable: true,
+        userAction: "Inspect the latest verification result and choose one of its repair ids."
+      }
+    );
+  }
+  if (!repair.patch) {
+    throw new SetupApiRequestError(
+      409,
+      "REGISTER_REPAIR_INPUT_REQUIRED",
+      "This repair requires explicit structured launch input before Relaybase can compile a safe patch.",
+      {
+        retryable: true,
+        detail: { structuredInputRequired: repair.structuredInputRequired },
+        userAction: "Provide executable, arguments, port binding, and health route values."
+      }
+    );
+  }
+  const patchPlan = await buildManifestPatchPlan({ cwd: app.cwd, manifestPath: app.manifestPath, patch: repair.patch });
+  const revision = await registrationRevision(app.manifestPath, [app.manifestPath]);
+  const previewId = `repair_${createHash("sha256")
+    .update(JSON.stringify({ appId, repairId, repair, revision, patchPlan: patchPlan.fileWritePlan }))
+    .digest("hex")
+    .slice(0, 24)}`;
+  const policy = { ...DEFAULT_REGISTRATION_VERIFICATION_POLICY };
+  const healthCandidates = registrationHealthCandidates(app, [String(repair.patch.healthUrl ?? "")]);
+  const preview: RegistrationRepairPreviewResult = {
+    previewId,
+    appId,
+    repairId,
+    repair,
+    fileWritePlan: patchPlan.fileWritePlan,
+    approval: { required: true, previewId },
+    verificationIntent: verificationIntent(policy, healthCandidates),
+    actions: ["Confirm repair and verify", "Review manifest diff", "View logs", "Cancel"]
+  };
+  registrationRepairBindings.set(previewId, {
+    preview,
+    manifestPath: app.manifestPath,
+    patch: repair.patch,
+    revision,
+    createdAt: Date.now()
+  });
+  return preview;
+}
+
+export async function applyRegistrationRepair(
+  runtime: RelaybaseRuntime,
+  raw: Record<string, unknown>,
+  correlationId: string
+): Promise<RegistrationSetupResult> {
+  pruneRegistrationBindings();
+  const request = raw as unknown as RegistrationRepairApplyRequest;
+  const binding = registrationRepairBindings.get(String(request.previewId ?? ""));
+  if (!binding) {
+    throw new SetupApiRequestError(
+      409,
+      "REGISTER_REPAIR_PREVIEW_REQUIRED",
+      "Repair requires a current exact preview.",
+      {
+        retryable: true,
+        userAction: "Generate and confirm a new repair preview."
+      }
+    );
+  }
+  const currentRevision = await registrationRevision(binding.manifestPath, [binding.manifestPath]);
+  if (currentRevision !== binding.revision) {
+    registrationRepairBindings.delete(request.previewId);
+    throw new SetupApiRequestError(409, "REGISTER_REPAIR_PREVIEW_STALE", "Repair preview is stale.", {
+      retryable: true,
+      detail: { filesWritten: false, registered: false, started: false },
+      userAction: "Generate a new repair preview. No repair write or process start occurred."
+    });
+  }
+  if (!(await registrationCleanupResolved(runtime, binding.preview.appId))) {
+    throw new SetupApiRequestError(
+      409,
+      "REGISTER_REPAIR_CLEANUP_UNRESOLVED",
+      "Repair apply is blocked while verification cleanup remains unresolved.",
+      { retryable: true, userAction: "Resolve the remaining process or port before retrying." }
+    );
+  }
+  const patched = await applyManifestPatch({
+    cwd: path.dirname(binding.manifestPath),
+    manifestPath: binding.manifestPath,
+    patch: binding.patch,
+    confirm: true
+  });
+  const app = await runtime.registry.upsertManifest(await readManifestFile(binding.manifestPath), {
+    manifestPath: binding.manifestPath
+  });
+  runtime.events.publish({ type: "app.registered", appId: app.id, correlationId, data: appRecordEventData(app) });
+  const revision = await registrationRevision(binding.manifestPath, [binding.manifestPath]);
+  const policy = { ...DEFAULT_REGISTRATION_VERIFICATION_POLICY };
+  const verification = await runtime.registrationVerification.verify({
+    app,
+    previewId: request.previewId,
+    manifestRevision: revision,
+    policy,
+    healthCandidates: registrationHealthCandidates(app),
+    selectedRepairId: binding.preview.repairId
+  });
+  registrationRepairBindings.delete(request.previewId);
+  const status =
+    verification.status === "verified"
+      ? "registered_verified"
+      : verification.status === "cleanup_failed"
+        ? "registered_cleanup_failed"
+        : "registered_verification_failed";
+  return {
+    schemaVersion: 1,
+    status,
+    message:
+      status === "registered_verified"
+        ? `${app.name} repair was applied and the new launch proof passed; the app is stopped.`
+        : status === "registered_cleanup_failed"
+          ? `${app.name} repair was applied, but cleanup remains unresolved.`
+          : `${app.name} repair was applied, but the new launch proof failed.`,
+    projectRoot: app.cwd,
+    manifestPath: binding.manifestPath,
+    manifestState: "valid",
+    app,
+    verificationIntent: verificationIntent(policy, registrationHealthCandidates(app)),
+    verification,
+    questions: [],
+    risks: [],
+    approval: { required: false },
+    registered: true,
+    started: false,
+    filesWritten: patched.file.action !== "unchanged",
+    retrySafe: status !== "registered_cleanup_failed",
+    actions:
+      status === "registered_verified"
+        ? [`Start ${app.id}`, "Inspect", "Done"]
+        : status === "registered_cleanup_failed"
+          ? ["View logs", "Retry stop", "Inspect cleanup"]
+          : ["Preview another repair", "View logs", "Keep registered without verification", "Cancel"],
+    diagnostics: patched.diagnostics
   };
 }
 
 function registrationTerminal(
   input: Omit<
     RegistrationSetupResult,
-    "schemaVersion" | "questions" | "risks" | "approval" | "registered" | "started" | "filesWritten"
+    | "schemaVersion"
+    | "questions"
+    | "risks"
+    | "approval"
+    | "registered"
+    | "started"
+    | "filesWritten"
+    | "verificationIntent"
   > &
-    Partial<Pick<RegistrationSetupResult, "questions" | "risks" | "approval" | "registered" | "filesWritten">>
+    Partial<
+      Pick<
+        RegistrationSetupResult,
+        "questions" | "risks" | "approval" | "registered" | "filesWritten" | "verificationIntent"
+      >
+    >
 ): RegistrationSetupResult {
   return {
+    ...input,
     schemaVersion: 1,
     questions: input.questions ?? [],
     risks: input.risks ?? [],
@@ -695,7 +1025,8 @@ function registrationTerminal(
     registered: input.registered ?? false,
     started: false,
     filesWritten: input.filesWritten ?? false,
-    ...input
+    verificationIntent:
+      input.verificationIntent ?? verificationIntent({ ...DEFAULT_REGISTRATION_VERIFICATION_POLICY, mode: "none" }, [])
   };
 }
 
@@ -703,14 +1034,23 @@ async function bindRegistrationPreview(
   request: RegistrationPreviewRequest,
   preview: RegistrationSetupResult,
   manifestRevision: string,
-  writePaths: string[]
+  writePaths: string[],
+  verificationPolicy: RegistrationVerificationPolicy,
+  healthCandidates: string[]
 ): Promise<RegistrationSetupResult> {
   const revision = await registrationRevision(preview.manifestPath, writePaths);
   const stable = JSON.stringify({ request, preview, manifestRevision, revision, writePaths: [...writePaths].sort() });
   const digest = createHash("sha256").update(stable).digest("hex");
   const previewId = `preview_${digest.slice(0, 24)}`;
   const bound = { ...preview, previewId, approval: { required: true, previewId } };
-  registrationBindings.set(previewId, { preview: bound, request, manifestRevision: revision, createdAt: Date.now() });
+  registrationBindings.set(previewId, {
+    preview: bound,
+    request,
+    manifestRevision: revision,
+    createdAt: Date.now(),
+    verificationPolicy,
+    healthCandidates
+  });
   return bound;
 }
 
@@ -723,6 +1063,14 @@ function pruneRegistrationBindings(): void {
     const oldest = registrationBindings.keys().next().value as string | undefined;
     if (!oldest) break;
     registrationBindings.delete(oldest);
+  }
+  for (const [previewId, binding] of registrationRepairBindings) {
+    if (binding.createdAt < cutoff) registrationRepairBindings.delete(previewId);
+  }
+  while (registrationRepairBindings.size > 128) {
+    const oldest = registrationRepairBindings.keys().next().value as string | undefined;
+    if (!oldest) break;
+    registrationRepairBindings.delete(oldest);
   }
 }
 
@@ -747,6 +1095,95 @@ function registrationAppIdentity(app: AppRecord): string {
     upstreamPort: app.upstreamPort,
     manifestPath: app.manifestPath
   });
+}
+
+async function registrationCleanupResolved(runtime: RelaybaseRuntime, appId: string): Promise<boolean> {
+  if (runtime.registrationVerification.cleanupResolved(appId)) return true;
+  const status = (await runtime.processes.listStatuses()).find((candidate) => candidate.id === appId)?.runtime;
+  return Boolean(status?.status === "stopped" && status.stopVerification?.ok);
+}
+
+function registrationVerificationPolicy(request: RegistrationPreviewRequest): RegistrationVerificationPolicy {
+  const mode = request.verificationMode;
+  if (mode !== "quick" && mode !== "none") {
+    throw new SetupApiRequestError(
+      400,
+      "REGISTER_VERIFICATION_MODE_INVALID",
+      "Registration verificationMode must be 'quick' or 'none'.",
+      { retryable: false, userAction: "Choose quick verification or explicitly register without verification." }
+    );
+  }
+  const overrides = request.verificationPolicy ?? {};
+  const budget = (name: keyof typeof overrides, fallback: number): number => {
+    const value = overrides[name];
+    if (value === undefined) return fallback;
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 30_000) {
+      throw new SetupApiRequestError(
+        400,
+        "REGISTER_VERIFICATION_POLICY_INVALID",
+        `Registration verification policy ${name} must be a positive number no greater than 30000.`,
+        { retryable: false, userAction: "Use the documented quick verification budgets." }
+      );
+    }
+    return Math.floor(value);
+  };
+  const candidateLimit = overrides.candidateHealthProbeLimit ?? 3;
+  if (!Number.isInteger(candidateLimit) || candidateLimit < 0 || candidateLimit > 3) {
+    throw new SetupApiRequestError(
+      400,
+      "REGISTER_VERIFICATION_POLICY_INVALID",
+      "candidateHealthProbeLimit must be an integer from 0 through 3.",
+      { retryable: false, userAction: "Use no more than three bounded candidate probes." }
+    );
+  }
+  const policy = {
+    mode,
+    startupBudgetMs: budget("startupBudgetMs", DEFAULT_REGISTRATION_VERIFICATION_POLICY.startupBudgetMs),
+    probeTimeoutMs: budget("probeTimeoutMs", DEFAULT_REGISTRATION_VERIFICATION_POLICY.probeTimeoutMs),
+    stopBudgetMs: budget("stopBudgetMs", DEFAULT_REGISTRATION_VERIFICATION_POLICY.stopBudgetMs),
+    closureBudgetMs: budget("closureBudgetMs", DEFAULT_REGISTRATION_VERIFICATION_POLICY.closureBudgetMs),
+    candidateHealthProbeLimit: candidateLimit
+  };
+  const total =
+    policy.startupBudgetMs +
+    policy.stopBudgetMs +
+    policy.closureBudgetMs +
+    policy.probeTimeoutMs * policy.candidateHealthProbeLimit;
+  if (mode === "quick" && total > 30_000) {
+    throw new SetupApiRequestError(
+      400,
+      "REGISTER_VERIFICATION_POLICY_INVALID",
+      "Ordinary registration verification has a hard total budget of 30000ms.",
+      {
+        retryable: false,
+        detail: { requestedTotalMs: total },
+        userAction: "Use the documented quick policy or an explicit slow-adapter workflow."
+      }
+    );
+  }
+  return policy;
+}
+
+function registrationHealthCandidates(app: AppRecord, detected: string[] = []): string[] {
+  return [...new Set([...(app.healthUrl ? [app.healthUrl] : []), ...detected, "/api/ping", "/health", "/"])]
+    .filter((candidate) => candidate.startsWith("/"))
+    .slice(0, 8);
+}
+
+function verificationIntent(policy: RegistrationVerificationPolicy, healthCandidates: string[]) {
+  return {
+    mode: policy.mode,
+    willStart: policy.mode === "quick",
+    willStop: policy.mode === "quick",
+    expectedMaximumMs:
+      policy.mode === "quick"
+        ? policy.startupBudgetMs +
+          policy.stopBudgetMs +
+          policy.closureBudgetMs +
+          policy.probeTimeoutMs * policy.candidateHealthProbeLimit
+        : 0,
+    healthCandidates: healthCandidates.slice(0, policy.candidateHealthProbeLimit + 1)
+  };
 }
 
 export async function inspectManifest(raw: Record<string, unknown>): Promise<ExistingManifestAnalysis> {

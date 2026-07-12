@@ -105,6 +105,20 @@ type SetupRegistrationApplyCompletedMsg struct {
 	Result  *relaybaseclient.RegistrationSetupResult
 }
 
+type SetupRegistrationCancelCompletedMsg struct {
+	Result *relaybaseclient.RegistrationVerificationCancelResult
+}
+
+type SetupRegistrationRepairPreviewCompletedMsg struct {
+	Request relaybaseclient.RegistrationRepairPreviewRequest
+	Result  *relaybaseclient.RegistrationRepairPreviewResult
+}
+
+type SetupRegistrationRepairApplyCompletedMsg struct {
+	Request relaybaseclient.RegistrationRepairApplyRequest
+	Result  *relaybaseclient.RegistrationSetupResult
+}
+
 type SetupManifestInspectCompletedMsg struct {
 	Request relaybaseclient.RegisterManifestRequest
 	Result  *relaybaseclient.ExistingManifestAnalysis
@@ -609,6 +623,36 @@ func SetupRegistrationApplyCmd(ctx context.Context, client *relaybaseclient.Clie
 			return SetupFailedMsg{Action: "apply registration", Err: err}
 		}
 		return SetupRegistrationApplyCompletedMsg{Request: request, Result: result}
+	}
+}
+
+func SetupRegistrationCancelCmd(ctx context.Context, client *relaybaseclient.Client, appID string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := client.CancelRegistrationVerification(ctx, appID)
+		if err != nil {
+			return SetupFailedMsg{Action: "cancel registration verification", Err: err}
+		}
+		return SetupRegistrationCancelCompletedMsg{Result: result}
+	}
+}
+
+func SetupRegistrationRepairPreviewCmd(ctx context.Context, client *relaybaseclient.Client, request relaybaseclient.RegistrationRepairPreviewRequest) tea.Cmd {
+	return func() tea.Msg {
+		result, err := client.PreviewRegistrationRepair(ctx, request)
+		if err != nil {
+			return SetupFailedMsg{Action: "preview registration repair", Err: err}
+		}
+		return SetupRegistrationRepairPreviewCompletedMsg{Request: request, Result: result}
+	}
+}
+
+func SetupRegistrationRepairApplyCmd(ctx context.Context, client *relaybaseclient.Client, request relaybaseclient.RegistrationRepairApplyRequest) tea.Cmd {
+	return func() tea.Msg {
+		result, err := client.ApplyRegistrationRepair(ctx, request)
+		if err != nil {
+			return SetupFailedMsg{Action: "apply registration repair", Err: err}
+		}
+		return SetupRegistrationRepairApplyCompletedMsg{Request: request, Result: result}
 	}
 }
 

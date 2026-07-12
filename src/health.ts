@@ -25,6 +25,29 @@ export async function checkAppHealth(
   return checkHttpHealth(url, timeoutMs, signal);
 }
 
+export interface HttpHealthProbeResult {
+  target: string;
+  ok: boolean;
+  statusCode?: number;
+}
+
+export async function probeLocalHealthTarget(
+  target: string,
+  port: number,
+  host = "127.0.0.1",
+  timeoutMs = 1000,
+  signal?: AbortSignal
+): Promise<HttpHealthProbeResult> {
+  const url =
+    target.startsWith("http://") || target.startsWith("https://")
+      ? new URL(target)
+      : new URL(target, `http://${host}:${port}`);
+  if (!isLocalHealthHost(url.hostname)) {
+    return { target, ok: false };
+  }
+  return checkHttpHealthResult(url, timeoutMs, signal);
+}
+
 export async function waitForHealthy(
   app: AppRecord,
   port: number,
@@ -53,20 +76,24 @@ function healthProbeTimeoutMs(timeoutMs: number): number {
 }
 
 function checkHttpHealth(url: string, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
+  return checkHttpHealthResult(new URL(url), timeoutMs, signal).then((result) => result.ok);
+}
+
+function checkHttpHealthResult(url: URL, timeoutMs: number, signal?: AbortSignal): Promise<HttpHealthProbeResult> {
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (healthy: boolean) => {
+    const finish = (healthy: boolean, statusCode?: number) => {
       if (settled) {
         return;
       }
       settled = true;
       signal?.removeEventListener("abort", abort);
-      resolve(healthy);
+      resolve({ target: `${url.pathname}${url.search}`, ok: healthy, ...(statusCode ? { statusCode } : {}) });
     };
-    const client = url.startsWith("https://") ? https : http;
+    const client = url.protocol === "https:" ? https : http;
     const request = client.request(url, { method: "GET", timeout: timeoutMs }, (response) => {
       response.resume();
-      finish(isHealthyHttpStatus(response.statusCode));
+      finish(isHealthyHttpStatus(response.statusCode), response.statusCode);
     });
     const abort = () => {
       request.destroy();
@@ -85,6 +112,11 @@ function checkHttpHealth(url: string, timeoutMs: number, signal?: AbortSignal): 
     request.once("error", () => finish(false));
     request.end();
   });
+}
+
+function isLocalHealthHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
 }
 
 function abortableDelay(timeoutMs: number, signal?: AbortSignal): Promise<boolean> {

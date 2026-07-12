@@ -81,6 +81,15 @@ export interface LifecycleAttempt {
     port: CompiledLaunchPlan["port"];
   };
   hooks: LifecycleHookAttempt[];
+  verification?: {
+    registrationPreviewId?: string;
+    policyDigest?: string;
+    declaredTarget?: string;
+    successfulTarget?: string;
+    statusCode?: number;
+    assignedPortOpen?: boolean;
+    candidateTargetsChecked: string[];
+  };
   error?: string;
 }
 

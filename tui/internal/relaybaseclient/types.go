@@ -541,9 +541,68 @@ type RegisterManifestResult struct {
 }
 
 type RegistrationPreviewRequest struct {
-	Path string `json:"path"`
-	CWD  string `json:"cwd,omitempty"`
-	Mode string `json:"mode,omitempty"`
+	Path             string `json:"path"`
+	CWD              string `json:"cwd,omitempty"`
+	Mode             string `json:"mode,omitempty"`
+	VerificationMode string `json:"verificationMode"`
+}
+
+type RegistrationVerificationIntent struct {
+	Mode              string   `json:"mode"`
+	WillStart         bool     `json:"willStart"`
+	WillStop          bool     `json:"willStop"`
+	ExpectedMaximumMS int      `json:"expectedMaximumMs"`
+	HealthCandidates  []string `json:"healthCandidates,omitempty"`
+}
+
+type RegistrationVerificationFailure struct {
+	Code              string   `json:"code"`
+	Boundary          string   `json:"boundary"`
+	Message           string   `json:"message"`
+	RecommendedAction string   `json:"recommendedAction"`
+	ProcessRunning    bool     `json:"processRunning"`
+	BackendPortOpen   *bool    `json:"backendPortOpen,omitempty"`
+	Retryable         bool     `json:"retryable"`
+	LogExcerpt        []string `json:"logExcerpt,omitempty"`
+}
+
+type RegistrationRepairOption struct {
+	ID          string `json:"id"`
+	Kind        string `json:"kind"`
+	Label       string `json:"label"`
+	Recommended bool   `json:"recommended"`
+	Reason      string `json:"reason"`
+}
+
+type RegistrationRepairPreviewRequest struct {
+	AppID    string `json:"appId"`
+	RepairID string `json:"repairId"`
+}
+
+type RegistrationRepairPreviewResult struct {
+	PreviewID          string                         `json:"previewId"`
+	AppID              string                         `json:"appId"`
+	RepairID           string                         `json:"repairId"`
+	Repair             RegistrationRepairOption       `json:"repair"`
+	FileWritePlan      FileWritePlan                  `json:"fileWritePlan"`
+	Approval           RegistrationApproval           `json:"approval"`
+	VerificationIntent RegistrationVerificationIntent `json:"verificationIntent"`
+	Actions            []string                       `json:"actions,omitempty"`
+}
+
+type RegistrationRepairApplyRequest struct {
+	PreviewID    string             `json:"previewId"`
+	Confirm      bool               `json:"confirm"`
+	Confirmation *SetupConfirmation `json:"confirmation,omitempty"`
+}
+
+type RegistrationVerificationResult struct {
+	Status       string                           `json:"status"`
+	AssignedPort int                              `json:"assignedPort,omitempty"`
+	Health       json.RawMessage                  `json:"health,omitempty"`
+	Stop         json.RawMessage                  `json:"stop,omitempty"`
+	Failure      *RegistrationVerificationFailure `json:"failure,omitempty"`
+	Repairs      []RegistrationRepairOption       `json:"repairs,omitempty"`
 }
 
 type RegistrationApproval struct {
@@ -552,31 +611,45 @@ type RegistrationApproval struct {
 }
 
 type RegistrationSetupResult struct {
-	SchemaVersion int                  `json:"schemaVersion"`
-	Status        string               `json:"status"`
-	Code          string               `json:"code,omitempty"`
-	Message       string               `json:"message"`
-	ProjectRoot   string               `json:"projectRoot"`
-	ManifestPath  string               `json:"manifestPath"`
-	ManifestState string               `json:"manifestState"`
-	PreviewID     string               `json:"previewId,omitempty"`
-	App           *SetupAppRecord      `json:"app,omitempty"`
-	FileWritePlan *FileWritePlan       `json:"fileWritePlan,omitempty"`
-	Questions     []SetupQuestion      `json:"questions,omitempty"`
-	Risks         []SetupApprovalRisk  `json:"risks,omitempty"`
-	Approval      RegistrationApproval `json:"approval"`
-	Registered    bool                 `json:"registered"`
-	Started       bool                 `json:"started"`
-	FilesWritten  bool                 `json:"filesWritten"`
-	RetrySafe     bool                 `json:"retrySafe"`
-	Actions       []string             `json:"actions,omitempty"`
-	Diagnostics   []SetupDiagnostic    `json:"diagnostics,omitempty"`
+	SchemaVersion      int                             `json:"schemaVersion"`
+	Status             string                          `json:"status"`
+	Code               string                          `json:"code,omitempty"`
+	Message            string                          `json:"message"`
+	ProjectRoot        string                          `json:"projectRoot"`
+	ManifestPath       string                          `json:"manifestPath"`
+	ManifestState      string                          `json:"manifestState"`
+	PreviewID          string                          `json:"previewId,omitempty"`
+	App                *SetupAppRecord                 `json:"app,omitempty"`
+	FileWritePlan      *FileWritePlan                  `json:"fileWritePlan,omitempty"`
+	Questions          []SetupQuestion                 `json:"questions,omitempty"`
+	Risks              []SetupApprovalRisk             `json:"risks,omitempty"`
+	Approval           RegistrationApproval            `json:"approval"`
+	Registered         bool                            `json:"registered"`
+	Started            bool                            `json:"started"`
+	FilesWritten       bool                            `json:"filesWritten"`
+	RetrySafe          bool                            `json:"retrySafe"`
+	Actions            []string                        `json:"actions,omitempty"`
+	Diagnostics        []SetupDiagnostic               `json:"diagnostics,omitempty"`
+	VerificationIntent RegistrationVerificationIntent  `json:"verificationIntent"`
+	Verification       *RegistrationVerificationResult `json:"verification,omitempty"`
 }
 
 type RegistrationApplyRequest struct {
-	PreviewID    string             `json:"previewId"`
-	Confirm      bool               `json:"confirm"`
-	Confirmation *SetupConfirmation `json:"confirmation,omitempty"`
+	PreviewID        string             `json:"previewId"`
+	Confirm          bool               `json:"confirm"`
+	Confirmation     *SetupConfirmation `json:"confirmation,omitempty"`
+	SelectedRepairID string             `json:"selectedRepairId,omitempty"`
+}
+
+type RegistrationVerificationCancelRequest struct {
+	AppID string `json:"appId"`
+}
+
+type RegistrationVerificationCancelResult struct {
+	AppID     string `json:"appId"`
+	Cancelled bool   `json:"cancelled"`
+	Status    string `json:"status"`
+	Message   string `json:"message"`
 }
 
 type OpenProjectRequest struct {
