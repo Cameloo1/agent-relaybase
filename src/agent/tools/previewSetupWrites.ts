@@ -4,6 +4,7 @@ import { safeToolExecute, successResult, type RelaybaseAgentToolDefinition } fro
 
 const runtimeIdSchema = z.enum([
   "javascript-typescript",
+  "powershell",
   "python",
   "go",
   "rust",

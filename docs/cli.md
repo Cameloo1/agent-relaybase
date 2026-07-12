@@ -152,6 +152,19 @@ The default verification gate runs formatting, lint, typecheck, Node tests, Jest
 
 ## configure
 
+## register
+
+```powershell
+relaybase register C:\path\to\project --plan
+relaybase register C:\path\to\project
+relaybase register C:\path\to\project --yes --json
+relaybase register C:\path\to\project\relaybase.app.json --plan
+```
+
+Folder mode locates or proposes `relaybase.app.json`, compiles the launch plan, binds approval to the manifest and generated-file revisions, and registers only after confirmation. Exact manifest-file mode is strict. `--plan` and `--dry-run` never mutate; `--yes` applies the exact preview without an interactive prompt. Noninteractive apply without `--yes` fails closed. Registration never starts the app.
+
+Stable registration codes include `REGISTER_MANIFEST_NOT_FOUND`, `REGISTER_MANIFEST_INVALID`, `REGISTER_INPUT_REQUIRED`, `REGISTER_PREVIEW_REQUIRED`, `REGISTER_CONFIRMATION_REQUIRED`, `REGISTER_PREVIEW_STALE`, `REGISTER_REGISTRY_FAILED`, and `REGISTER_ALREADY_CURRENT`.
+
 ```powershell
 relaybase configure
 relaybase configure --yes

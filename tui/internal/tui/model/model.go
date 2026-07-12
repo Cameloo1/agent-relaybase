@@ -123,6 +123,7 @@ type RootModel struct {
 	lastAssistantLine      string
 	historyExpanded        bool
 	setupSession           setupwizard.State
+	registrationPreview    *relaybaseclient.RegistrationSetupResult
 	pendingConfirm         *confirmationRequest
 	quitConfirmation       bool
 	agentConfig            *relaybaseclient.AgentConfig
@@ -1152,6 +1153,22 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case commands.SetupRegisterCompletedMsg:
 		m.setupSession = setupwizard.FromRegister(msg.Result)
 		m.addAssistantMessage("Registered manifest for " + setupRegisterLabel(msg.Result) + ".")
+		return m, commands.FetchStateCmd(m.ctx, m.client)
+	case commands.SetupRegistrationPreviewCompletedMsg:
+		m.registrationPreview = msg.Result
+		m.addAssistantMessage(registrationPreviewMessage(msg.Result))
+		if msg.Result != nil && msg.Result.Approval.Required && msg.Result.PreviewID != "" {
+			command := slash.ParsedCommand{Raw: "/register " + quoteSetupPath(msg.Request.Path), Kind: slash.KindRegister, Path: msg.Request.Path, Target: msg.Request.Path}
+			confirmation, err := m.prepareConfirmation(command)
+			if err == nil {
+				m.pendingConfirm = confirmation
+				m.refreshAssistantPrompt()
+			}
+		}
+		return m, nil
+	case commands.SetupRegistrationApplyCompletedMsg:
+		m.registrationPreview = msg.Result
+		m.addAssistantMessage(registrationPreviewMessage(msg.Result))
 		return m, commands.FetchStateCmd(m.ctx, m.client)
 	case commands.SetupManifestInspectCompletedMsg:
 		m.setupSession = setupwizard.FromManifest(msg.Result)
@@ -2267,6 +2284,17 @@ func (m RootModel) submitSlashCommand(input string) (RootModel, tea.Cmd) {
 		return m, nil
 	}
 
+	if command.Kind == slash.KindRegister && !command.Confirm {
+		request, err := m.registrationPreviewRequest(command.Path)
+		if err != nil {
+			m.addAssistantMessage(err.Error())
+			m.restorePendingSubmissionDraft()
+			return m, nil
+		}
+		m.addAssistantMessage("Inspecting the project and compiling a registration preview. No files will be written.")
+		return m, commands.SetupRegistrationPreviewCmd(m.ctx, m.client, request)
+	}
+
 	if slash.RequiresConfirmation(command) && !command.Confirm {
 		confirmation, err := m.prepareConfirmation(command)
 		if err != nil {
@@ -2408,11 +2436,7 @@ func (m RootModel) agentManagedSlashInput(command slash.ParsedCommand) (assistan
 		}
 		return agentManagedSetupInput(command, "configure "+pathValue, pathValue, "/configure "+quoteSetupPath(pathValue)+" --dry-run"), true
 	case slash.KindRegister:
-		pathValue := strings.TrimSpace(firstNonEmpty(command.Path, command.Target))
-		if pathValue == "" || looksLikeManifestFile(pathValue) {
-			return assistant.ParsedInput{}, false
-		}
-		return agentManagedSetupInput(command, "register "+pathValue, pathValue, "/register "+quoteSetupPath(filepath.Join(pathValue, "relaybase.app.json"))), true
+		return assistant.ParsedInput{}, false
 	default:
 		return assistant.ParsedInput{}, false
 	}
@@ -2902,11 +2926,21 @@ func (m RootModel) setupCmdForCommand(command slash.ParsedCommand, confirmed boo
 			Confirmation:     &relaybaseclient.SetupConfirmation{Confirmed: true, Reason: "TUI configure confirmation"},
 		}), nil
 	case slash.KindRegister:
-		request, err := m.registerManifestRequest(command.Path)
-		if err != nil {
-			return nil, err
+		if !confirmed {
+			request, err := m.registrationPreviewRequest(command.Path)
+			if err != nil {
+				return nil, err
+			}
+			return commands.SetupRegistrationPreviewCmd(m.ctx, m.client, request), nil
 		}
-		return commands.SetupRegisterManifestCmd(m.ctx, m.client, request), nil
+		if m.registrationPreview == nil || m.registrationPreview.PreviewID == "" {
+			return nil, fmt.Errorf("Registration preview is unavailable or stale; run /register again.")
+		}
+		return commands.SetupRegistrationApplyCmd(m.ctx, m.client, relaybaseclient.RegistrationApplyRequest{
+			PreviewID:    m.registrationPreview.PreviewID,
+			Confirm:      true,
+			Confirmation: &relaybaseclient.SetupConfirmation{Confirmed: true, Reason: "TUI registration confirmation"},
+		}), nil
 	case slash.KindOpen:
 		cwd, err := m.cwdForSetupTarget(command.Target)
 		if err != nil {
@@ -3042,7 +3076,7 @@ func (m RootModel) registerManifestRequest(target string) (relaybaseclient.Regis
 		if err != nil {
 			return relaybaseclient.RegisterManifestRequest{}, err
 		}
-		return relaybaseclient.RegisterManifestRequest{ManifestPath: filepath.Join(cwd, "relaybase.app.json"), CWD: cwd}, nil
+		return relaybaseclient.RegisterManifestRequest{ManifestPath: filepath.Join(cwd, "relaybase.app.json"), CWD: cwd, Mode: "folder"}, nil
 	}
 	if trimmed == "" || strings.EqualFold(trimmed, "current") {
 		app := m.paneManager.SelectedPane()
@@ -3052,10 +3086,10 @@ func (m RootModel) registerManifestRequest(target string) (relaybaseclient.Regis
 		trimmed = app.AppID
 	}
 	if looksLikeManifestFile(trimmed) {
-		return relaybaseclient.RegisterManifestRequest{ManifestPath: trimmed, CWD: maybeDir(trimmed)}, nil
+		return relaybaseclient.RegisterManifestRequest{ManifestPath: trimmed, CWD: maybeDir(trimmed), Mode: "manifest"}, nil
 	}
 	if looksLikePath(trimmed) {
-		return relaybaseclient.RegisterManifestRequest{ManifestPath: filepath.Join(trimmed, "relaybase.app.json"), CWD: trimmed}, nil
+		return relaybaseclient.RegisterManifestRequest{ManifestPath: filepath.Join(trimmed, "relaybase.app.json"), CWD: trimmed, Mode: "folder"}, nil
 	}
 	app, err := m.appForTarget(trimmed)
 	if err != nil {
@@ -3065,7 +3099,19 @@ func (m RootModel) registerManifestRequest(target string) (relaybaseclient.Regis
 	if manifestPath == "" {
 		return relaybaseclient.RegisterManifestRequest{}, fmt.Errorf("App %s does not expose a manifest path in daemon state; provide an explicit relaybase.app.json path.", app.ID)
 	}
-	return relaybaseclient.RegisterManifestRequest{ManifestPath: manifestPath, CWD: setupwizard.CWDFromManifestPath(manifestPath)}, nil
+	return relaybaseclient.RegisterManifestRequest{ManifestPath: manifestPath, CWD: setupwizard.CWDFromManifestPath(manifestPath), Mode: "manifest"}, nil
+}
+
+func (m RootModel) registrationPreviewRequest(target string) (relaybaseclient.RegistrationPreviewRequest, error) {
+	request, err := m.registerManifestRequest(target)
+	if err != nil {
+		return relaybaseclient.RegistrationPreviewRequest{}, err
+	}
+	pathValue := request.ManifestPath
+	if request.Mode == "folder" {
+		pathValue = request.CWD
+	}
+	return relaybaseclient.RegistrationPreviewRequest{Path: pathValue, CWD: request.CWD, Mode: request.Mode}, nil
 }
 
 func (m RootModel) proveRequestForTarget(target string) (relaybaseclient.ProveHealthRequest, error) {
@@ -5506,6 +5552,29 @@ func setupPreviewReadyMessage(preview relaybaseclient.SetupPlanPreview) string {
 	}
 	if strategy := setupPreviewPortStrategy(preview); strategy != "" {
 		parts = append(parts, "port strategy "+strategy)
+	}
+	return assistant.SanitizeText(strings.Join(parts, "; ") + ".")
+}
+
+func registrationPreviewMessage(preview *relaybaseclient.RegistrationSetupResult) string {
+	if preview == nil {
+		return "Registration preview was unavailable. No files or registry state were changed."
+	}
+	parts := []string{preview.Message}
+	if preview.App != nil && preview.App.ID != "" {
+		parts = append(parts, "app "+preview.App.ID)
+	}
+	if preview.ManifestPath != "" {
+		parts = append(parts, "manifest "+preview.ManifestPath)
+	}
+	if preview.FileWritePlan != nil {
+		parts = append(parts, fmt.Sprintf("files %d", len(preview.FileWritePlan.Writes)))
+	}
+	if preview.Registered {
+		parts = append(parts, "registered")
+	}
+	if !preview.Started {
+		parts = append(parts, "app not started")
 	}
 	return assistant.SanitizeText(strings.Join(parts, "; ") + ".")
 }

@@ -50,6 +50,7 @@ Relaybase exposes these lifecycle tools:
 
 ```text
 configure_project
+plan_registration
 list_apps
 diagnose_token
 app_status
@@ -75,6 +76,8 @@ Token-gated mutation tools:
 - `restart_app`
 
 `configure_project` uses the same setup engine as `relaybase configure`. With `apply: false`, it returns a dry-run plan. With `apply: true`, it may write project files, register the app, and optionally start verification.
+
+`plan_registration` is read-only and returns the same folder-or-manifest preview used by the CLI and TUI. Apply its exact `previewId` with `register_app { previewId, confirm: true }`. Drift invalidates the preview and performs zero writes or registry updates. Registration does not start the app.
 
 `list_apps` is read-only. It accepts `all`, `running`, `active`, `stopped`, `ready`, and `attention` filters. Its compact items include id, name, readiness, runtime, health, route, port, action, and attention state.
 

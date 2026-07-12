@@ -95,6 +95,16 @@ type SetupRegisterCompletedMsg struct {
 	Result  *relaybaseclient.RegisterManifestResult
 }
 
+type SetupRegistrationPreviewCompletedMsg struct {
+	Request relaybaseclient.RegistrationPreviewRequest
+	Result  *relaybaseclient.RegistrationSetupResult
+}
+
+type SetupRegistrationApplyCompletedMsg struct {
+	Request relaybaseclient.RegistrationApplyRequest
+	Result  *relaybaseclient.RegistrationSetupResult
+}
+
 type SetupManifestInspectCompletedMsg struct {
 	Request relaybaseclient.RegisterManifestRequest
 	Result  *relaybaseclient.ExistingManifestAnalysis
@@ -579,6 +589,26 @@ func SetupRegisterManifestCmd(ctx context.Context, client *relaybaseclient.Clien
 			return SetupFailedMsg{Action: "register manifest", Err: err}
 		}
 		return SetupRegisterCompletedMsg{Request: request, Result: result}
+	}
+}
+
+func SetupRegistrationPreviewCmd(ctx context.Context, client *relaybaseclient.Client, request relaybaseclient.RegistrationPreviewRequest) tea.Cmd {
+	return func() tea.Msg {
+		result, err := client.PreviewRegistration(ctx, request)
+		if err != nil {
+			return SetupFailedMsg{Action: "preview registration", Err: err}
+		}
+		return SetupRegistrationPreviewCompletedMsg{Request: request, Result: result}
+	}
+}
+
+func SetupRegistrationApplyCmd(ctx context.Context, client *relaybaseclient.Client, request relaybaseclient.RegistrationApplyRequest) tea.Cmd {
+	return func() tea.Msg {
+		result, err := client.ApplyRegistration(ctx, request)
+		if err != nil {
+			return SetupFailedMsg{Action: "apply registration", Err: err}
+		}
+		return SetupRegistrationApplyCompletedMsg{Request: request, Result: result}
 	}
 }
 

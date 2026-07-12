@@ -68,6 +68,103 @@ test("setup detect, generic plans, and preview are read-only", async () => {
   }
 });
 
+test("one-file folder registration previews, binds drift, registers, and never starts", async () => {
+  const project = await tempProject("relaybase-register-one-file-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-register-one-file-state-"));
+  await fs.writeFile(
+    path.join(project, "Start-Dashboard.ps1"),
+    "param([string]$HostName, [int]$Port)\n$listener = [System.Net.HttpListener]::new()\n",
+    "utf8"
+  );
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
+  try {
+    await hub.listen();
+    const port = hub.address().port;
+    const preview = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
+      path: project,
+      mode: "folder"
+    });
+    assert.equal(preview.statusCode, 200);
+    assert.equal(preview.json.setup.status, "approval_required");
+    assert.equal(preview.json.setup.manifestState, "missing");
+    assert.equal(preview.json.setup.selectedPlan.id, "structured-argument-launch");
+    assert.equal(preview.json.setup.app.launch.portBinding, "arguments");
+    assert.equal(await exists(path.join(project, "relaybase.app.json")), false);
+
+    const noConfirmation = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/setup/register/apply",
+      { previewId: preview.json.setup.previewId },
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(noConfirmation.statusCode, 428);
+    assert.equal(await exists(path.join(project, "relaybase.app.json")), false);
+
+    const applied = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/setup/register/apply",
+      { previewId: preview.json.setup.previewId, confirm: true, confirmation: { confirmed: true } },
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(applied.statusCode, 202, applied.body);
+    assert.equal(applied.json.setup.status, "registered");
+    assert.equal(applied.json.setup.started, false);
+    const status = (await hub.runtime.processes.listStatuses()).find((item) => item.id === applied.json.setup.app.id);
+    assert.equal(status?.runtime.status, "stopped");
+    const manifest = JSON.parse(await fs.readFile(path.join(project, "relaybase.app.json"), "utf8"));
+    assert.equal(manifest.command, undefined);
+    assert.equal(manifest.launch.portBinding, "arguments");
+  } finally {
+    await hub.close();
+  }
+});
+
+test("explicit missing manifest is strict and stale registration preview performs zero mutation", async () => {
+  const project = await tempProject("relaybase-register-strict-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-register-strict-state-"));
+  const manifestPath = path.join(project, "relaybase.app.json");
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
+  try {
+    await hub.listen();
+    const port = hub.address().port;
+    const missing = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
+      path: manifestPath,
+      mode: "manifest"
+    });
+    assert.equal(missing.json.setup.code, "REGISTER_MANIFEST_NOT_FOUND");
+    assert.equal(missing.json.setup.approval.required, false);
+
+    await fs.writeFile(
+      manifestPath,
+      JSON.stringify({ schemaVersion: 1, id: "strict-app", name: "Strict App", command: "node app.js" }, null, 2),
+      "utf8"
+    );
+    const preview = await apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
+      path: manifestPath,
+      mode: "manifest"
+    });
+    await fs.writeFile(
+      manifestPath,
+      JSON.stringify({ schemaVersion: 1, id: "strict-app", name: "Drifted", command: "node app.js" }, null, 2),
+      "utf8"
+    );
+    const stale = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/setup/register/apply",
+      { previewId: preview.json.setup.previewId, confirm: true, confirmation: { confirmed: true } },
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(stale.statusCode, 409);
+    assert.equal(stale.json.code, "REGISTER_PREVIEW_STALE");
+    assert.equal(await hub.runtime.registry.get("strict-app"), undefined);
+  } finally {
+    await hub.close();
+  }
+});
+
 test("setup plans expose Next/Vite framework wrappers and pinned upstream ports", async () => {
   const nextProject = await tempProject("relaybase-setup-api-next-");
   const viteProject = await tempProject("relaybase-setup-api-vite-");

@@ -532,11 +532,51 @@ type ManifestPatchResult struct {
 type RegisterManifestRequest struct {
 	CWD          string `json:"cwd,omitempty"`
 	ManifestPath string `json:"manifestPath"`
+	Mode         string `json:"mode,omitempty"`
 }
 
 type RegisterManifestResult struct {
 	App          SetupAppRecord `json:"app"`
 	ManifestPath string         `json:"manifestPath"`
+}
+
+type RegistrationPreviewRequest struct {
+	Path string `json:"path"`
+	CWD  string `json:"cwd,omitempty"`
+	Mode string `json:"mode,omitempty"`
+}
+
+type RegistrationApproval struct {
+	Required  bool   `json:"required"`
+	PreviewID string `json:"previewId,omitempty"`
+}
+
+type RegistrationSetupResult struct {
+	SchemaVersion int                  `json:"schemaVersion"`
+	Status        string               `json:"status"`
+	Code          string               `json:"code,omitempty"`
+	Message       string               `json:"message"`
+	ProjectRoot   string               `json:"projectRoot"`
+	ManifestPath  string               `json:"manifestPath"`
+	ManifestState string               `json:"manifestState"`
+	PreviewID     string               `json:"previewId,omitempty"`
+	App           *SetupAppRecord      `json:"app,omitempty"`
+	FileWritePlan *FileWritePlan       `json:"fileWritePlan,omitempty"`
+	Questions     []SetupQuestion      `json:"questions,omitempty"`
+	Risks         []SetupApprovalRisk  `json:"risks,omitempty"`
+	Approval      RegistrationApproval `json:"approval"`
+	Registered    bool                 `json:"registered"`
+	Started       bool                 `json:"started"`
+	FilesWritten  bool                 `json:"filesWritten"`
+	RetrySafe     bool                 `json:"retrySafe"`
+	Actions       []string             `json:"actions,omitempty"`
+	Diagnostics   []SetupDiagnostic    `json:"diagnostics,omitempty"`
+}
+
+type RegistrationApplyRequest struct {
+	PreviewID    string             `json:"previewId"`
+	Confirm      bool               `json:"confirm"`
+	Confirmation *SetupConfirmation `json:"confirmation,omitempty"`
 }
 
 type OpenProjectRequest struct {

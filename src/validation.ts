@@ -1,6 +1,8 @@
 import path from "node:path";
 import type {
   AppManifestInput,
+  AppLaunch,
+  AppLaunchPortBinding,
   AppMcpConfig,
   AppProtocol,
   AppRecord,
@@ -11,6 +13,7 @@ import type {
   McpExposePolicy,
   RelaybaseManifestMetadata
 } from "./types.ts";
+import { RELAYBASE_LAUNCH_TOKENS } from "./launchPlan.ts";
 
 const APP_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const VALID_PROTOCOLS = new Set<AppProtocol>(["http", "http+ws", "tcp"]);
@@ -45,7 +48,11 @@ export function normalizeManifest(
   const manifestDir = options.manifestPath ? path.dirname(path.resolve(options.manifestPath)) : process.cwd();
   const id = requiredString(input.id, "id").trim();
   const name = requiredString(input.name, "name").trim();
-  const command = requiredString(input.command, "command").trim();
+  const launch = normalizeLaunch(input.launch, input.upstreamPort);
+  if (input.command !== undefined && launch) {
+    throw new Error("Manifest fields command and launch cannot both be provided. Choose one launch contract.");
+  }
+  const command = launch ? launch.executable : requiredString(input.command, "command").trim();
   const protocol = optionalString(input.protocol, "protocol") ?? "http";
 
   validateAppId(id);
@@ -86,7 +93,7 @@ export function normalizeManifest(
   ].some((value) => value !== undefined);
   const schemaVersion = normalizeSchemaVersion(
     input.schemaVersion,
-    input.mcp !== undefined || hasLifecycleFields || relaybase.seen
+    input.mcp !== undefined || input.launch !== undefined || hasLifecycleFields || relaybase.seen
   );
   const mcp = normalizeMcpConfig(input.mcp, cwd);
 
@@ -95,6 +102,7 @@ export function normalizeManifest(
     id,
     name,
     command,
+    ...(launch ? { launch } : {}),
     cwd,
     protocol: protocol as AppProtocol,
     ...(healthUrl ? { healthUrl } : {}),
@@ -114,6 +122,64 @@ export function normalizeManifest(
     createdAt: now,
     updatedAt: now
   };
+}
+
+function normalizeLaunch(value: unknown, upstreamPortValue: unknown): AppLaunch | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Manifest field launch must be an object.");
+  }
+  const raw = value as Record<string, unknown>;
+  const executable = requiredString(raw.executable, "launch.executable").trim();
+  if (!executable) {
+    throw new Error("Manifest field launch.executable cannot be empty.");
+  }
+  const args = normalizeLaunchArgs(raw.args);
+  const environment = normalizeLaunchEnvironment(raw.environment);
+  const portBinding = (optionalString(raw.portBinding, "launch.portBinding") ?? "environment") as AppLaunchPortBinding;
+  if (!["environment", "arguments", "fixed", "external"].includes(portBinding)) {
+    throw new Error("Manifest field launch.portBinding must be one of: environment, arguments, fixed, external.");
+  }
+  if ((portBinding === "fixed" || portBinding === "external") && normalizePort(upstreamPortValue) === undefined) {
+    throw new Error(`Manifest field upstreamPort is required when launch.portBinding is ${portBinding}.`);
+  }
+  for (const [field, entry] of [
+    ["launch.executable", executable],
+    ...args.map((entry, index) => [`launch.args[${index}]`, entry]),
+    ...Object.entries(environment).map(([key, entry]) => [`launch.environment.${key}`, entry])
+  ] as Array<[string, string]>) {
+    validateLaunchValue(entry, field);
+  }
+  return { executable, args, environment, portBinding };
+}
+
+function normalizeLaunchArgs(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new Error("Manifest field launch.args must be an array of strings.");
+  }
+  return [...value] as string[];
+}
+
+function normalizeLaunchEnvironment(value: unknown): Record<string, string> {
+  if (value === undefined || value === null) return {};
+  return normalizeEnv(value);
+}
+
+function validateLaunchValue(value: string, field: string): void {
+  const tokens = value.match(/\{relaybase\.[A-Za-z0-9]+\}/g) ?? [];
+  for (const token of tokens) {
+    if (!RELAYBASE_LAUNCH_TOKENS.has(token)) {
+      throw new Error(`Manifest field ${field} contains unsupported Relaybase token ${token}.`);
+    }
+  }
+  if (/\$(?:PORT|HOST)\b|%(?:PORT|HOST)%|\$\(|`[^`]*`/.test(value)) {
+    throw new Error(
+      `Manifest field ${field} contains shell interpolation. Use controlled {relaybase.*} tokens instead.`
+    );
+  }
 }
 
 export function mergeAppRecord(existing: AppRecord | undefined, incoming: AppRecord, now = new Date()): AppRecord {

@@ -1,6 +1,7 @@
 export type RuntimeId =
   | "javascript-typescript"
   | "python"
+  | "powershell"
   | "go"
   | "rust"
   | "java"

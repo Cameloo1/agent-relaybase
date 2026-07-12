@@ -105,6 +105,7 @@ export async function detectRuntimeMatrix(input: PartialRuntimeDetectionInput): 
 export function defaultRuntimeAdapters(): RuntimeAdapter[] {
   return [
     javascriptAdapter(),
+    powershellAdapter(),
     pythonAdapter(),
     goAdapter(),
     javaAdapter(),
@@ -198,9 +199,50 @@ async function collectSnippets(root: string, relativeFiles: string[]): Promise<R
 }
 
 function isInterestingSnippetPath(relative: string): boolean {
-  return /(^|\/)(package\.json|pyproject\.toml|requirements\.txt|Pipfile|manage\.py|app\.py|main\.py|wsgi\.py|asgi\.py|go\.mod|go\.work|main\.go|air\.toml|pom\.xml|build\.gradle|build\.gradle\.kts|settings\.gradle|settings\.gradle\.kts|Program\.cs|[^/]+\.csproj|launchSettings\.json|Gemfile|config\.ru|composer\.json|artisan|Cargo\.toml|mix\.exs|build\.sbt|deps\.edn|project\.clj|pubspec\.yaml|Procfile|Procfile\.dev|Makefile|CMakeLists\.txt|docker-compose\.ya?ml|compose\.ya?ml)$/i.test(
+  return /(^|\/)(package\.json|pyproject\.toml|requirements\.txt|Pipfile|manage\.py|app\.py|main\.py|wsgi\.py|asgi\.py|[^/]+\.py|[^/]+\.ps1|go\.mod|go\.work|main\.go|air\.toml|pom\.xml|build\.gradle|build\.gradle\.kts|settings\.gradle|settings\.gradle\.kts|Program\.cs|[^/]+\.csproj|launchSettings\.json|Gemfile|config\.ru|composer\.json|artisan|Cargo\.toml|mix\.exs|build\.sbt|deps\.edn|project\.clj|pubspec\.yaml|Procfile|Procfile\.dev|Makefile|CMakeLists\.txt|docker-compose\.ya?ml|compose\.ya?ml)$/i.test(
     relative
   );
+}
+
+function powershellAdapter(): RuntimeAdapter {
+  return adapter("powershell", 1, (input) => {
+    const scripts = matchingFiles(input, [/\.ps1$/i]);
+    if (!scripts.length) return undefined;
+    const candidates = scripts.flatMap((script) => {
+      const text = snippet(input, script);
+      const hostParameter = /\[(?:string|ipaddress)\]\s*\$Host(?:Name)?\b|\$HostName\b/i.test(text);
+      const portParameter = /\[int\]\s*\$Port\b|\$Port\b/i.test(text);
+      const webServer = /HttpListener|TcpListener|Start-Dashboard|uvicorn|flask|http\.server|web server/i.test(text);
+      if (!hostParameter || !portParameter || !webServer || !isSafeCommandPathPart(script)) return [];
+      return [
+        command(
+          `powershell.${slash(script)}`,
+          `PowerShell launcher ${script}`,
+          [`.\\${script.replaceAll("/", "\\")}`, "-HostName", "<HOST>", "-Port", "<PORT>"],
+          "high",
+          ["PowerShell host and port parameters plus web-server behavior detected"]
+        )
+      ];
+    });
+    return result({
+      runtime: "powershell",
+      label: "PowerShell application launcher",
+      tier: 1,
+      confidence: candidates.length === 1 ? "high" : candidates.length > 1 ? "medium" : "low",
+      detectionFiles: scripts,
+      buildToolIndicators: ["PowerShell"],
+      serverIndicators: candidates.length ? ["parameterized web launcher"] : [],
+      startCommandCandidates: candidates,
+      portStrategies: candidates.length
+        ? [portStrategy("explicit_host_port_flags", "high", { args: ["-HostName", "<HOST>", "-Port", "<PORT>"] })]
+        : [portStrategy("manual_custom", "low")],
+      healthCandidates: health(["/api/ping", "/health", "/"], "PowerShell-hosted application health routes"),
+      questions:
+        candidates.length === 1
+          ? []
+          : [question("powershell.launcher", "Choose the PowerShell web launcher and its host/port parameters.", true)]
+    });
+  });
 }
 
 function isInside(root: string, target: string): boolean {
@@ -305,7 +347,7 @@ function pythonAdapter(): RuntimeAdapter {
       /^poetry\.lock$/,
       /^Pipfile$/,
       /^manage\.py$/,
-      /^(app|main|wsgi|asgi)\.py$/
+      /\.py$/
     ]);
     if (!files.length) {
       return undefined;
@@ -315,6 +357,8 @@ function pythonAdapter(): RuntimeAdapter {
     const django = hasFile(input, /^manage\.py$/) || /django/i.test(text);
     const fastapi = /fastapi|uvicorn|starlette/i.test(text);
     const flask = /flask/i.test(text);
+    const genericHostPort = /(?:--host|['"]host['"])/i.test(text) && /(?:--port|['"]port['"])/i.test(text);
+    const genericWeb = /http\.server|socketserver|aiohttp|bottle|tornado|sanic|web server|serve\s*\(/i.test(text);
     const tool = pythonTool(input);
     const module = hasFile(input, /^app\.py$/) ? "app:app" : "main:app";
     const candidates = [
@@ -351,6 +395,19 @@ function pythonAdapter(): RuntimeAdapter {
             )
           ]
         : []),
+      ...(!django && !fastapi && !flask && genericHostPort && genericWeb
+        ? matchingFiles(input, [/\.py$/])
+            .slice(0, 1)
+            .map((script) =>
+              command(
+                `python.argument.${slash(script)}`,
+                `Python web script ${script}`,
+                ["python", script, "--host", "<HOST>", "--port", "<PORT>"],
+                "high",
+                ["Explicit host/port arguments and web-server behavior detected"]
+              )
+            )
+        : []),
       ...(!django && !fastapi && !flask && (hasFile(input, /^app\.py$/) || hasFile(input, /^main\.py$/))
         ? [
             command(
@@ -365,7 +422,7 @@ function pythonAdapter(): RuntimeAdapter {
         : [])
     ].map(flattenToolCommand);
     const confidence: SetupConfidence =
-      django || fastapi || flask
+      django || fastapi || flask || (genericHostPort && genericWeb)
         ? "high"
         : files.some((file) => /^pyproject\.toml$|^requirements\.txt$/.test(file))
           ? "medium"
@@ -387,9 +444,13 @@ function pythonAdapter(): RuntimeAdapter {
       ],
       startCommandCandidates: candidates,
       portStrategies: [
-        portStrategy("explicit_host_port_flags", django || fastapi || flask ? "high" : "low", {
-          args: django ? ["runserver", "<HOST>:<PORT>"] : ["--host", "<HOST>", "--port", "<PORT>"]
-        }),
+        portStrategy(
+          "explicit_host_port_flags",
+          django || fastapi || flask || (genericHostPort && genericWeb) ? "high" : "low",
+          {
+            args: django ? ["runserver", "<HOST>:<PORT>"] : ["--host", "<HOST>", "--port", "<PORT>"]
+          }
+        ),
         portStrategy("env_port", "medium", { env: { PORT: "<PORT>", HOST: "<HOST>" } }),
         ...fixedPortStrategies(input)
       ],

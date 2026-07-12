@@ -21,30 +21,33 @@ relaybase start
 
 Relaybase starts its localhost daemon when safe and opens the terminal UI. If port `7777` is already occupied by a non-Relaybase process, startup fails with a recovery action instead of taking over the port.
 
-## 3. Configure a project
+## 3. Register a project
 
 In another terminal, change to an application directory:
 
 ```bash
 cd path/to/your-project
-relaybase configure
+relaybase register . --plan
+relaybase register .
 ```
 
-Relaybase detects supported runtimes, proposes a setup plan, previews guarded writes, and asks before applying them. The resulting `relaybase.app.json` keeps command and route ownership explicit.
+Relaybase locates `relaybase.app.json`, validates and compiles its launch behavior, then asks before updating registry state. When the manifest is missing, folder registration detects supported runtimes and previews the proposed manifest. It never writes or starts the app before approval.
 
 Use a dry run when you only want the plan:
 
 ```bash
-relaybase configure --dry-run
+relaybase register . --plan
 ```
 
-## 4. Open the app
+Use `relaybase configure` when you explicitly want the broader setup/repair wizard. In the TUI, `/add <folder>` is the simplest discovery flow and `/register <folder>` is the one-command registration coordinator.
+
+## 4. Start or open the app
 
 ```bash
-relaybase open
+relaybase start <app-id>
 ```
 
-The command ensures the daemon, registers the manifest, starts the app, checks readiness, and opens the stable route when ready. It reports structured recovery choices when any phase fails.
+Registration and start remain separate approvals. `relaybase open` is still available as the daily configure/start/readiness/browser convenience flow after you understand that it crosses the lifecycle boundary.
 
 ## 5. Inspect and recover
 

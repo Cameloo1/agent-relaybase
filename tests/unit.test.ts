@@ -28,6 +28,7 @@ import {
 } from "../src/tuiBridge.ts";
 import type { DaemonEnsureResult } from "../src/daemonLauncher.ts";
 import { normalizeManifest, validateAppId } from "../src/validation.ts";
+import { compileLaunchPlan } from "../src/launchPlan.ts";
 import {
   evaluateStatus,
   parseStatusLines,
@@ -72,6 +73,86 @@ type TestTuiSpawnOptions = {
   stdio: "inherit" | ["ignore", "pipe", "pipe"];
   cwd?: string;
 };
+
+test("structured launch validates controlled tokens and compiles argument boundaries without shell interpolation", () => {
+  const app = normalizeManifest(
+    {
+      schemaVersion: 1,
+      id: "computer-stats",
+      name: "Computer Stats",
+      cwd: ".",
+      protocol: "http",
+      healthUrl: "/api/ping",
+      launch: {
+        executable: ".\\Start Dashboard.ps1",
+        args: ["-HostName", "{relaybase.host}", "-Port", "{relaybase.port}", "value with spaces"],
+        environment: { DASHBOARD_URL: "{relaybase.baseUrl}" },
+        portBinding: "arguments"
+      }
+    },
+    { manifestPath: path.join("C:\\Projects\\Computer Stats", "relaybase.app.json"), now: new Date(0) }
+  );
+  const plan = compileLaunchPlan(app, { host: "127.0.0.1", port: 17042, hubPort: 7777 });
+  assert.equal(plan.adapterId, "structured-powershell");
+  assert.deepEqual(plan.args, ["-HostName", "127.0.0.1", "-Port", "17042", "value with spaces"]);
+  assert.equal(plan.port.ownership, "relaybase");
+  assert.equal(plan.port.strategy, "arguments");
+  assert.equal(plan.environment.DASHBOARD_URL, "http://computer-stats.localhost:7777");
+  assert.throws(
+    () => normalizeManifest({ id: "bad", name: "Bad", launch: { executable: "node", args: ["$PORT"] } }),
+    /shell interpolation/
+  );
+  assert.throws(
+    () => normalizeManifest({ id: "bad", name: "Bad", launch: { executable: "node", args: ["{relaybase.unknown}"] } }),
+    /unsupported Relaybase token/
+  );
+  assert.throws(
+    () => normalizeManifest({ id: "bad", name: "Bad", command: "node app.js", launch: { executable: "node" } }),
+    /cannot both be provided/
+  );
+});
+
+test("process manager passes assigned port and spaced arguments through structured launch with shell disabled", async () => {
+  const project = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-structured-process-"));
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-structured-process-state-"));
+  const scriptPath = path.join(project, "server.cjs");
+  const evidencePath = path.join(project, "args.json");
+  await fs.writeFile(
+    scriptPath,
+    `const fs=require("node:fs"),http=require("node:http");\nconst [port,value]=process.argv.slice(2);\nfs.writeFileSync(${JSON.stringify(evidencePath)},JSON.stringify({port,value}));\nhttp.createServer((_q,r)=>{r.statusCode=200;r.end("ok")}).listen(Number(port),"127.0.0.1");\n`,
+    "utf8"
+  );
+  const registry = new Registry(stateDir);
+  await registry.load();
+  await registry.upsertManifest({
+    schemaVersion: 1,
+    id: "structured-process",
+    name: "Structured Process",
+    cwd: project,
+    protocol: "http",
+    healthUrl: "/",
+    launch: {
+      executable: process.execPath,
+      args: [scriptPath, "{relaybase.port}", "value with spaces"],
+      environment: {},
+      portBinding: "arguments"
+    }
+  });
+  const manager = new ProcessManager(registry, { portRangeStart: 18100, portRangeEnd: 18199 });
+  try {
+    const started = await manager.start("structured-process");
+    assert.equal(started.status, "running");
+    assert.equal(started.lastStartAttempt?.launchPlan?.adapterId, "structured-process");
+    assert.deepEqual(JSON.parse(await fs.readFile(evidencePath, "utf8")), {
+      port: String(started.assignedPort),
+      value: "value with spaces"
+    });
+  } finally {
+    const stopped = await manager.stop("structured-process");
+    assert.equal(stopped.status, "stopped");
+    assert.equal(stopped.stopVerification?.portClosureVerified, true);
+  }
+});
 
 test("validates app ids", () => {
   assert.doesNotThrow(() => validateAppId("notes"));

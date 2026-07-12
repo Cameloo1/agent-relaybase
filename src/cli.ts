@@ -14,7 +14,8 @@ import {
 } from "./appListing.ts";
 import type { DockerComposeDetection, DockerSetupOptions } from "./dockerProfile.ts";
 import { createRelaybaseServer } from "./server.ts";
-import { Registry, readManifestFile } from "./registry.ts";
+import { ensureDaemon } from "./daemonLauncher.ts";
+import { Registry } from "./registry.ts";
 import { DEFAULT_HOST, DEFAULT_PORT, getDefaultStateDir, getOrCreateSessionToken } from "./state.ts";
 import type { AppState, AppStatusView } from "./types.ts";
 import {
@@ -825,14 +826,83 @@ function printAgentApiResponse(response: Record<string, unknown>, options: CliOp
 
 async function register(manifestPath: string | undefined, options: CliOptions): Promise<void> {
   if (!manifestPath) {
-    throw new Error("Usage: relaybase register <manifest>");
+    throw new Error("Usage: relaybase register <project-folder|relaybase.app.json> [--plan|--yes] [--json]");
   }
+  const daemon = await ensureDaemon(options, options.daemonStartPolicy === "auto");
+  if (!daemon.reachable) {
+    throw new Error(`${daemon.userAction}${daemon.error ? ` (${daemon.error})` : ""}`);
+  }
+  const mode = path.basename(manifestPath).toLowerCase() === "relaybase.app.json" ? "manifest" : "folder";
+  const previewResponse = await apiRequest(
+    options,
+    "POST",
+    "/__hub/api/setup/register/preview",
+    { path: manifestPath, mode, cwd: options.cwd },
+    undefined,
+    STATE_API_TIMEOUT_MS
+  );
+  if (!previewResponse.ok) {
+    throw new Error(previewResponse.body || "Registration preview failed.");
+  }
+  const previewEnvelope = JSON.parse(previewResponse.body) as { setup: Record<string, unknown> };
+  const preview = previewEnvelope.setup;
+  if (options.json || options.plan) {
+    console.log(JSON.stringify(preview, null, 2));
+  } else {
+    printRegistrationPreview(preview);
+  }
+  if (preview.status === "registered" || options.plan || options.dryRun) {
+    return;
+  }
+  if (preview.approval && (preview.approval as { required?: boolean }).required !== true) {
+    throw new Error(String(preview.message ?? "Registration cannot continue from this state."));
+  }
+  const confirmed =
+    options.yes || (process.stdin.isTTY && (await askConfirmation("Apply this exact registration preview?")));
+  if (!confirmed) {
+    throw new Error(
+      "REGISTER_CONFIRMATION_REQUIRED: no files or registry state were changed. Re-run with --yes after reviewing --plan."
+    );
+  }
+  const token = await getOrCreateSessionToken(options.stateDir);
+  const applyResponse = await apiRequest(
+    options,
+    "POST",
+    "/__hub/api/setup/register/apply",
+    {
+      previewId: preview.previewId,
+      confirm: true,
+      confirmation: { confirmed: true, reason: options.yes ? "CLI --yes" : "CLI interactive confirmation" }
+    },
+    token,
+    STATE_API_TIMEOUT_MS
+  );
+  if (!applyResponse.ok) {
+    throw new Error(applyResponse.body || "Registration apply failed.");
+  }
+  const applied = (JSON.parse(applyResponse.body) as { setup: Record<string, unknown> }).setup;
+  if (options.json) {
+    console.log(JSON.stringify(applied, null, 2));
+    return;
+  }
+  const app = applied.app as { id?: string; name?: string } | undefined;
+  console.log(`Registered ${app?.id ?? "app"}${app?.name ? ` (${app.name})` : ""}. App not started.`);
+}
 
-  const registry = new Registry(options.stateDir);
-  await registry.load();
-  const manifest = await readManifestFile(manifestPath);
-  const app = await registry.upsertManifest(manifest, { manifestPath });
-  console.log(`Registered ${app.id} (${app.name})`);
+function printRegistrationPreview(preview: Record<string, unknown>): void {
+  console.log(String(preview.message ?? "Registration preview ready."));
+  const app = preview.app as
+    | { id?: string; name?: string; launch?: { executable?: string; args?: string[]; portBinding?: string } }
+    | undefined;
+  if (app) {
+    console.log(`App: ${app.id ?? "unknown"}${app.name ? ` (${app.name})` : ""}`);
+    if (app.launch) {
+      console.log(`Launch: ${app.launch.executable ?? "unknown"} ${(app.launch.args ?? []).join(" ")}`.trim());
+      console.log(`Port binding: ${app.launch.portBinding ?? "environment"}`);
+    }
+  }
+  console.log(`Manifest: ${String(preview.manifestPath ?? "unknown")}`);
+  console.log("No app will be started by registration.");
 }
 
 async function listApps(options: CliOptions): Promise<void> {
@@ -1748,6 +1818,16 @@ function askText(prompt: string, defaultValue: string): Promise<string> {
     rl.question(`${prompt} (${defaultValue}): `, (answer) => {
       rl.close();
       resolve(answer.trim() || defaultValue);
+    });
+  });
+}
+
+function askConfirmation(prompt: string): Promise<boolean> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(`${prompt} [y/N]: `, (answer) => {
+      rl.close();
+      resolve(/^y(?:es)?$/i.test(answer.trim()));
     });
   });
 }

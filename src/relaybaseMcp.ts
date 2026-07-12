@@ -31,6 +31,7 @@ import type { DockerSetupOptions } from "./dockerProfile.ts";
 import { readManifestFile } from "./registry.ts";
 import { sendJson } from "./responses.ts";
 import { configureProject } from "./setup.ts";
+import { applyRegistration, previewRegistration } from "./setupApi.ts";
 import type { RelaybaseRuntime } from "./server.ts";
 import type { AppRecord } from "./types.ts";
 
@@ -378,11 +379,26 @@ export class RelaybaseMcpService {
         annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false }
       },
       {
+        name: "plan_registration",
+        description:
+          "Inspect a project folder or exact manifest and return the deterministic approval-bound registration preview without writing files.",
+        inputSchema: objectSchema(
+          {
+            path: stringSchema("Project folder or exact relaybase.app.json path."),
+            mode: { type: "string", enum: ["folder", "manifest"] }
+          },
+          ["path"]
+        ),
+        annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false }
+      },
+      {
         name: "register_app",
-        description: "Register or update an app manifest.",
+        description: "Apply an exact registration preview, or register a legacy explicit manifest input.",
         inputSchema: objectSchema({
           manifest: { type: "object", description: "Relaybase app manifest object." },
-          manifestPath: stringSchema("Optional path to a relaybase.app.json file.")
+          manifestPath: stringSchema("Optional path to a relaybase.app.json file."),
+          previewId: stringSchema("Exact preview id returned by plan_registration."),
+          confirm: { type: "boolean", description: "Must be true when applying previewId." }
         }),
         annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false }
       },
@@ -467,6 +483,8 @@ export class RelaybaseMcpService {
           this.#requireMutationToken(extra, mutationAuthMode);
         }
         return structuredToolResult(await this.#proveApp(requiredArg(args.id, "id"), args.lifecycle === true));
+      case "plan_registration":
+        return structuredToolResult(await previewRegistration(this.runtime, args));
       case "register_app":
         this.#requireMutationToken(extra, mutationAuthMode);
         return structuredToolResult({ app: await this.#registerApp(args) });
@@ -496,6 +514,20 @@ export class RelaybaseMcpService {
   }
 
   async #registerApp(args: Record<string, unknown>): Promise<AppRecord> {
+    if (typeof args.previewId === "string") {
+      if (args.confirm !== true) {
+        throw new Error("REGISTER_CONFIRMATION_REQUIRED: register_app preview application requires confirm=true.");
+      }
+      const result = await applyRegistration(
+        this.runtime,
+        { previewId: args.previewId, confirm: true, confirmation: { confirmed: true, reason: "MCP confirmation" } },
+        randomUUID()
+      );
+      if (!result.app) {
+        throw new Error("REGISTER_REGISTRY_FAILED: registration completed without an app record.");
+      }
+      return result.app;
+    }
     if (typeof args.manifestPath === "string") {
       const manifest = await readManifestFile(args.manifestPath);
       return this.runtime.registry.upsertManifest(manifest, { manifestPath: args.manifestPath });

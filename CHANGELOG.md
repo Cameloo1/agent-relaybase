@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added one-file folder registration with strict manifest-file mode, approval-bound previews, drift detection, and idempotent registry updates.
+- Added structured shell-free launch declarations with controlled Relaybase tokens and direct PowerShell/Python argument adapters.
+- Added coordinator parity across HTTP, CLI, MCP, and the TUI while keeping lifecycle start separate.
+
 All notable user-facing changes are documented here.
 
 ## 0.1.0 - Preview

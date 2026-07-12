@@ -458,6 +458,46 @@ export async function proposeSetupPlans(
     : baseManifest;
   const plans: SetupPlan[] = [];
 
+  const structuredCandidate = detection.primaryRuntime?.startCommandCandidates.find(
+    (candidate) => candidate.confidence === "high" && candidate.command.length > 0
+  );
+  const structuredPort = detection.primaryRuntime?.portStrategies.find(
+    (strategy) => strategy.confidence === "high" && strategy.id === "explicit_host_port_flags"
+  );
+  if (structuredCandidate && structuredPort) {
+    const { command: _legacyCommand, ...declaration } = selectedBaseManifest;
+    const structuredManifest: AppManifestInput = {
+      ...declaration,
+      launch: {
+        executable: structuredCandidate.command[0],
+        args: structuredCandidate.command.slice(1).map(relaybaseLaunchToken),
+        environment: {},
+        portBinding: "arguments"
+      },
+      upstreamPort: undefined
+    };
+    plans.push(
+      plan({
+        id: "structured-argument-launch",
+        label: "Direct structured launch",
+        architecture: "framework-port-flag",
+        score: 110,
+        manifest: structuredManifest,
+        detection,
+        envStrategy,
+        reasons: [
+          "Relaybase can pass the assigned host and port as exact process arguments.",
+          "No generated wrapper or hand-authored backend port is required."
+        ],
+        risks: [],
+        recoverySteps: ["If the executable interface changes, generate a new registration preview."],
+        commandSelection,
+        portStrategyHint: "explicit_host_port_flags",
+        extraWrites: setupWrites(detection.root, structuredManifest, envStrategy, options.mcpInstall)
+      })
+    );
+  }
+
   const managedManifest = {
     ...selectedBaseManifest,
     command: String(selectedBaseManifest.command ?? startCommand),
@@ -2072,6 +2112,10 @@ function plan(input: {
   };
 }
 
+function relaybaseLaunchToken(value: string): string {
+  return value.replaceAll("<HOST>", "{relaybase.host}").replaceAll("<PORT>", "{relaybase.port}");
+}
+
 function setupWrites(
   root: string,
   manifest: AppManifestInput,
@@ -2132,7 +2176,7 @@ function manifestForDisk(root: string, manifest: AppManifestInput): AppManifestI
     ...(normalized.schemaVersion ? { schemaVersion: normalized.schemaVersion } : {}),
     id: normalized.id,
     name: normalized.name,
-    command: normalized.command,
+    ...(normalized.launch ? { launch: normalized.launch } : { command: normalized.command }),
     cwd: ".",
     protocol: normalized.protocol,
     ...(normalized.healthUrl ? { healthUrl: normalized.healthUrl } : {}),

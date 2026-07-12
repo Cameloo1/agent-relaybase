@@ -23,6 +23,7 @@ const previewBindingSchema = z
 
 const runtimeIdSchema = z.enum([
   "javascript-typescript",
+  "powershell",
   "python",
   "go",
   "rust",

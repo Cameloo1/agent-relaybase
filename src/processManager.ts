@@ -7,6 +7,7 @@ import { checkAppHealth, waitForHealthy } from "./health.ts";
 import { type DurableLogEvent, type LogStore, type LogStoreQuery, type LogStoreQueryResult } from "./logStore.ts";
 import { canBindPort, isPortOpen } from "./ports.ts";
 import { redactSecretLikeValues } from "./redaction.ts";
+import { compileLaunchPlan } from "./launchPlan.ts";
 import type {
   AppRecord,
   AppStatusView,
@@ -188,11 +189,22 @@ export class ProcessManager {
     const entry = this.#entry("starting", "unknown", assignedPort, undefined, "prestarting");
     entry.cleanupStatus = "not_needed";
     const attempt = this.#startAttempt(app, assignedPort);
+    const launchPlan = compileLaunchPlan(app, { host: this.hubHost, port: assignedPort, hubPort: this.hubPort });
+    attempt.launchPlan = {
+      source: launchPlan.source,
+      adapterId: launchPlan.adapterId,
+      adapterVersion: launchPlan.adapterVersion,
+      executable: launchPlan.executable,
+      args: [...launchPlan.args],
+      cwd: launchPlan.cwd,
+      environmentNames: Object.keys(launchPlan.environment).sort(),
+      port: launchPlan.port
+    };
     entry.lastStartAttempt = attempt;
     this.#recordAttempt(entry, attempt);
     this.#runtime.set(id, entry);
 
-    const env = this.#appEnv(app, assignedPort);
+    const env = { ...this.#appEnv(app, assignedPort), ...launchPlan.environment };
     if (app.preStartCommand) {
       const preStart = await this.#runHook(
         app,
@@ -226,7 +238,18 @@ export class ProcessManager {
     }
 
     entry.phase = "launching";
-    const spawnSpec = this.#spawnSpec(app.command);
+    if (launchPlan.port.ownership === "external") {
+      const healthy = await checkAppHealth(app, assignedPort, this.hubHost);
+      entry.status = healthy ? "running" : "errored";
+      entry.health = healthy ? "healthy" : "unhealthy";
+      entry.phase = healthy ? "running" : "errored";
+      entry.lastError = healthy ? undefined : "External application is not reachable on its declared upstream port.";
+      this.#finishAttempt(attempt, healthy ? "succeeded" : "failed", entry.phase, entry.lastError);
+      return this.#view(entry, id);
+    }
+    const spawnSpec = app.launch
+      ? this.#structuredSpawnSpec(launchPlan.executable, [...launchPlan.args])
+      : this.#spawnSpec(app.command);
     const child = spawn(spawnSpec.command, spawnSpec.args, {
       cwd: app.cwd,
       env,
@@ -865,7 +888,7 @@ export class ProcessManager {
   }
 
   #ownsBackendPort(app: AppRecord, entry: RuntimeEntry): boolean {
-    if (app.command === "external" && !entry.child) {
+    if ((app.command === "external" || app.launch?.portBinding === "external") && !entry.child) {
       return false;
     }
 
@@ -955,6 +978,24 @@ export class ProcessManager {
       args: tokens.slice(1),
       shell: false
     };
+  }
+
+  #structuredSpawnSpec(executable: string, args: string[]): SpawnSpec {
+    if (process.platform === "win32" && /\.ps1$/i.test(executable)) {
+      return {
+        command: "powershell.exe",
+        args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", executable, ...args],
+        shell: false
+      };
+    }
+    if (process.platform === "win32" && /\.(?:cmd|bat)$/i.test(executable)) {
+      return {
+        command: process.env.ComSpec ?? "cmd.exe",
+        args: ["/d", "/s", "/c", executable, ...args],
+        shell: false
+      };
+    }
+    return { command: executable, args, shell: false };
   }
 
   #splitCommand(command: string): string[] {

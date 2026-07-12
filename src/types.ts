@@ -70,6 +70,16 @@ export interface LifecycleAttempt {
   endedAt?: string;
   assignedPort?: number;
   command?: string;
+  launchPlan?: {
+    source: CompiledLaunchPlan["source"];
+    adapterId: string;
+    adapterVersion: number;
+    executable: string;
+    args: string[];
+    cwd: string;
+    environmentNames: string[];
+    port: CompiledLaunchPlan["port"];
+  };
   hooks: LifecycleHookAttempt[];
   error?: string;
 }
@@ -104,6 +114,7 @@ export interface AppManifestInput {
   id?: unknown;
   name?: unknown;
   command?: unknown;
+  launch?: unknown;
   cwd?: unknown;
   protocol?: unknown;
   healthUrl?: unknown;
@@ -120,11 +131,41 @@ export interface AppManifestInput {
   relaybase?: unknown;
 }
 
+export type AppLaunchPortBinding = "environment" | "arguments" | "fixed" | "external";
+
+export interface AppLaunch {
+  executable: string;
+  args: string[];
+  environment: Record<string, string>;
+  portBinding: AppLaunchPortBinding;
+}
+
+export interface CompiledLaunchPlan {
+  schemaVersion: 1;
+  source: "declared" | "detected" | "generated" | "legacy" | "fixed" | "external";
+  adapterId: string;
+  adapterVersion: number;
+  executable: string;
+  args: readonly string[];
+  cwd: string;
+  environment: Readonly<Record<string, string>>;
+  port: Readonly<{
+    ownership: "relaybase" | "fixed" | "external";
+    strategy: "arguments" | "environment" | "fixed";
+    requestedPort?: number;
+  }>;
+  health?: Readonly<{ protocol: AppProtocol; target?: string }>;
+  generatedFiles: readonly unknown[];
+  warnings: readonly AppManifestDiagnostic[];
+  confidence: "high" | "medium" | "low";
+}
+
 export interface AppRecord {
   schemaVersion?: 1;
   id: string;
   name: string;
   command: string;
+  launch?: AppLaunch;
   cwd: string;
   protocol: AppProtocol;
   healthUrl?: string;

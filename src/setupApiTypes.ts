@@ -236,11 +236,69 @@ export interface ManifestPatchResult {
 export interface RegisterManifestRequest {
   cwd?: string;
   manifestPath: string;
+  mode?: "folder" | "manifest";
 }
 
 export interface RegisterManifestResult {
   app: AppRecord;
   manifestPath: string;
+}
+
+export type RegistrationSetupState =
+  | "resolving"
+  | "manifest_missing"
+  | "manifest_invalid"
+  | "detecting"
+  | "needs_input"
+  | "preview_ready"
+  | "approval_required"
+  | "applying"
+  | "drifted"
+  | "registering"
+  | "registered"
+  | "failed"
+  | "cancelled";
+
+export interface RegistrationPreviewRequest {
+  path?: string;
+  manifestPath?: string;
+  cwd?: string;
+  currentDirectory?: string;
+  mode?: "folder" | "manifest";
+  selectedPlanId?: string;
+  commandHint?: string;
+  portStrategyHint?: PortStrategy;
+  componentMetadata?: ComponentSetupMetadata;
+}
+
+export interface RegistrationSetupResult {
+  schemaVersion: 1;
+  status: RegistrationSetupState;
+  code?: string;
+  message: string;
+  projectRoot: string;
+  manifestPath: string;
+  manifestState: "missing" | "invalid" | "valid";
+  previewId?: string;
+  app?: AppRecord;
+  selectedPlan?: SetupPlan;
+  fileWritePlan?: FileWritePlan;
+  launchPlan?: unknown;
+  questions: SetupQuestion[];
+  risks: SetupApprovalRisk[];
+  approval: { required: boolean; previewId?: string };
+  registered: boolean;
+  started: false;
+  filesWritten: boolean;
+  retrySafe: boolean;
+  actions: string[];
+  diagnostics: SetupDiagnostic[];
+}
+
+export interface RegistrationApplyRequest {
+  previewId: string;
+  confirm?: boolean;
+  confirmation?: { confirmed?: boolean; reason?: string };
 }
 
 export interface OpenProjectRequest {

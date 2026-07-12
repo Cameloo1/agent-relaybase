@@ -23,22 +23,26 @@ relaybase start
 
 `relaybase start` safely starts the local daemon when needed and opens the operator console. Relaybase binds to `127.0.0.1` by default and does not expose apps to the public internet.
 
-## Add your first app
+## Register your first app
 
-Open a terminal in the project you want Relaybase to manage:
+The normal setup contract is one user-owned `relaybase.app.json`. From its project folder, preview and register it with:
 
 ```bash
 cd path/to/your-project
-relaybase configure
-relaybase open
+relaybase register . --plan
+relaybase register .
+relaybase start <app-id>
 ```
 
-`configure` detects the project and previews a setup plan before writing guarded Relaybase files. `open` registers the app through the daemon, starts it, checks readiness, and opens its stable route when healthy.
+If the manifest is missing, folder registration detects the runtime and shows the proposed manifest and any Relaybase-owned files. Nothing is written until confirmation. Registration never starts the app; `start` is a separate lifecycle boundary.
+
+Use `/add <folder>` in the operator console for the simplest project-discovery flow. Use `/register <folder>` when you want detection, preview, approval, and registration as one coordinated flow. An exact `/register <path>/relaybase.app.json` remains strict and does not search other folders.
 
 The normal loop is intentionally small:
 
 ```bash
 relaybase start      # open the operator console
+relaybase register . # preview and register the current project
 relaybase list       # inspect registered apps
 relaybase check      # safe, read-only diagnosis
 relaybase open       # configure/start the current project

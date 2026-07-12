@@ -1,4 +1,5 @@
 import type http from "node:http";
+import { createHash } from "node:crypto";
 import { promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import type { DaemonEventType } from "./apiTypes.ts";
@@ -38,6 +39,9 @@ import type {
   ProveHealthResult,
   RegisterManifestRequest,
   RegisterManifestResult,
+  RegistrationApplyRequest,
+  RegistrationPreviewRequest,
+  RegistrationSetupResult,
   RepairSetupRequest,
   RepairSetupResult,
   SetupApplyRequest,
@@ -53,6 +57,7 @@ import type {
 } from "./setupApiTypes.ts";
 import type { AppManifestInput, AppRecord } from "./types.ts";
 import { normalizeManifest } from "./validation.ts";
+import { compileLaunchPlan } from "./launchPlan.ts";
 
 const MANIFEST_FILE = "relaybase.app.json";
 const SETUP_DIR = ".relaybase";
@@ -64,6 +69,7 @@ const SAFE_MANIFEST_FIELDS = new Set([
   "id",
   "name",
   "command",
+  "launch",
   "cwd",
   "protocol",
   "healthUrl",
@@ -73,6 +79,15 @@ const SAFE_MANIFEST_FIELDS = new Set([
 ]);
 const SAFE_RELAYBASE_FIELDS = new Set(["groupId", "componentRole", "displayName", "paneLabel", "paneOrder"]);
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
+
+interface RegistrationBinding {
+  preview: RegistrationSetupResult;
+  request: RegistrationPreviewRequest;
+  manifestRevision: string;
+  createdAt: number;
+}
+
+const registrationBindings = new Map<string, RegistrationBinding>();
 
 export class SetupApiRequestError extends Error {
   readonly statusCode: number;
@@ -175,6 +190,30 @@ export async function handleSetupApiRequest(input: {
       publishSetupEvent(runtime, "setup.apply_failed", correlationId, setupFailureData(error, body));
       throw error;
     }
+    return true;
+  }
+
+  if (route === "register/preview" || route === "register/inspect") {
+    const setup = await previewRegistration(runtime, body);
+    publishSetupEvent(runtime, "setup.preview_created", correlationId, setupEventSummary(setup));
+    sendJson(response, 200, { setup });
+    return true;
+  }
+
+  if (route === "register/apply") {
+    requireToken({
+      code: "UNAUTHORIZED_SETUP_REGISTER",
+      message: "Unauthorized Relaybase registration apply.",
+      userAction: "Use the session token from this daemon state directory before applying registration."
+    });
+    requireConfirmation(
+      body,
+      "REGISTER_CONFIRMATION_REQUIRED",
+      "Registration writes approved setup files or updates daemon registry state."
+    );
+    const setup = await applyRegistration(runtime, body, correlationId);
+    publishSetupEvent(runtime, "setup.registered", correlationId, setupEventSummary(setup));
+    sendJson(response, 202, { setup });
     return true;
   }
 
@@ -321,9 +360,14 @@ export async function applySetup(
   const choice = planChoice(result.selectedPlan, result.detection);
   let registeredApp = result.registryApp;
   if (result.registryApp) {
-    registeredApp = await runtime.registry.upsertManifest(result.registryApp, {
-      manifestPath: result.registryApp.manifestPath
-    });
+    if (result.registryApp.manifestPath) {
+      const writtenManifest = await readManifestFile(result.registryApp.manifestPath);
+      registeredApp = await runtime.registry.upsertManifest(writtenManifest, {
+        manifestPath: result.registryApp.manifestPath
+      });
+    } else {
+      registeredApp = await runtime.registry.upsertRecord(result.registryApp);
+    }
     runtime.events.publish({
       type: "app.registered",
       appId: registeredApp.id,
@@ -360,6 +404,349 @@ export async function registerManifest(
     data: appRecordEventData(app)
   });
   return sanitizeSetupValue({ app, manifestPath }) as RegisterManifestResult;
+}
+
+export async function previewRegistration(
+  runtime: RelaybaseRuntime,
+  raw: Record<string, unknown>
+): Promise<RegistrationSetupResult> {
+  pruneRegistrationBindings();
+  const request = raw as RegistrationPreviewRequest;
+  const suppliedPath = String(
+    request.path ?? request.manifestPath ?? request.cwd ?? request.currentDirectory ?? ""
+  ).trim();
+  if (!suppliedPath) {
+    throw new SetupApiRequestError(
+      400,
+      "REGISTER_INPUT_REQUIRED",
+      "Registration requires a project folder or relaybase.app.json path.",
+      {
+        retryable: false,
+        userAction: "Provide /register <project-folder> or an exact relaybase.app.json path."
+      }
+    );
+  }
+  const mode = request.mode ?? (path.basename(suppliedPath).toLowerCase() === MANIFEST_FILE ? "manifest" : "folder");
+  const projectRoot =
+    mode === "manifest"
+      ? await resolveProjectDirectory(request.cwd ?? path.dirname(path.resolve(suppliedPath)))
+      : await resolveProjectDirectory(suppliedPath);
+  const manifestPath =
+    mode === "manifest" ? await resolveManifestPath(suppliedPath, projectRoot) : path.join(projectRoot, MANIFEST_FILE);
+  ensureInside(projectRoot, manifestPath, "manifestPath");
+
+  const manifestText = await readText(manifestPath);
+  if (manifestText === undefined && mode === "manifest") {
+    return registrationTerminal({
+      status: "failed",
+      code: "REGISTER_MANIFEST_NOT_FOUND",
+      message: "The explicitly supplied relaybase.app.json was not found.",
+      projectRoot,
+      manifestPath,
+      manifestState: "missing",
+      retrySafe: true,
+      actions: ["Correct the manifest path", "Use the project folder to preview setup", "Cancel"],
+      diagnostics: [
+        {
+          code: "REGISTER_MANIFEST_NOT_FOUND",
+          severity: "error",
+          message: "Explicit manifest-file registration is strict and does not search other folders.",
+          userAction: "Correct the path or register the containing project folder."
+        }
+      ]
+    });
+  }
+
+  let app: AppRecord | undefined;
+  let invalidMessage: string | undefined;
+  if (manifestText !== undefined) {
+    try {
+      app = normalizeManifest(JSON.parse(manifestText) as AppManifestInput, { manifestPath });
+    } catch (error) {
+      invalidMessage = errorMessage(error);
+    }
+  }
+  if (invalidMessage) {
+    return registrationTerminal({
+      status: "manifest_invalid",
+      code: "REGISTER_MANIFEST_INVALID",
+      message: `Manifest requires setup adaptation: ${invalidMessage}`,
+      projectRoot,
+      manifestPath,
+      manifestState: "invalid",
+      retrySafe: true,
+      actions:
+        mode === "manifest"
+          ? ["Preview recommended repair", "Inspect manifest", "Cancel"]
+          : ["Preview project repair", "Inspect manifest", "Cancel"],
+      diagnostics: [
+        {
+          code: "REGISTER_MANIFEST_INVALID",
+          severity: "error",
+          message: invalidMessage,
+          userAction: "Preview a repair; Relaybase will not modify the manifest without approval."
+        }
+      ]
+    });
+  }
+
+  if (app) {
+    const existing = await runtime.registry.get(app.id);
+    if (existing && registrationAppIdentity(existing) === registrationAppIdentity(app)) {
+      return registrationTerminal({
+        status: "registered",
+        code: "REGISTER_ALREADY_CURRENT",
+        message: `${app.name} is already registered and the manifest revision is unchanged.`,
+        projectRoot,
+        manifestPath,
+        manifestState: "valid",
+        app,
+        retrySafe: true,
+        registered: true,
+        actions: ["Start", "Re-register", "Inspect", "Cancel"],
+        diagnostics: []
+      });
+    }
+    return await bindRegistrationPreview(
+      request,
+      {
+        schemaVersion: 1,
+        status: "approval_required",
+        message: `Ready to register ${app.name}. The app will not be started.`,
+        projectRoot,
+        manifestPath,
+        manifestState: "valid",
+        app,
+        launchPlan: compileLaunchPlan(app, {
+          host: runtime.host,
+          port: app.upstreamPort ?? 17_000,
+          hubPort: runtime.port
+        }),
+        questions: [],
+        risks: [
+          {
+            code: "registry_update",
+            severity: "warning",
+            message: "Confirmation updates daemon registry state.",
+            requiresApproval: true
+          }
+        ],
+        approval: { required: true },
+        registered: false,
+        started: false,
+        filesWritten: false,
+        retrySafe: true,
+        actions: ["Confirm", "Inspect", "Cancel"],
+        diagnostics: diagnosticsForApp(app)
+      },
+      manifestText ?? "<missing>",
+      []
+    );
+  }
+
+  let setup: SetupPlanPreview;
+  try {
+    setup = await previewSetup({
+      cwd: projectRoot,
+      ...(request.selectedPlanId ? { selectedPlanId: request.selectedPlanId } : {}),
+      ...(request.commandHint ? { commandHint: request.commandHint } : {}),
+      ...(request.portStrategyHint ? { portStrategyHint: request.portStrategyHint } : {}),
+      ...(request.componentMetadata ? { componentMetadata: request.componentMetadata } : {})
+    });
+  } catch (error) {
+    if (error instanceof SetupSelectionError) {
+      const plans = await planSetup({ cwd: projectRoot });
+      return registrationTerminal({
+        status: "needs_input",
+        code: "REGISTER_INPUT_REQUIRED",
+        message: error.message,
+        projectRoot,
+        manifestPath,
+        manifestState: "missing",
+        retrySafe: true,
+        actions: ["Choose a launch plan", "Provide the missing information", "Cancel"],
+        diagnostics: plans.diagnostics
+      });
+    }
+    throw error;
+  }
+  const selectedApp = normalizeManifest(setup.selectedPlan.manifest, { manifestPath });
+  return await bindRegistrationPreview(
+    request,
+    {
+      schemaVersion: 1,
+      status: "approval_required",
+      code: "REGISTER_SETUP_REQUIRED",
+      message:
+        "No relaybase.app.json was found. Relaybase inspected the project and prepared an approval-bound setup preview.",
+      projectRoot,
+      manifestPath,
+      manifestState: "missing",
+      app: selectedApp,
+      selectedPlan: setup.selectedPlan,
+      fileWritePlan: setup.fileWritePlan,
+      launchPlan: compileLaunchPlan(selectedApp, { host: runtime.host, port: 17_000, hubPort: runtime.port }),
+      questions: setup.selectedPlan.choice.setupQuestions ?? [],
+      risks: setup.fileWritePlan.risks,
+      approval: { required: true },
+      registered: false,
+      started: false,
+      filesWritten: false,
+      retrySafe: true,
+      actions: ["Review manifest", "Confirm", "Choose another plan", "Cancel"],
+      diagnostics: setup.diagnostics
+    },
+    "<missing>",
+    setup.fileWritePlan.writes.map((write) => write.path)
+  );
+}
+
+export async function applyRegistration(
+  runtime: RelaybaseRuntime,
+  raw: Record<string, unknown>,
+  correlationId: string
+): Promise<RegistrationSetupResult> {
+  pruneRegistrationBindings();
+  const request = raw as unknown as RegistrationApplyRequest;
+  const binding = registrationBindings.get(String(request.previewId ?? ""));
+  if (!binding) {
+    throw new SetupApiRequestError(409, "REGISTER_PREVIEW_REQUIRED", "Registration requires a current preview.", {
+      retryable: true,
+      userAction: "Generate a new registration preview and confirm that exact preview."
+    });
+  }
+  const writePaths = binding.preview.fileWritePlan?.writes.map((write) => write.path) ?? [];
+  const revision = await registrationRevision(binding.preview.manifestPath, writePaths);
+  if (revision !== binding.manifestRevision) {
+    registrationBindings.delete(request.previewId);
+    throw new SetupApiRequestError(
+      409,
+      "REGISTER_PREVIEW_STALE",
+      "Registration preview is stale because a bound file changed.",
+      {
+        retryable: true,
+        detail: { filesWritten: false, registered: false, started: false },
+        userAction: "Generate a new preview. No files or registry state were changed."
+      }
+    );
+  }
+
+  let app: AppRecord;
+  let filesWritten = false;
+  if (binding.preview.manifestState === "missing") {
+    const setup = await applySetup(
+      runtime,
+      {
+        cwd: binding.preview.projectRoot,
+        selectedPlanId: binding.preview.selectedPlan?.id,
+        commandHint: binding.request.commandHint,
+        portStrategyHint: binding.request.portStrategyHint,
+        componentMetadata: binding.request.componentMetadata,
+        confirm: true,
+        confirmation: { confirmed: true, reason: "Approved registration preview" }
+      },
+      correlationId
+    );
+    if (!setup.registeredApp) {
+      throw new SetupApiRequestError(
+        500,
+        "REGISTER_REGISTRY_FAILED",
+        "Setup completed without a confirmed registry record.",
+        {
+          retryable: true,
+          userAction: "Inspect setup files and retry registration. The app was not started."
+        }
+      );
+    }
+    app = setup.registeredApp;
+    filesWritten = setup.appliedFiles.some((file) => file.action === "created" || file.action === "updated");
+  } else {
+    const manifest = await readManifestFile(binding.preview.manifestPath);
+    app = await runtime.registry.upsertManifest(manifest, { manifestPath: binding.preview.manifestPath });
+    runtime.events.publish({ type: "app.registered", appId: app.id, correlationId, data: appRecordEventData(app) });
+  }
+  registrationBindings.delete(request.previewId);
+  return {
+    ...binding.preview,
+    status: "registered",
+    code: undefined,
+    message: `${app.name} is registered and ready to start. Registration did not start the app.`,
+    app,
+    approval: { required: false },
+    registered: true,
+    started: false,
+    filesWritten,
+    actions: [`Start ${app.id}`, "Inspect", "Cancel"]
+  };
+}
+
+function registrationTerminal(
+  input: Omit<
+    RegistrationSetupResult,
+    "schemaVersion" | "questions" | "risks" | "approval" | "registered" | "started" | "filesWritten"
+  > &
+    Partial<Pick<RegistrationSetupResult, "questions" | "risks" | "approval" | "registered" | "filesWritten">>
+): RegistrationSetupResult {
+  return {
+    schemaVersion: 1,
+    questions: input.questions ?? [],
+    risks: input.risks ?? [],
+    approval: input.approval ?? { required: false },
+    registered: input.registered ?? false,
+    started: false,
+    filesWritten: input.filesWritten ?? false,
+    ...input
+  };
+}
+
+async function bindRegistrationPreview(
+  request: RegistrationPreviewRequest,
+  preview: RegistrationSetupResult,
+  manifestRevision: string,
+  writePaths: string[]
+): Promise<RegistrationSetupResult> {
+  const revision = await registrationRevision(preview.manifestPath, writePaths);
+  const stable = JSON.stringify({ request, preview, manifestRevision, revision, writePaths: [...writePaths].sort() });
+  const digest = createHash("sha256").update(stable).digest("hex");
+  const previewId = `preview_${digest.slice(0, 24)}`;
+  const bound = { ...preview, previewId, approval: { required: true, previewId } };
+  registrationBindings.set(previewId, { preview: bound, request, manifestRevision: revision, createdAt: Date.now() });
+  return bound;
+}
+
+function pruneRegistrationBindings(): void {
+  const cutoff = Date.now() - 15 * 60_000;
+  for (const [previewId, binding] of registrationBindings) {
+    if (binding.createdAt < cutoff) registrationBindings.delete(previewId);
+  }
+  while (registrationBindings.size > 128) {
+    const oldest = registrationBindings.keys().next().value as string | undefined;
+    if (!oldest) break;
+    registrationBindings.delete(oldest);
+  }
+}
+
+async function registrationRevision(manifestPath: string, writePaths: string[]): Promise<string> {
+  const paths = [...new Set([manifestPath, ...writePaths])].sort();
+  const snapshots = await Promise.all(
+    paths.map(async (filePath) => [filePath, (await readText(filePath)) ?? "<missing>"])
+  );
+  return createHash("sha256").update(JSON.stringify(snapshots)).digest("hex");
+}
+
+function registrationAppIdentity(app: AppRecord): string {
+  return JSON.stringify({
+    id: app.id,
+    name: app.name,
+    command: app.command,
+    launch: app.launch,
+    cwd: app.cwd,
+    protocol: app.protocol,
+    healthUrl: app.healthUrl,
+    env: app.env,
+    upstreamPort: app.upstreamPort,
+    manifestPath: app.manifestPath
+  });
 }
 
 export async function inspectManifest(raw: Record<string, unknown>): Promise<ExistingManifestAnalysis> {

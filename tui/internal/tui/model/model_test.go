@@ -1569,7 +1569,7 @@ func TestExplicitAgentManagedSlashSerializesOnlyCanonicalAuthorizedProjectRoot(t
 	root.agentSession = &relaybaseclient.AgentSession{ID: "session-1"}
 	root.agentStream = &relaybaseclient.AgentEventStream{}
 
-	for _, command := range []string{"/add", "/configure", "/register"} {
+	for _, command := range []string{"/add", "/configure"} {
 		updated, cmd := root.submitSlashCommand(command + ` "` + projectRoot + `"`)
 		if cmd == nil {
 			t.Fatalf("expected explicit %s path to use Agent Gateway", command)
@@ -1585,6 +1585,14 @@ func TestExplicitAgentManagedSlashSerializesOnlyCanonicalAuthorizedProjectRoot(t
 		if len(contextPayload.AuthorizedProjectRoots) != 1 || !strings.EqualFold(contextPayload.AuthorizedProjectRoots[0], canonicalRoot) {
 			t.Fatalf("%s authorized roots=%#v, want only %q", command, contextPayload.AuthorizedProjectRoots, canonicalRoot)
 		}
+	}
+
+	registered, registerCmd := root.submitSlashCommand(`/register "` + projectRoot + `"`)
+	if registerCmd == nil {
+		t.Fatal("expected /register to use the deterministic daemon preview")
+	}
+	if roots := registered.agentContext().AuthorizedProjectRoots; len(roots) != 0 {
+		t.Fatalf("deterministic /register unexpectedly authorized Agent roots: %#v", roots)
 	}
 
 	plain, _ := root.submitAgentInput("inspect arbitrary model text mentioning " + projectRoot)
@@ -2421,7 +2429,6 @@ func TestSetupSlashMutationsRequireConfirmationBeforeDaemonCall(t *testing.T) {
 	}{
 		{name: "add app", input: "/add app C:/project using npm run dev"},
 		{name: "configure", input: "/configure C:/project"},
-		{name: "register", input: "/register C:/project/relaybase.app.json"},
 		{name: "open", input: "/open C:/project"},
 		{name: "prove path", input: "/prove C:/project"},
 		{name: "health prove", input: "/health notes --prove", needsState: true},

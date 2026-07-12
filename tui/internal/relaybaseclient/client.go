@@ -398,6 +398,22 @@ func (c *Client) RegisterManifest(ctx context.Context, request RegisterManifestR
 	return &result, nil
 }
 
+func (c *Client) PreviewRegistration(ctx context.Context, request RegistrationPreviewRequest) (*RegistrationSetupResult, error) {
+	var result RegistrationSetupResult
+	if err := c.postSetupJSON(ctx, "/__hub/api/setup/register/preview", request, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (c *Client) ApplyRegistration(ctx context.Context, request RegistrationApplyRequest) (*RegistrationSetupResult, error) {
+	var result RegistrationSetupResult
+	if err := c.postSetupJSON(ctx, "/__hub/api/setup/register/apply", request, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 func (c *Client) InspectManifest(ctx context.Context, request RegisterManifestRequest) (*ExistingManifestAnalysis, error) {
 	var result ExistingManifestAnalysis
 	if err := c.postSetupJSON(ctx, "/__hub/api/setup/inspect-manifest", request, &result); err != nil {

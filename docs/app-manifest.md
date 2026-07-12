@@ -17,6 +17,31 @@
 
 `schemaVersion` is optional for legacy manifests. If present, the only accepted value is `1`.
 
+## Structured launch
+
+Prefer `launch` when the program accepts explicit arguments. It avoids shell parsing and generated wrappers:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "computer-stats",
+  "name": "Computer Stats",
+  "cwd": ".",
+  "protocol": "http",
+  "healthUrl": "/api/ping",
+  "launch": {
+    "executable": ".\\Start-Dashboard.ps1",
+    "args": ["-HostName", "{relaybase.host}", "-Port", "{relaybase.port}"],
+    "environment": {},
+    "portBinding": "arguments"
+  }
+}
+```
+
+Structured launches always execute as an executable plus argument array with shell execution disabled. Supported tokens are `{relaybase.host}`, `{relaybase.port}`, `{relaybase.appId}`, `{relaybase.baseUrl}`, and `{relaybase.projectRoot}`. Unknown tokens and shell interpolation such as `$PORT`, `%PORT%`, `$()`, or backticks are rejected.
+
+`portBinding` is `environment`, `arguments`, `fixed`, or `external`. Fixed and external launches require `upstreamPort`. `command` remains supported for existing manifests, but a manifest cannot provide both `command` and `launch`.
+
 ## Fields
 
 ```text
@@ -24,6 +49,7 @@ schemaVersion
 id
 name
 command
+launch
 cwd
 protocol
 healthUrl
