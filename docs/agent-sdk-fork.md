@@ -14,18 +14,10 @@ The current OpenRouter path is implemented as a Relaybase adapter in `src/agent/
 
 ## Evidence
 
-The current live evidence shows no SDK blocker that requires a fork:
+The current adapter and automated compatibility coverage show no SDK blocker that requires a fork. Live provider evidence is retained locally as diagnostic material rather than published with the package.
 
-- `reports/agent/RA012D-openrouter-live-smoke.md`
-- `reports/agent/live-agent-test-report.md`
-- `reports/agent/RA013F-live-failure-repair.md`
-- `artifacts/agent-live/openrouter-request-redacted.json`
-- `artifacts/agent-live/openrouter-response-redacted.json`
-- `artifacts/agent-live/model-capability-check.json`
+Automated adapter coverage includes:
 
-The live path passed with:
-
-- exact `google/gemini-3.1-flash-lite`
 - reasoning enabled
 - streaming/session event capture
 - tool calls
@@ -64,12 +56,7 @@ Use the smallest intervention that fixes the proven blocker:
 
 ## Required Evidence Before Forking
 
-Before introducing any SDK patch or fork, create or update:
-
-- `reports/agent/sdk-fork-decision.md`
-- `reports/agent/sdk-fork-compatibility-test.md`
-- redacted OpenRouter request/response artifacts
-- redacted SDK stack trace or event stream failure artifact
+Before introducing any SDK patch or fork, capture a local decision record, compatibility test, redacted request/response evidence, and a redacted SDK stack trace or event-stream failure artifact. Promote only stable user-facing conclusions into public documentation.
 
 The evidence must include:
 

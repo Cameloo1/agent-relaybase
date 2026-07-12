@@ -113,7 +113,7 @@ export.failed
 
 ## CLI
 
-The current CLI command table in `src/cli.ts` does not yet implement `relaybase export logs`. R007 implements the backend API first. The next CLI step is a real tokened daemon command shaped as:
+The current CLI does not expose log export commands. Authenticated clients can use the implemented backend export API; `relaybase logs <app-id>` remains the CLI path for recent app logs. The following command shapes are not currently implemented:
 
 ```text
 relaybase export logs --app <id>

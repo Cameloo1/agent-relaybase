@@ -4,7 +4,7 @@ This document defines the daemon-owned tool surface for Relaybase's own in-TUI O
 
 As of RA010, the Agent Gateway API contract exists, the OpenRouter/OpenAI Agents SDK TypeScript Chat Completions adapter path is proven by an isolated provider module and live smoke command, the daemon Operator Agent runtime has a real Relaybase tool registry, and the Go TUI can create sessions, submit queued runs, stream events, inspect/cancel/retry runs, render approval/setup previews, and approve or reject pending daemon approvals. Read-only tools can inspect daemon state, grouped app/component state, diagnostics, bounded redacted logs, and setup previews. Mutating tools require explicit approval and route through existing daemon lifecycle, export, setup, manifest, and registry primitives. The Go TUI remains a client and approval/display surface; it does not spawn processes, write manifests, or manage lifecycle directly.
 
-The 2026-07-10 local acceptance included a minimal live OpenRouter Agent session using `openai/gpt-5.4`. It returned exactly `RELAYBASE_AGENT_OK` and recorded `run.started`, `model.request_started`, `model.delta`, `model.completed`, `answer`, and `run.completed`. This proves the configured provider/session/event path only; the full destructive or mutation command matrix was not rerun against the live provider. Provider model availability remains external and volatile.
+Provider availability and model behavior are external and volatile. Automated tests cover the provider/session/event contract without making network calls; any live-provider evidence must be refreshed locally before making a release claim.
 
 ## Tool Rules
 

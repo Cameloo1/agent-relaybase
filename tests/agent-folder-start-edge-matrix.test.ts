@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { promises as fs } from "node:fs";
+import { promises as fs, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -690,7 +690,7 @@ function fakeToolContext(
     },
     projectRootGrants: options.tuiContext?.authorizedProjectRoots?.map((root, index) => ({
       grantId: `edge_fixture_${index}`,
-      canonicalRoot: path.resolve(root),
+      canonicalRoot: realpathSync(path.resolve(root)),
       source: "user_selected_folder" as const
     })),
     emit: options.emit,

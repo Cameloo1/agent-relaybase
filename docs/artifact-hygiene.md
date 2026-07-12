@@ -6,17 +6,16 @@ changes or hide unrelated user work.
 
 ## Committed Paths
 
-Use these paths only for intentional source, documentation, scripts, tests, or
-stable reports:
+Use these paths only for intentional source, current public documentation,
+scripts, or tests:
 
 - `docs/` for current verified documentation.
-- `reports/` for intentionally committed planning and release-readiness reports.
 - `scripts/` for reusable local or CI tooling.
 - `src/`, `tests/`, and `tui/` for product and test source.
 
-Uncommitted report edits still make the worktree dirty. Release verification
-should either run from a clean checkout or stage/commit intentional reports
-before the clean-worktree gate.
+`reports/` is ignored and local by default. Promote a report only when a task
+explicitly defines it as stable public documentation; otherwise keep plans,
+raw evidence, diagnostics, and readiness notes out of publication branches.
 
 ## Ignored Generated Paths
 
@@ -31,6 +30,8 @@ Generated outputs should use ignored locations:
 - `.relaybase/` for local daemon state inside the repo, though smoke tests
   should prefer an OS temp state directory.
 - `bin/relaybase-tui/relaybase-tui-*` for generated TUI binaries.
+- `packages/relaybase-tui-*/bin/relaybase-tui-*` for generated platform-package payloads.
+- `dist-runtime/` for the compiled npm runtime generated during package preparation.
 
 `bin/relaybase-tui/README.md` remains tracked so the expected binary directory
 is visible in source. Generated platform binaries in that directory are ignored
@@ -76,9 +77,9 @@ Both files are generated evidence and are ignored by Git.
 
 ## Report Exceptions
 
-When a planning task intentionally creates only report files, this diagnostic
-variant can classify report paths as allowed while still failing on source or
-generated artifacts outside `reports/`:
+When a planning task intentionally creates only local report files, this
+diagnostic variant can classify report paths as allowed while still failing on
+source or generated artifacts outside `reports/`:
 
 ```powershell
 npm.cmd run verify:clean-worktree:allow-reports

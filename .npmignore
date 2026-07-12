@@ -8,8 +8,11 @@
 artifacts/
 coverage/
 dist/
+src/
 node_modules/
 npm-debug.log*
 *.tgz
 tests/
+docs/relaybase-release-roadmap.md
+docs/tui-setup-gap-map.md
 

@@ -1,6 +1,6 @@
 # TUI Operator Agent Architecture
 
-This document is the planning source of truth for Relaybase's own in-TUI Operator Agent. It is separate from the AI-app-builder docs, which teach users how to build their own AI apps or external agents that connect to Relaybase.
+This document describes the current architecture of Relaybase's own in-TUI Operator Agent. It is separate from the AI-app-builder docs, which teach users how to build their own AI apps or external agents that connect to Relaybase.
 
 As of RA010, the repository implements the daemon-side Agent Gateway API contract for Relaybase's own Operator Agent, an isolated OpenRouter compatibility adapter for OpenAI Agents SDK TypeScript, a daemon-side runtime foundation, a daemon-owned Relaybase tool registry, durable redacted session/audit storage, and Go TUI client integration with the gateway. The gateway exposes safe provider config metadata, creates/lists/reads/clears/exports sessions, accepts TUI-context messages, streams typed session events, returns missing/disabled/runtime diagnostics, validates approval IDs, and invokes the Operator Agent runtime when remote mode, model slug, and key source are configured. Tools can read app/group/component state, diagnostics, bounded redacted logs, and setup previews; mutating lifecycle, export, setup apply, manifest patch, registration, open/prove, and env override tools are approval-gated and delegate to existing daemon services. The Go TUI remains a daemon client and approval/display surface; it never calls OpenRouter directly, writes setup files directly, or manages app processes.
 
@@ -8,7 +8,7 @@ As of RA010, the repository implements the daemon-side Agent Gateway API contrac
 
 The Operator Agent should let a user manage Relaybase apps from the Bubble Tea TUI through natural language while preserving Relaybase's daemon-owned lifecycle boundary.
 
-The intended path is:
+The request path is:
 
 1. The user types a request in the Go TUI.
 2. The TUI sends the request, selected pane/app context, and safe UI state to the daemon Agent Gateway.

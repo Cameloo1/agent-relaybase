@@ -3,111 +3,69 @@
 # Relaybase
 
 [![CI](https://github.com/Cameloo1/relaybase/actions/workflows/ci.yml/badge.svg)](https://github.com/Cameloo1/relaybase/actions/workflows/ci.yml)
-[![Package](https://img.shields.io/badge/package-%40cameloo%2Frelaybase-blue)](https://www.npmjs.com/package/@cameloo/relaybase)
+[![npm](https://img.shields.io/npm/v/%40cameloo%2Frelaybase)](https://www.npmjs.com/package/@cameloo/relaybase)
 ![Node](https://img.shields.io/badge/node-%3E%3D24-339933)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-> MCP is for tools and data. Relaybase is for local processes, and Relaybase speaks MCP.
+Relaybase is a local-first control plane for the apps you build with coding agents. It gives every app a stable localhost address and one place to start, stop, inspect, route, and recover local processes.
 
-Relaybase is a local-first lifecycle hub for AI-built apps. It runs a localhost daemon that can register apps, start and stop them, route traffic through stable URLs, stream logs, report health, expose a small dashboard, and provide the same control plane over MCP.
+> MCP connects agents to tools and data. Relaybase manages the local processes those agents build.
 
-## Normal Flow
+## Install
 
-```powershell
-relaybase start
-relaybase check
-relaybase verify
-```
+Prerequisites: Node.js 24 or newer and npm. Relaybase supports Windows, macOS, and Linux on x64 and arm64. npm selects the matching prebuilt terminal UI package, so normal installation does not require Go.
 
-`relaybase start` launches the normal operator surface. With no app id, it starts the Relaybase daemon when safe, locates or builds the Go TUI in a source checkout, and opens the TUI. With an app id, `relaybase start <app-id>` still starts that registered app through the daemon.
-
-In a fresh source checkout, `npm.cmd start` launches the same bundled start flow without changing the global npm prefix. Ordinary start and check commands never run `npm link` or remove command shims. If you intentionally want this checkout to own the global `relaybase` command, inspect with `relaybase repair-prefix --diagnose` and run `relaybase repair-prefix` explicitly.
-
-`relaybase check` is the read-only daily diagnosis command. It runs the TUI/toolchain doctor, project and daemon health, and app inventory without making OpenRouter calls, running a package dry-run, starting unknown user apps, or repairing the command prefix.
-
-`relaybase verify` is the source-checkout verification gate. By default it runs formatting, lint, typecheck, Node tests, Jest tests, and Relaybase health. Add `--full`, `--release`, `--live`, `--race`, or `--all` when you intentionally want deeper gates.
-
-The npm wrappers call the same CLI bundles:
-
-```powershell
-npm.cmd start
-npm.cmd run check
-npm.cmd run verify
-```
-
-`relaybase configure` detects the project, chooses a setup plan, writes guarded Relaybase files, registers the app, and can verify the launch.
-
-`relaybase open` is the daily launch command. It ensures the daemon, registers through the daemon when reachable, starts the app, checks readiness, and opens the stable route when ready.
-
-`relaybase health` is read-only diagnosis. It reports daemon reachability, project configuration, app readiness, routes, logs, Docker profile findings, and concrete `nextActions` when something is wrong.
-
-Use `relaybase list` to see registered apps and runtime state. It uses daemon state when available and registry-only state when the daemon is offline.
-
-Daemon lifecycle operations are recorded in a bounded redacted SQLite ledger under the Relaybase state directory. If the daemon restarts during queued or running work, the operation fails closed as interrupted and remains inspectable/retryable; Relaybase does not infer completion.
-
-## TUI
-
-Launch the terminal UI through the bundled start command:
-
-```powershell
+```bash
+npm install --global @cameloo/relaybase
+relaybase --version
 relaybase start
 ```
 
-The lower-level daemon and TUI commands remain available:
+`relaybase start` safely starts the local daemon when needed and opens the operator console. Relaybase binds to `127.0.0.1` by default and does not expose apps to the public internet.
 
-```powershell
-relaybase serve
-relaybase tui
+## Add your first app
+
+Open a terminal in the project you want Relaybase to manage:
+
+```bash
+cd path/to/your-project
+relaybase configure
+relaybase open
 ```
 
-The dashboard at `http://localhost:7777/__hub` provides a safe read-only, searchable and status-filtered app inventory, registered/running/stopped/attention counts, refresh, and an allowlisted app detail drawer. It does not embed the daemon token or full app records. Lifecycle changes, rich state, and logs remain available through authenticated Relaybase clients; the page does not own app processes.
+`configure` detects the project and previews a setup plan before writing guarded Relaybase files. `open` registers the app through the daemon, starts it, checks readiness, and opens its stable route when healthy.
 
-The Node CLI bridge resolves the TUI binary in this order: `RELAYBASE_TUI_BIN`, the repo-local `.relaybase/tui-dev-bin/<platform binary>` from `npm run tui:build`, `bin/relaybase-tui/<platform binary>` inside the installed package, an optional `@cameloo/relaybase-tui-<platform>-<arch>` platform package, then a globally installed `relaybase-tui` on `PATH`. Local source builds write both the ignored development launch binary and the package asset binary with:
+The normal loop is intentionally small:
 
-```powershell
-npm run doctor:tui
-npm run tui:build
-npm run package:check
+```bash
+relaybase start      # open the operator console
+relaybase list       # inspect registered apps
+relaybase check      # safe, read-only diagnosis
+relaybase open       # configure/start the current project
 ```
 
-The direct binary entrypoint is `relaybase-tui`; it accepts `--base-url`, `--state-dir`, and `--theme`. For example:
+If anything looks wrong, run `relaybase check` first. It does not start unknown apps, repair command shims, publish packages, or call a remote model.
 
-```powershell
-.\bin\relaybase-tui\relaybase-tui-windows-amd64.exe --base-url http://127.0.0.1:7777
-```
+## What Relaybase gives you
 
-If `relaybase tui` reports a missing binary, build it from source or set `RELAYBASE_TUI_BIN` to an existing `relaybase-tui` binary. Source builds and TUI checks require Go `1.25.x`; `npm run doctor:tui` reports the local Go, binary, and release-tool readiness. If the bridge reports that the daemon is unavailable, start `relaybase serve` first. Auth failures are handled by the TUI using the existing Relaybase state directory token conventions.
+- Stable human routes such as `http://notes.localhost:7777`
+- Agent routes through `X-Relaybase-App: notes`
+- Start, stop, restart, readiness, route, and log visibility
+- An operator console with app inventory, command palette, multiline composer, packages, usage, and recovery surfaces
+- Approval-gated setup and lifecycle mutations
+- Durable, redacted operation and log state
+- MCP access for coding agents
+- A safe read-only dashboard at `http://localhost:7777/__hub`
 
-Relaybase CLI commands load a local `.env` from the command working directory before reading environment-backed options. Copy `.env.example` to `.env`, fill in `OPENROUTER_API_KEY` and `RELAYBASE_AGENT_MODEL` for live Operator Agent/OpenRouter runs, then start the daemon or run `npm run agent:smoke:openrouter`. Existing shell environment values take precedence over `.env`; set `RELAYBASE_ENV_FILE` to use a different file. Non-secret Agent defaults can also be updated through the token-gated Agent config API and are persisted at `<state-dir>/agent/config.json`; shell and `.env` values override those persisted defaults, and API key material is never written there. The current local live acceptance used `openai/gpt-5.4`; provider model availability is external and should be rechecked when repeating live verification.
+The Node daemon owns processes, ports, routing, persistence, approvals, and recovery. The Go terminal UI is a client; it never takes over lifecycle ownership.
 
-## Routes
+## Optional Operator Agent
 
-- Human route: `http://<app-id>.localhost:7777`
-- Agent route: `http://127.0.0.1:7777` with `X-Relaybase-App: <app-id>`
-- Dashboard: `http://localhost:7777/__hub`
-- Streamable HTTP MCP: `http://localhost:7777/mcp`
-- Legacy SSE MCP: `http://localhost:7777/sse`
+Core Relaybase operation is local and does not need OpenRouter or any model key. The optional Operator Agent can add model-assisted project inspection and setup suggestions while keeping filesystem and lifecycle mutations behind explicit approvals.
 
-Route health distinguishes `full`, `degraded`, and `failed` so agents and dashboards can tell whether the human route, header route, or both are working.
+Copy `.env.example` to `.env` and configure `OPENROUTER_API_KEY` plus `RELAYBASE_AGENT_MODEL` only if you want that optional path. Relaybase never writes the API key into its persisted agent configuration.
 
-## Manifest
-
-`relaybase configure` creates or updates `relaybase.app.json`.
-
-```json
-{
-  "id": "notes",
-  "name": "Notes",
-  "command": "npm.cmd run dev",
-  "cwd": ".",
-  "protocol": "http",
-  "healthUrl": "/"
-}
-```
-
-Manifests can also declare fixed upstream ports, lifecycle hooks, timeouts, environment values, and child MCP servers. Docker Compose setup uses the same manifest hook fields while keeping Compose-specific files under `.relaybase/`.
-
-## MCP
+## Agent and MCP setup
 
 Relaybase can run as a stdio MCP server:
 
@@ -116,32 +74,73 @@ Relaybase can run as a stdio MCP server:
   "mcpServers": {
     "relaybase": {
       "command": "npx",
-      "args": ["@cameloo/relaybase", "mcp"]
+      "args": ["-y", "@cameloo/relaybase", "mcp"]
     }
   }
 }
 ```
 
-Read-only MCP calls do not require mutation auth. HTTP mutation tools require the local Relaybase token through `Authorization: Bearer <token>` or `x-relaybase-token: <token>`.
+Read-only MCP calls do not require mutation credentials. HTTP mutation tools require the local Relaybase token through `Authorization: Bearer <token>` or `x-relaybase-token: <token>`.
 
-## Docs
+## Routes
 
-| Topic                                             | File                                                                 |
-| ------------------------------------------------- | -------------------------------------------------------------------- |
-| Architecture and ownership boundaries             | [docs/architecture.md](docs/architecture.md)                         |
-| CLI commands and options                          | [docs/cli.md](docs/cli.md)                                           |
-| Manifest fields and validation                    | [docs/app-manifest.md](docs/app-manifest.md)                         |
-| MCP endpoints, tools, resources, prompts, auth    | [docs/mcp.md](docs/mcp.md)                                           |
-| App state, readiness, routes, logs, stop checks   | [docs/app-state.md](docs/app-state.md)                               |
-| Codex workflow and repo-local Relaybase skill     | [docs/relaybase-dev-skill.md](docs/relaybase-dev-skill.md)           |
-| Docker Compose setup and limits                   | [docs/docker-compose-lifecycle.md](docs/docker-compose-lifecycle.md) |
-| Local security defaults and current product scope | [docs/security-and-limits.md](docs/security-and-limits.md)           |
-| TUI architecture, bridge, and packaging           | [docs/tui-architecture.md](docs/tui-architecture.md)                 |
-| TUI Go toolchain and verification                 | [docs/tui-toolchain.md](docs/tui-toolchain.md)                       |
-| TUI Operator Agent architecture and OpenRouter    | [docs/tui-agent-architecture.md](docs/tui-agent-architecture.md)     |
-| TUI setup/onboarding commands and safety          | [docs/tui-setup-onboarding.md](docs/tui-setup-onboarding.md)         |
-| External AI app/agent builder guidance            | [docs/ai-app-builder/README.md](docs/ai-app-builder/README.md)       |
+- Human app route: `http://<app-id>.localhost:7777`
+- Agent app route: `http://127.0.0.1:7777` with `X-Relaybase-App: <app-id>`
+- Dashboard: `http://localhost:7777/__hub`
+- Streamable HTTP MCP: `http://localhost:7777/mcp`
+- Legacy SSE MCP: `http://localhost:7777/sse`
 
-## Current Scope
+Route health reports `full`, `degraded`, or `failed` so a client can distinguish human-route and agent-route problems.
 
-Relaybase binds to `127.0.0.1` by default. It does not currently provide public remote exposure, OAuth, TLS termination, a container management UI, Docker SDK control, wildcard child MCP exposure, automatic migrations, or automatic Docker volume removal.
+## Troubleshooting
+
+Start with:
+
+```bash
+relaybase check
+```
+
+Common recovery paths:
+
+- Missing TUI binary: reinstall `@cameloo/relaybase`; source contributors can run `npm run tui:build`.
+- Daemon unavailable: run `relaybase serve`, then retry `relaybase start`.
+- App will not become healthy: run `relaybase health` and inspect the reported logs and `nextActions`.
+- Port conflict: let Relaybase choose a dynamic port or update the manifest’s explicit port strategy.
+- Token mismatch: use the state directory reported by `relaybase check`; never paste the token into logs or issues.
+
+See [Troubleshooting](docs/troubleshooting.md) for symptom-led recovery and [Getting started](docs/getting-started.md) for a complete first-run walkthrough.
+
+## Install from source
+
+Source installation is for contributors. It requires Node.js 24+, npm, and Go 1.25.x for TUI work.
+
+```bash
+git clone https://github.com/Cameloo1/relaybase.git
+cd relaybase
+npm ci
+npm start
+```
+
+The source-checkout start path does not silently run `npm link` or replace global command shims. Use `relaybase repair-prefix --diagnose` before explicitly repairing a global development command.
+
+## Documentation
+
+| Goal                             | Guide                                                         |
+| -------------------------------- | ------------------------------------------------------------- |
+| Install and launch the first app | [Getting started](docs/getting-started.md)                    |
+| Recover from common failures     | [Troubleshooting](docs/troubleshooting.md)                    |
+| Learn CLI commands and options   | [CLI reference](docs/cli.md)                                  |
+| Understand ownership and state   | [Architecture](docs/architecture.md)                          |
+| Configure an app manifest        | [App manifest](docs/app-manifest.md)                          |
+| Connect MCP clients              | [MCP](docs/mcp.md)                                            |
+| Understand security boundaries   | [Security and limits](docs/security-and-limits.md)            |
+| Develop or package the TUI       | [TUI toolchain](docs/tui-toolchain.md)                        |
+| Use the optional Operator Agent  | [Operator Agent architecture](docs/tui-agent-architecture.md) |
+
+## Current limits
+
+Relaybase is local-first preview software. It does not currently provide public remote exposure, OAuth, TLS termination, a container-management UI, Docker SDK control, wildcard child-MCP exposure, automatic migrations, or automatic Docker-volume removal. See [Security and limits](docs/security-and-limits.md) before using it with sensitive or production workloads.
+
+## License
+
+MIT

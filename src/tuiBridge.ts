@@ -186,7 +186,9 @@ export async function resolveTuiBinary(
 
   return {
     ok: false,
-    reason: "Relaybase TUI binary was not found.",
+    reason: developmentCheckout
+      ? "This source checkout has not built a compatible Relaybase TUI binary."
+      : "This installed package is missing a compatible Relaybase TUI binary. Reinstall @cameloo/relaybase for this platform.",
     candidates: uniqueCandidates([...candidates.map((candidate) => candidate.path), globalCandidate])
   };
 }
@@ -352,8 +354,8 @@ export function formatMissingTuiBinaryDiagnostic(resolution: TuiBinaryResolution
     "  3. bin/relaybase-tui/<platform binary> inside this package",
     "  4. @cameloo/relaybase-tui-<platform>-<arch> platform package",
     "  5. globally installed relaybase-tui on PATH",
-    "Build from source with: npm run tui:build",
-    "Check local toolchain readiness with: npm run doctor:tui",
+    "Installed package recovery: npm install --global @cameloo/relaybase@latest",
+    "Source checkout recovery: npm run doctor:tui && npm run tui:build",
     "Expected candidates:",
     candidates
   ]

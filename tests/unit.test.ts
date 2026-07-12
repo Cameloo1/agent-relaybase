@@ -332,13 +332,15 @@ test("TUI bridge explains missing binary resolution order", async () => {
   const diagnostic = formatMissingTuiBinaryDiagnostic(resolution);
 
   assert.equal(resolution.ok, false);
+  assert.match(resolution.reason ?? "", /installed package is missing/i);
   assert.match(diagnostic, /relaybase-tui binary was not found/);
   assert.match(diagnostic, /RELAYBASE_TUI_BIN/);
   assert.match(diagnostic, /repo-local/);
   assert.match(diagnostic, /\.relaybase\/tui-dev-bin/);
   assert.match(diagnostic, /inside this package/);
   assert.match(diagnostic, /globally installed relaybase-tui/);
-  assert.match(diagnostic, /npm run tui:build/);
+  assert.match(diagnostic, /npm install --global @cameloo\/relaybase@latest/);
+  assert.match(diagnostic, /npm run doctor:tui && npm run tui:build/);
   assert.match(diagnostic, /npm run doctor:tui/);
   assert.match(diagnostic, /relaybase-tui-linux-amd64/);
 });
@@ -1221,7 +1223,7 @@ test("package check uses and removes a disposable OS-temp npm cache by default",
           stdout: JSON.stringify([
             {
               filename: "cameloo-relaybase-0.1.0.tgz",
-              files: [{ path: "bin/relaybase-tui/relaybase-tui-windows-amd64.exe" }]
+              files: [{ path: "dist-runtime/cli.js" }]
             }
           ]),
           stderr: ""
@@ -1230,7 +1232,7 @@ test("package check uses and removes a disposable OS-temp npm cache by default",
     });
 
     assert.equal(status, 0);
-    assert.match(stdout, /TUI package binary: present/);
+    assert.match(stdout, /Prepared platform binary: present/);
     assert.equal(calls[0]?.env?.npm_config_cache, temporaryCachePath);
     assert.equal(existsSync(temporaryCachePath), false);
     assert.doesNotMatch(temporaryCachePath, /artifacts[\\/]npm-cache/);
@@ -1267,7 +1269,7 @@ test("package check preserves a user-supplied npm cache override", async () => {
           stdout: JSON.stringify([
             {
               filename: "cameloo-relaybase-0.1.0.tgz",
-              files: [{ path: "bin/relaybase-tui/relaybase-tui-windows-amd64.exe" }]
+              files: [{ path: "dist-runtime/cli.js" }]
             }
           ]),
           stderr: ""

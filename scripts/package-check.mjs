@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -18,7 +18,8 @@ export function runPackageCheck(args = process.argv.slice(2), options = {}) {
   const arch = options.arch ?? process.arch;
   const target = targetForPlatform(platform, arch);
   const binaryPath = currentPlatformBinaryPath({ rootDir: root, platform, arch });
-  const relativeBinaryPath = posixPath(path.relative(root, binaryPath));
+  const platformPackageName = `@cameloo/relaybase-tui-${target.goos}-${target.goarch}`;
+  const manifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
   const pack = runNpmPackDryRun(spawn);
 
   if (pack.status !== 0) {
@@ -28,28 +29,46 @@ export function runPackageCheck(args = process.argv.slice(2), options = {}) {
   }
 
   const files = packFiles(pack.stdout);
+  if (!files.has("dist-runtime/cli.js")) {
+    console.error("Relaybase package check: compiled runtime dist-runtime/cli.js is missing from the npm tarball.");
+    return 1;
+  }
+  const forbidden = [...files].filter(
+    (file) =>
+      file.startsWith("reports/") ||
+      file.startsWith("scripts/") ||
+      file.startsWith("src/") ||
+      file.startsWith("tui/") ||
+      file.startsWith("dist/") ||
+      file.includes(".tmp-go-cache") ||
+      file === "docs/relaybase-release-roadmap.md" ||
+      file === "docs/tui-setup-gap-map.md" ||
+      file.startsWith("bin/relaybase-tui/relaybase-tui-")
+  );
+  if (forbidden.length) {
+    console.error(
+      `Relaybase package check: forbidden source or local artifacts entered the tarball:\n${forbidden.join("\n")}`
+    );
+    return 1;
+  }
+  if (manifest.optionalDependencies?.[platformPackageName] !== manifest.version) {
+    console.error(`Relaybase package check: ${platformPackageName} is not pinned to root version ${manifest.version}.`);
+    return 1;
+  }
   const binaryExists = exists(binaryPath);
-  const binaryInTarball = files.has(relativeBinaryPath);
   const lines = [
     `Relaybase package check: ${pack.filename ?? "dry-run tarball"}`,
-    `Expected TUI binary for ${platform}/${arch}: ${relativeBinaryPath}`
+    `Selected TUI package for ${platform}/${arch}: ${platformPackageName}`
   ];
 
-  if (binaryExists && binaryInTarball) {
-    lines.push("TUI package binary: present in workspace and npm dry-run.");
+  if (binaryExists) {
+    lines.push("Prepared platform binary: present outside the root tarball.");
     console.log(lines.join("\n"));
     return 0;
   }
 
-  if (binaryExists && !binaryInTarball) {
-    lines.push("TUI package binary: missing from npm dry-run even though the file exists.");
-    lines.push("Fix package.json files/include rules before release packaging.");
-    console.error(lines.join("\n"));
-    return 1;
-  }
-
-  lines.push("TUI package binary: not built in this workspace.");
-  lines.push("Build it with: npm run tui:build");
+  lines.push("Prepared platform binary: not built in this workspace.");
+  lines.push("Build it with: npm run tui:build:all && npm run package:prepare-platforms");
   lines.push("Check Go/toolchain readiness with: npm run doctor:tui");
   lines.push("Release verification can require the binary with: RELAYBASE_REQUIRE_TUI_BINARY=1 npm run package:check");
 
@@ -58,7 +77,7 @@ export function runPackageCheck(args = process.argv.slice(2), options = {}) {
     return 1;
   }
 
-  lines.push(`Package dry-run is source-only for ${target.binary} until the TUI binary is built.`);
+  lines.push(`Root package metadata is valid; strict release proof still requires ${target.binary}.`);
   console.log(lines.join("\n"));
   return 0;
 }

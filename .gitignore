@@ -2,6 +2,7 @@
 .codex/
 .claude/settings.local.json
 .tmp/
+tui/.tmp-go-cache/
 .relaybase/
 .env
 .env.*
@@ -9,14 +10,17 @@
 MVP.md
 coverage/
 dist/
+dist-runtime/
 node_modules/
 npm-debug.log*
 *.tgz
 artifacts/
 docs/relaybase-title-old.png
-reports/agent/AUDIT-LOOP-charter.md
-reports/agent/audit-loop/
-reports/agent/hardening-tracker.md
+reports/
+docs/relaybase-release-roadmap.md
+docs/tui-setup-gap-map.md
 bin/relaybase-tui/relaybase-tui-*
 !bin/relaybase-tui/README.md
+packages/relaybase-tui-*/bin/relaybase-tui-*
+packages/relaybase-tui-*/LICENSE
 

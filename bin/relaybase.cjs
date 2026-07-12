@@ -1,9 +1,14 @@
 #!/usr/bin/env node
 const { spawnSync } = require("node:child_process");
+const { existsSync } = require("node:fs");
 const path = require("node:path");
 
-const cliPath = path.resolve(__dirname, "../src/cli.ts");
-const result = spawnSync(process.execPath, ["--experimental-strip-types", cliPath, ...process.argv.slice(2)], {
+const compiledCliPath = path.resolve(__dirname, "../dist-runtime/cli.js");
+const sourceCliPath = path.resolve(__dirname, "../src/cli.ts");
+const installed = existsSync(compiledCliPath);
+const cliPath = installed ? compiledCliPath : sourceCliPath;
+const nodeArgs = installed ? [cliPath] : ["--experimental-strip-types", cliPath];
+const result = spawnSync(process.execPath, [...nodeArgs, ...process.argv.slice(2)], {
   stdio: "inherit",
   windowsHide: true
 });

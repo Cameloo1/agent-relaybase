@@ -17,7 +17,7 @@ This is the daemon API contract for the Relaybase TUI roadmap. As of R013, lifec
 - Existing setup/onboarding source primitives: `src/setup.ts`
 - Agent Gateway API routes, service, runtime, context, prompts, sessions, events, tools, and types: `src/agent/api.ts`, `src/agent/gateway.ts`, `src/agent/runtime.ts`, `src/agent/context.ts`, `src/agent/prompts.ts`, `src/agent/sessionStore.ts`, `src/agent/events.ts`, `src/agent/tools/`, `src/agent/types.ts`
 - OpenRouter compatibility adapter, runtime provider wrapper, and smoke runner: `src/agent/openrouterProvider.ts`, `src/agent/provider/openrouter.ts`, `src/agent/openrouterSmoke.ts`
-- Current-state evidence: `reports/phase-0/current-state-audit.md`
+- Current behavior is verified by the source files above and the automated Node and Go test suites.
 
 No new schema dependency was added for R002. The repository already has `zod`, but the current daemon API is small and route-local; explicit exported TypeScript types are the smallest compatible contract layer.
 

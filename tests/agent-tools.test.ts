@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { promises as fs } from "node:fs";
+import { promises as fs, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1585,7 +1585,7 @@ function fakeToolContext(
           projectRootGrants: [
             {
               grantId: "test_current_project",
-              canonicalRoot: path.resolve(options.tuiContext.currentCwd),
+              canonicalRoot: realpathSync(path.resolve(options.tuiContext.currentCwd)),
               source: "tui_current_cwd" as const
             }
           ]

@@ -1,0 +1,1 @@
+{"name":"@cameloo/relaybase-tui-darwin-amd64","version":"0.1.0","description":"Relaybase TUI binary for macOS x64.","license":"MIT","repository":{"type":"git","url":"git+https://github.com/Cameloo1/relaybase.git"},"os":["darwin"],"cpu":["x64"],"files":["bin/","LICENSE"],"bin":{"relaybase-tui":"bin/relaybase-tui-darwin-amd64"},"publishConfig":{"access":"public","provenance":true}}

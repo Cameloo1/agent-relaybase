@@ -130,14 +130,18 @@ relaybase tui
 .\bin\relaybase-tui\relaybase-tui-windows-amd64.exe --base-url http://127.0.0.1:7777 --state-dir "$env:LOCALAPPDATA\Relaybase"
 ```
 
-Package dry-runs classify the TUI binary path:
+Release package verification builds the JavaScript runtime and all six TUI binaries before inspecting tarballs:
 
 ```powershell
-npm.cmd run package:check
-$env:RELAYBASE_REQUIRE_TUI_BINARY = "1"; npm.cmd run package:check; Remove-Item Env:\RELAYBASE_REQUIRE_TUI_BINARY
+npm.cmd run build:runtime
+npm.cmd run tui:build:all
+npm.cmd run package:prepare-platforms
+npm.cmd run package:check:strict
+npm.cmd run package:check-platforms
+npm.cmd run package:install-smoke
 ```
 
-The normal package check remains usable on hosts without Go and reports the package as source-only until the binary is built. Release verification should use the strict environment variable after `npm.cmd run tui:build` so the tarball must include the current-platform binary.
+The normal package check remains usable on hosts without Go and reports when strict binary proof is unavailable. Release verification is strict: the slim root tarball must contain the compiled runtime, pin every optional platform package to the same version, and exclude source, tests, caches, reports, and generated binaries. Every platform tarball must contain its exact executable, and a root-plus-platform tarball install must run from a disposable directory. A normal published installation does not execute TypeScript from `node_modules` and does not require Go.
 
 Package checks use a newly created OS-temp npm cache by default and remove it when the check finishes, including failure paths. Set `RELAYBASE_PACKAGE_NPM_CACHE` to an explicit directory only when the operator deliberately wants to preserve and reuse that cache.
 
@@ -174,6 +178,8 @@ GoReleaser builds the six supported TUI binary names:
 produce `dist/relaybase-tui-checksums.txt` in a GoReleaser-capable environment.
 Do not stage generated `dist/` outputs unless a release task explicitly asks for
 them.
+
+The protected `.github/workflows/release.yml` workflow verifies version alignment, builds and packages all targets, runs disposable installation proof, creates GitHub release artifacts, publishes standalone platform packages, then publishes `@cameloo/relaybase`. Publication requires the `npm-production` environment and npm credentials; CI and local dry-runs never publish.
 
 See `docs/artifact-hygiene.md` for generated artifact locations, clean-worktree
 checks, and safe cleanup rules.

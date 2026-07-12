@@ -109,6 +109,10 @@ void main().catch((error) => {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const command = args.shift() ?? "help";
+  if (command === "--version" || command === "-v" || command === "version") {
+    console.log(packageVersion());
+    return;
+  }
   if (command === "help" || command === "--help" || command === "-h") {
     printHelp();
     return;
@@ -185,6 +189,14 @@ async function main(): Promise<void> {
     default:
       throw new Error(`Unknown command: ${command}`);
   }
+}
+
+export function packageVersion(packageRoot = ROOT): string {
+  const manifest = JSON.parse(readFileSync(path.join(packageRoot, "package.json"), "utf8")) as { version?: unknown };
+  if (typeof manifest.version !== "string" || !manifest.version.trim()) {
+    throw new Error("Relaybase package version is missing from package.json.");
+  }
+  return manifest.version;
 }
 
 interface WorkflowStep {

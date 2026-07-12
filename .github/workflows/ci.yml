@@ -151,11 +151,28 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tui/go.mod
+          cache-dependency-path: tui/go.sum
+
       - name: Install dependencies
         run: npm ci
 
+      - name: Build all platform TUI binaries
+        run: npm run tui:build:all
+
+      - name: Prepare platform packages
+        run: npm run package:prepare-platforms
+
       - name: Verify package contents
-        run: npm run package:check
+        run: |
+          npm run package:check:strict
+          npm run package:check-platforms
+
+      - name: Verify disposable install
+        run: npm run package:install-smoke
 
       - name: Verify clean workspace
         if: always()

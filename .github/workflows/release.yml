@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish GitHub and npm release artifacts
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: npm-production
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tui/go.mod
+          cache-dependency-path: tui/go.sum
+
+      - name: Set up GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          install-only: true
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify release tag and package versions
+        run: node scripts/verify-release-version.mjs
+
+      - name: Validate publication ref
+        if: github.event_name == 'push' || inputs.publish == true
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "Publication requires a v* tag ref; received $GITHUB_REF_TYPE $GITHUB_REF_NAME." >&2
+            exit 1
+          fi
+
+      - name: Run source verification
+        run: npm run verify -- --release
+
+      - name: Build and prepare npm platform packages
+        run: |
+          npm run tui:build:all
+          npm run package:prepare-platforms
+          npm run package:check:strict
+          npm run package:check-platforms
+          npm run package:install-smoke
+
+      - name: Validate release artifacts
+        run: npm run release:check
+
+      - name: Generate snapshot evidence
+        if: github.event_name == 'workflow_dispatch' && inputs.publish != true
+        run: npm run release:dry-run
+
+      - name: Generate publishable release artifacts
+        if: github.event_name == 'push' || inputs.publish == true
+        run: goreleaser release --clean --skip=publish
+
+      - name: Create or refresh draft GitHub release
+        if: github.event_name == 'push' || inputs.publish == true
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes
+          fi
+          while IFS= read -r -d '' artifact; do
+            gh release upload "$GITHUB_REF_NAME" "$artifact" --clobber
+          done < <(find dist -maxdepth 2 -type f -print0)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish npm packages idempotently
+        if: github.event_name == 'push' || inputs.publish == true
+        run: |
+          publish_if_missing() {
+            package="$1"
+            name=$(node -p "require('./${package}/package.json').name")
+            version=$(node -p "require('./${package}/package.json').version")
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "Already published: ${name}@${version}"
+            else
+              npm publish "$package" --access public --provenance
+            fi
+          }
+          for package in packages/relaybase-tui-*; do
+            publish_if_missing "$package"
+          done
+          publish_if_missing "."
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish GitHub release
+        if: github.event_name == 'push' || inputs.publish == true
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relaybase-release-evidence
+          path: |
+            dist/**
+            bin/relaybase-tui/relaybase-tui-*
+          if-no-files-found: warn

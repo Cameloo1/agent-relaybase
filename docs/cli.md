@@ -6,6 +6,7 @@ Relaybase's normal operator surface is intentionally small:
 relaybase start
 relaybase check
 relaybase verify
+relaybase --version
 ```
 
 `relaybase start` with no app id launches the normal daemon + TUI operator surface. `relaybase check` is a read-only local diagnosis bundle. `relaybase verify` is the source-checkout verification gate. Lower-level commands such as `configure`, `open`, `health`, `list`, `serve`, `tui`, and `start <app-id>` remain available for automation and direct lifecycle control.

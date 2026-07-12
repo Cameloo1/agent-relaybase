@@ -2,28 +2,46 @@
   "name": "@cameloo/relaybase",
   "version": "0.1.0",
   "description": "Local-first MCP router and lifecycle hub for AI-agent-built apps.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cameloo1/relaybase.git"
+  },
+  "homepage": "https://github.com/Cameloo1/relaybase#readme",
+  "bugs": {
+    "url": "https://github.com/Cameloo1/relaybase/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "type": "module",
   "bin": {
     "relaybase": "./bin/relaybase.cjs"
   },
   "files": [
+    "CHANGELOG.md",
+    "SECURITY.md",
     ".codex-plugin/",
     ".mcp.json",
-    "bin/",
-    "scripts/",
-    "src/",
-    "tui/",
-    "docs/",
+    "bin/relaybase.cjs",
+    "dist-runtime/",
+    "docs/**/*.md",
+    "!docs/relaybase-release-roadmap.md",
+    "!docs/tui-setup-gap-map.md",
+    "docs/relaybase-title.png",
     "examples/",
     "skills/"
   ],
   "scripts": {
     "start": "node scripts/relaybase-start.mjs",
+    "build:runtime": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build:runtime",
     "serve": "node --experimental-strip-types src/cli.ts serve",
     "relaybase": "node --experimental-strip-types src/cli.ts",
     "lint": "eslint .",
     "format": "prettier --write package.json .prettierrc.json eslint.config.mjs jest.config.mjs .goreleaser.yml \"*.md\" \"docs/**/*.md\" \"skills/**/*.md\" \"examples/**/*.json\" \".github/**/*.{yml,yaml}\" \"scripts/**/*.mjs\" \"src/**/*.ts\" \"tests/**/*.ts\" \"tests/fixtures/**/*.cjs\"",
     "format:check": "prettier --check package.json .prettierrc.json eslint.config.mjs jest.config.mjs .goreleaser.yml \"*.md\" \"docs/**/*.md\" \"skills/**/*.md\" \"examples/**/*.json\" \".github/**/*.{yml,yaml}\" \"scripts/**/*.mjs\" \"src/**/*.ts\" \"tests/**/*.ts\" \"tests/fixtures/**/*.cjs\"",
+    "docs:check": "node scripts/check-doc-links.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "test:jest": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.mjs",
@@ -50,6 +68,9 @@
     "check": "node --experimental-strip-types src/cli.ts check",
     "smoke": "node --experimental-strip-types src/cli.ts health",
     "package:check": "node scripts/package-check.mjs",
+    "package:prepare-platforms": "node scripts/prepare-platform-packages.mjs",
+    "package:check-platforms": "node scripts/platform-package-check.mjs",
+    "package:install-smoke": "node scripts/package-install-smoke.mjs",
     "package:check:strict": "node scripts/package-check.mjs --require-tui-binary",
     "verify:clean-worktree": "node scripts/check-worktree-clean.mjs",
     "verify:clean-worktree:allow-reports": "node scripts/check-worktree-clean.mjs --allow-reports",
@@ -76,6 +97,14 @@
     "@openai/agents": "^0.11.6",
     "openai": "^6.41.0",
     "zod": "^4.4.3"
+  },
+  "optionalDependencies": {
+    "@cameloo/relaybase-tui-darwin-amd64": "0.1.0",
+    "@cameloo/relaybase-tui-darwin-arm64": "0.1.0",
+    "@cameloo/relaybase-tui-linux-amd64": "0.1.0",
+    "@cameloo/relaybase-tui-linux-arm64": "0.1.0",
+    "@cameloo/relaybase-tui-windows-amd64": "0.1.0",
+    "@cameloo/relaybase-tui-windows-arm64": "0.1.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
