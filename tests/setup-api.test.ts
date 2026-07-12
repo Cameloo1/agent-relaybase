@@ -532,7 +532,13 @@ test("registration verification classifies command, dependency, port, exit, time
         }),
         "utf8"
       );
-      const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18600, portRangeEnd: 18700 });
+      const backendPort = await availablePort();
+      const hub = await createRelaybaseServer({
+        port: 0,
+        stateDir,
+        portRangeStart: backendPort,
+        portRangeEnd: backendPort
+      });
       try {
         await hub.listen();
         const port = hub.address().port;
@@ -1442,6 +1448,19 @@ test("setup diagnostics cover invalid paths, setup operations, and component met
 
 async function tempProject(prefix: string): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
+}
+
+async function availablePort(): Promise<number> {
+  const server = http.createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const port = address.port;
+  await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  return port;
 }
 
 async function writePackageJson(project: string, body: Record<string, unknown>): Promise<void> {
