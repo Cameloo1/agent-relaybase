@@ -690,7 +690,7 @@ function fakeToolContext(
     },
     projectRootGrants: options.tuiContext?.authorizedProjectRoots?.map((root, index) => ({
       grantId: `edge_fixture_${index}`,
-      canonicalRoot: realpathSync(path.resolve(root)),
+      canonicalRoot: realpathSync.native(path.resolve(root)),
       source: "user_selected_folder" as const
     })),
     emit: options.emit,

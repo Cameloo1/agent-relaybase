@@ -1585,7 +1585,7 @@ function fakeToolContext(
           projectRootGrants: [
             {
               grantId: "test_current_project",
-              canonicalRoot: realpathSync(path.resolve(options.tuiContext.currentCwd)),
+              canonicalRoot: realpathSync.native(path.resolve(options.tuiContext.currentCwd)),
               source: "tui_current_cwd" as const
             }
           ]
