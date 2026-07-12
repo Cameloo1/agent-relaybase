@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { promises as fs } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -12,6 +12,8 @@ import { relaybaseErrorResponse } from "../src/apiErrors.ts";
 import { sanitizeAgentPayload } from "../src/agent/errors.ts";
 import { composeAppState } from "../src/appState.ts";
 import { dashboardHtml } from "../src/dashboard.ts";
+import { isRecognizedRelaybaseNpmPowerShellShim, removeRecognizedRelaybasePowerShellShim } from "../src/prefixShim.ts";
+import { checkAppHealth, waitForHealthy } from "../src/health.ts";
 import { LogStore } from "../src/logStore.ts";
 import { ProcessManager } from "../src/processManager.ts";
 import { redactDiagnosticText, redactSecretLikeValues, redactValueForExport } from "../src/redaction.ts";
@@ -59,6 +61,8 @@ import {
   preferencesSurvived,
   renderedTranscriptOutput,
   smokeFixtureDefinition,
+  transcriptHasResponsiveBridgeLayout,
+  transcriptHasStyledOperatorShell,
   transcriptProcessOutput
 } from "../scripts/tui-smoke.mjs";
 
@@ -1189,12 +1193,13 @@ test("TUI snapshot wrapper can opt into stable golden test binary on Windows", (
   assert.deepEqual(runCall?.args, ["-test.run=TestGolden"]);
 });
 
-test("package check uses a repo-local npm cache by default", () => {
+test("package check uses and removes a disposable OS-temp npm cache by default", () => {
   const previousCache = process.env.npm_config_cache;
   const previousPackageCheckCache = process.env.RELAYBASE_PACKAGE_NPM_CACHE;
   process.env.npm_config_cache = "C:\\Users\\wamin\\AppData\\Local\\npm-cache";
   delete process.env.RELAYBASE_PACKAGE_NPM_CACHE;
   const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
+  let temporaryCachePath = "";
   const originalLog = console.log;
   let stdout = "";
   console.log = (message?: unknown) => {
@@ -1207,6 +1212,10 @@ test("package check uses a repo-local npm cache by default", () => {
       exists: () => true,
       spawn: (command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
         calls.push({ command, args, env: options.env });
+        temporaryCachePath = options.env?.npm_config_cache ?? "";
+        assert.match(path.basename(temporaryCachePath), /^relaybase-package-check-/);
+        assert.equal(path.dirname(temporaryCachePath), os.tmpdir());
+        assert.equal(existsSync(temporaryCachePath), true);
         return {
           status: 0,
           stdout: JSON.stringify([
@@ -1222,7 +1231,9 @@ test("package check uses a repo-local npm cache by default", () => {
 
     assert.equal(status, 0);
     assert.match(stdout, /TUI package binary: present/);
-    assert.ok(calls[0]?.env?.npm_config_cache?.endsWith(path.join("artifacts", "npm-cache")));
+    assert.equal(calls[0]?.env?.npm_config_cache, temporaryCachePath);
+    assert.equal(existsSync(temporaryCachePath), false);
+    assert.doesNotMatch(temporaryCachePath, /artifacts[\\/]npm-cache/);
   } finally {
     console.log = originalLog;
     if (previousCache === undefined) {
@@ -1236,6 +1247,75 @@ test("package check uses a repo-local npm cache by default", () => {
       process.env.RELAYBASE_PACKAGE_NPM_CACHE = previousPackageCheckCache;
     }
   }
+});
+
+test("package check preserves a user-supplied npm cache override", async () => {
+  const previousPackageCheckCache = process.env.RELAYBASE_PACKAGE_NPM_CACHE;
+  const configuredCache = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-user-package-cache-"));
+  process.env.RELAYBASE_PACKAGE_NPM_CACHE = configuredCache;
+  const originalLog = console.log;
+  console.log = () => undefined;
+  try {
+    const status = runPackageCheck([], {
+      platform: "win32",
+      arch: "x64",
+      exists: () => true,
+      spawn: (_command: string, _args: string[], options: { env?: NodeJS.ProcessEnv }) => {
+        assert.equal(options.env?.npm_config_cache, configuredCache);
+        return {
+          status: 0,
+          stdout: JSON.stringify([
+            {
+              filename: "cameloo-relaybase-0.1.0.tgz",
+              files: [{ path: "bin/relaybase-tui/relaybase-tui-windows-amd64.exe" }]
+            }
+          ]),
+          stderr: ""
+        };
+      }
+    });
+
+    assert.equal(status, 0);
+    assert.equal(existsSync(configuredCache), true);
+  } finally {
+    console.log = originalLog;
+    if (previousPackageCheckCache === undefined) {
+      delete process.env.RELAYBASE_PACKAGE_NPM_CACHE;
+    } else {
+      process.env.RELAYBASE_PACKAGE_NPM_CACHE = previousPackageCheckCache;
+    }
+    await fs.rm(configuredCache, { recursive: true, force: true });
+  }
+});
+
+test("explicit prefix repair preserves custom PowerShell shims and removes only recognized npm shims", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-prefix-shim-"));
+  const ps1Path = path.join(root, "relaybase.ps1");
+  const cmdPath = path.join(root, "relaybase.cmd");
+  await fs.writeFile(cmdPath, "@echo off\r\n", "utf8");
+
+  const custom = "Write-Host 'custom relaybase wrapper'\n";
+  await fs.writeFile(ps1Path, custom, "utf8");
+  assert.equal(isRecognizedRelaybaseNpmPowerShellShim(custom), false);
+  const preserved = removeRecognizedRelaybasePowerShellShim(ps1Path, cmdPath, { backupSuffix: "test-backup" });
+  assert.deepEqual(preserved, { removed: false, reason: "unrecognized" });
+  assert.equal(await fs.readFile(ps1Path, "utf8"), custom);
+
+  const generated = [
+    "#!/usr/bin/env pwsh",
+    "$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent",
+    '$exe=".exe"',
+    '& "node$exe" "$basedir/node_modules/@cameloo/relaybase/bin/relaybase.cjs" $args',
+    "$ret=$LASTEXITCODE",
+    "exit $ret",
+    ""
+  ].join("\n");
+  await fs.writeFile(ps1Path, generated, "utf8");
+  assert.equal(isRecognizedRelaybaseNpmPowerShellShim(generated), true);
+  const removed = removeRecognizedRelaybasePowerShellShim(ps1Path, cmdPath, { backupSuffix: "test-backup" });
+  assert.deepEqual(removed, { removed: true });
+  assert.equal(existsSync(ps1Path), false);
+  assert.equal(existsSync(`${ps1Path}.test-backup`), false);
 });
 
 test("TUI snapshot command fails closed when Go is missing", () => {
@@ -1289,6 +1369,49 @@ test("TUI smoke 8-pane fixture defines four frontend/backend groups", () => {
   for (const roles of rolesByGroup.values()) {
     assert.deepEqual([...roles].sort(), ["backend", "frontend"]);
   }
+});
+
+test("TUI smoke style evidence requires ANSI colors, complete panes, and no outer scroll", () => {
+  const fixture = smokeFixtureDefinition("default");
+  const styled = [
+    "STDOUT:",
+    "\x1b[38;2;47;33;24m\x1b[38;2;125;106;95m\x1b[48;2;248;244;236mApps 2 active / 2 registered\u2514 pane one \u2518\x1b[0m",
+    "\x1b[38;2;33;104;105m\x1b[38;2;40;122;61m\x1b[38;2;138;90;0m\x1b[38;2;155;28;49m\u2514 pane two \u2518\x1b[0m",
+    `\x1b[38;2;109;76;61m\x1b[48;2;248;244;236m${"─".repeat(fixture.smokeWidth)}\x1b[0m`,
+    "",
+    "STDERR:",
+    ""
+  ].join("\n");
+  assert.equal(transcriptHasStyledOperatorShell(styled, fixture), true);
+  assert.equal(
+    transcriptHasStyledOperatorShell(styled.replace(new RegExp(String.raw`\x1B\[[0-9;]*m`, "g"), ""), fixture),
+    false
+  );
+  assert.equal(transcriptHasStyledOperatorShell(styled.replace("pane two", "scroll 0/6"), fixture), false);
+  assert.equal(transcriptHasStyledOperatorShell(styled.replace(/┘/g, ""), fixture), false);
+  assert.equal(transcriptHasStyledOperatorShell(styled.replaceAll("38;2;109;76;61", "38;2;1;2;3"), fixture), false);
+  assert.equal(transcriptHasStyledOperatorShell(styled.replaceAll("48;2;248;244;236", "48;2;1;2;3"), fixture), false);
+});
+
+test("TUI smoke bridge evidence requires responsive complete panes at 110x32", () => {
+  const fixture = smokeFixtureDefinition("8pane");
+  const visible = fixture.apps
+    .slice(0, 6)
+    .map((app) => `${app.displayName}: ${app.paneLabel}\n[stdout] ${app.id} smoke\n└─┘`)
+    .join("\n");
+  const transcript = ["STDOUT:", "Page 1/2", visible, "", "STDERR:", ""].join("\n");
+
+  assert.equal(transcriptHasResponsiveBridgeLayout(transcript, fixture), true);
+  assert.equal(transcriptHasResponsiveBridgeLayout(transcript.replace("Page 1/2", "Page 1/1"), fixture), false);
+  assert.equal(transcriptHasResponsiveBridgeLayout(transcript.replace(/└/g, ""), fixture), false);
+  assert.equal(transcriptHasResponsiveBridgeLayout(transcript.replace(/┘/g, ""), fixture), false);
+  assert.equal(
+    transcriptHasResponsiveBridgeLayout(
+      transcript.replace(`[stdout] ${fixture.apps[5].id}`, "[stdout] missing"),
+      fixture
+    ),
+    false
+  );
 });
 
 test("TUI smoke prerequisites fail closed when the binary is missing", () => {
@@ -1498,6 +1621,61 @@ test("restricts absolute health URLs to localhost targets", () => {
       }),
     /healthUrl must target localhost/
   );
+});
+
+test("waitForHealthy allows slow first health response within the manifest budget", async () => {
+  const server = http.createServer((_request, response) => {
+    setTimeout(() => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+    }, 1200);
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address() as AddressInfo;
+    const app = normalizeManifest({
+      id: "slow-health",
+      name: "Slow Health",
+      command: "node server.js",
+      healthUrl: "/health"
+    });
+
+    assert.equal(await waitForHealthy(app, address.port, "127.0.0.1", 4000), true);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
+test("HTTP health accepts only successful 2xx responses", async () => {
+  let statusCode = 404;
+  const server = http.createServer((_request, response) => {
+    response.writeHead(statusCode, { "content-type": "application/json" });
+    response.end(JSON.stringify({ statusCode }));
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address() as AddressInfo;
+    const app = normalizeManifest({
+      id: "strict-health",
+      name: "Strict Health",
+      command: "node server.js",
+      healthUrl: "/health"
+    });
+
+    assert.equal(await checkAppHealth(app, address.port, "127.0.0.1", 500), false);
+    statusCode = 204;
+    assert.equal(await checkAppHealth(app, address.port, "127.0.0.1", 500), true);
+    statusCode = 302;
+    assert.equal(await checkAppHealth(app, address.port, "127.0.0.1", 500), false);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
 });
 
 test("normalizes lifecycle hook fields and rejects invalid timeouts", () => {
@@ -1981,7 +2159,6 @@ test("persists registry records", async () => {
 
 test("dashboard labels app backend ports explicitly", () => {
   const html = dashboardHtml({
-    token: "test-token",
     apps: [
       {
         id: "fixed-app",
@@ -2006,9 +2183,10 @@ test("dashboard labels app backend ports explicitly", () => {
 
   assert.match(html, /<th scope="col">Backend port<\/th>/);
   assert.match(html, /aria-live="polite"/);
-  assert.match(html, /aria-label="Start ' \+ appLabel/);
-  assert.match(html, /aria-label="Stop ' \+ appLabel/);
-  assert.match(html, /disabled aria-disabled="true"/);
+  assert.match(html, /aria-label="' \+ label \+ ' ' \+ escapeHtml\(id\)/);
+  assert.match(html, /actionButton\('inspect'/);
+  assert.doesNotMatch(html, /actionButton\('start'/);
+  assert.doesNotMatch(html, /actionButton\('stop'/);
   assert.doesNotMatch(html, /<th>Port<\/th>/);
   assert.match(html, /fixed :/);
   assert.match(html, /requested/);

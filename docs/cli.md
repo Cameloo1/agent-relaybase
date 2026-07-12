@@ -3,12 +3,22 @@
 Relaybase's normal operator surface is intentionally small:
 
 ```powershell
-relaybase configure
-relaybase open
-relaybase health
+relaybase start
+relaybase check
+relaybase verify
 ```
 
-Use `relaybase list` for the read-only app inventory. Lower-level commands remain available for automation and direct lifecycle control.
+`relaybase start` with no app id launches the normal daemon + TUI operator surface. `relaybase check` is a read-only local diagnosis bundle. `relaybase verify` is the source-checkout verification gate. Lower-level commands such as `configure`, `open`, `health`, `list`, `serve`, `tui`, and `start <app-id>` remain available for automation and direct lifecycle control.
+
+The npm wrappers call the same bundled paths from a source checkout:
+
+```powershell
+npm.cmd start
+npm.cmd run check
+npm.cmd run verify
+```
+
+If PowerShell says `relaybase` is not recognized in a fresh checkout, run `npm.cmd start` from the repo root. The wrapper launches the source checkout directly and does not run `npm link`, change the global npm prefix, or delete shims. Prefix inspection and repair are separate explicit operations: `relaybase repair-prefix --diagnose`, `relaybase repair-prefix --plan`, and `relaybase repair-prefix`.
 
 ## Shared Options
 
@@ -74,6 +84,70 @@ Troubleshooting:
 - Daemon unavailable: start `relaybase serve`; the bridge does not silently start apps.
 - Auth failure: verify the selected `--state-dir` contains the Relaybase `session-token`, or set `RELAYBASE_TOKEN` for the TUI process.
 - Unsupported terminal: use the TUI dark/light fallback with `relaybase tui -- --theme dark` or `relaybase tui -- --theme light`.
+
+## start
+
+```powershell
+relaybase start
+relaybase start --plan
+relaybase start --port 7777 --state-dir "$env:LOCALAPPDATA\Relaybase"
+relaybase start -- --theme dark
+relaybase start <app-id>
+npm.cmd start
+```
+
+With no app id, `start` is the daily launch bundle. It locates the packaged or repo-local TUI binary, builds the TUI binary first when a source checkout is missing it and Go is available, launches the Go TUI through the Node bridge, and lets the bridge safely ensure the Relaybase daemon. It does not silently start unknown user apps or repair the global command prefix.
+
+With an app id, `start <app-id>` keeps the existing lifecycle meaning and starts that registered app through the daemon mutation API.
+
+`--plan` prints the bundled steps without launching the TUI.
+
+## check
+
+```powershell
+relaybase check
+relaybase check --plan
+```
+
+`check` is read-only. It runs:
+
+- TUI/toolchain doctor
+- `relaybase health`
+- `relaybase list --verbose`
+
+It does not run the package dry-run, make OpenRouter requests, start unknown user apps, run `npm link`, or remove command shims.
+
+## repair-prefix
+
+```powershell
+relaybase repair-prefix --diagnose
+relaybase repair-prefix --plan
+relaybase repair-prefix
+```
+
+`repair-prefix` is the explicit source-checkout prefix repair. `--diagnose` checks command visibility and whether the command targets the current checkout without changing anything. `--plan` prints the intended repair. The mutating form runs `npm link --no-audit --no-fund`; on Windows it removes `relaybase.ps1` only when the sibling `relaybase.cmd` exists and both are recognized npm-generated Relaybase shims. Unrecognized/custom PowerShell shims are preserved. Removal uses an atomic rename and restores the shim if deletion fails. If link or verification fails, it stops without launching the normal start workflow.
+
+## verify
+
+```powershell
+relaybase verify
+relaybase verify --full
+relaybase verify --release
+relaybase verify --live
+relaybase verify --race
+relaybase verify --all
+relaybase verify --plan --full --release
+```
+
+The default verification gate runs formatting, lint, typecheck, Node tests, Jest tests, and `relaybase health`.
+
+`--full` adds agent tests, TUI build/test/vet/snapshot/smoke, 8-pane smoke, package check, and clean-worktree hygiene.
+
+`--release` adds GoReleaser config validation. `--race` adds Go race tests and preserves the documented environment-blocked race exit code. `--all` combines the full and release gates. `--live` explicitly opts into live OpenRouter Operator Agent checks. Live checks are never run by default, including under `--all`.
+
+`--plan` prints the selected gate without executing it.
+
+`package:check`, used by the full gate, runs `npm pack --dry-run --json`. By default it creates and removes a disposable cache under the operating-system temp directory. Set `RELAYBASE_PACKAGE_NPM_CACHE` only when an intentional persistent cache override is required.
 
 ## configure
 
@@ -167,6 +241,7 @@ Runtime filters require the daemon because Relaybase cannot prove running state 
 relaybase serve
 relaybase mcp
 relaybase tui
+relaybase repair-prefix --diagnose
 relaybase register <manifest>
 relaybase start <app-id>
 relaybase stop <app-id>
@@ -175,4 +250,4 @@ relaybase status
 relaybase logs <app-id>
 ```
 
-`serve` starts the localhost daemon. `mcp` runs Relaybase as a stdio MCP server. `tui` launches the Go terminal client when a matching binary is installed or configured. `register` writes a manifest into Relaybase state. `start`, `stop`, and `restart` call the daemon API and require the local mutation token. `status` is a compatibility alias for `list`. `logs` prints the daemon's recent in-memory log snapshot for one app.
+`serve` starts the localhost daemon. `mcp` runs Relaybase as a stdio MCP server. `tui` launches the Go terminal client when a matching binary is installed or configured. `repair-prefix` explicitly diagnoses or repairs a source-checkout global command link. `register` writes a manifest into Relaybase state. `start`, `stop`, and `restart` call the daemon API and require the local mutation token. `status` is a compatibility alias for `list`. `logs` prints the daemon's recent log snapshot for one app.

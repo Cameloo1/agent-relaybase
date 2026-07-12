@@ -2,12 +2,19 @@ import type http from "node:http";
 import path from "node:path";
 import { handleAgentApiRequest } from "./agent/api.ts";
 import { AgentGatewayRequestError } from "./agent/gateway.ts";
+import { handleAppPackageApiRequest } from "./appPackageApi.ts";
 import { correlationIdForRequest, relaybaseErrorResponse, setCorrelationHeader } from "./apiErrors.ts";
-import type { AppState, DaemonEvent, LifecycleOperationType } from "./apiTypes.ts";
+import type { AppState, DaemonEvent, LifecycleOperationType, OperationStatus } from "./apiTypes.ts";
 import { getAppState, getRelaybaseState } from "./appState.ts";
 import { appRecordEventData } from "./daemonEvents.ts";
+import { dashboardInventory } from "./dashboard.ts";
 import { LogExportRequestError } from "./logExport.ts";
-import { OperationConflictError, type OperationOutcome } from "./operationStore.ts";
+import {
+  OperationConflictError,
+  OperationStoreClosedError,
+  type OperationListOptions,
+  type OperationOutcome
+} from "./operationStore.ts";
 import { readManifestFile } from "./registry.ts";
 import { sendJson } from "./responses.ts";
 import type { RelaybaseRuntime } from "./server.ts";
@@ -17,6 +24,17 @@ import type { LifecycleAttempt, RuntimeView } from "./types.ts";
 const DAEMON_EVENTS_HEARTBEAT_MS = 1000;
 const DAEMON_EVENTS_RETRY_MS = 3000;
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
+const OPERATION_STATUSES = new Set<OperationStatus>([
+  "queued",
+  "running",
+  "waiting_for_approval",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "aborted",
+  "skipped",
+  "timed_out"
+]);
 
 class ApiError extends Error {
   readonly statusCode: number;
@@ -60,12 +78,27 @@ export async function handleApiRequest(
 
   try {
     if (request.method === "GET" && url.pathname === "/__hub/api/state") {
+      requireToken(runtime, request, {
+        code: "UNAUTHORIZED_STATE_READ",
+        message: "Unauthorized Relaybase state read.",
+        userAction: "Use the session token from this daemon state directory before reading full app state."
+      });
       sendJson(response, 200, await getRelaybaseState(runtime));
       return;
     }
 
     if (request.method === "GET" && url.pathname === "/__hub/api/apps") {
+      requireToken(runtime, request, {
+        code: "UNAUTHORIZED_APP_INVENTORY",
+        message: "Unauthorized Relaybase app inventory read.",
+        userAction: "Use the session token from this daemon state directory before reading full app records."
+      });
       sendJson(response, 200, { apps: await runtime.processes.listStatuses() });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/__hub/api/dashboard/apps") {
+      sendJson(response, 200, { apps: dashboardInventory(await runtime.processes.listStatuses()) });
       return;
     }
 
@@ -76,6 +109,18 @@ export async function handleApiRequest(
         userAction: "Use the session token from this daemon state directory before opening the event stream."
       });
       await streamDaemonEvents(runtime, request, response);
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/__hub/api/operations") {
+      requireToken(runtime, request, {
+        code: "UNAUTHORIZED_OPERATION_INVENTORY",
+        message: "Unauthorized Relaybase operation inventory read.",
+        userAction: "Use the session token from this daemon state directory before reading lifecycle history."
+      });
+      const filters = operationListOptions(url);
+      const operations = runtime.operations.list(filters);
+      sendJson(response, 200, { operations, count: operations.length, filters });
       return;
     }
 
@@ -125,6 +170,19 @@ export async function handleApiRequest(
       const body = await readJsonBody(request);
       const exportResult = await runtime.exports.create(body, correlationId);
       sendJson(response, 202, { export: exportResult });
+      return;
+    }
+
+    if (
+      await handleAppPackageApiRequest({
+        service: runtime.packages,
+        request,
+        response,
+        parts,
+        correlationId,
+        requireToken: (options) => requireToken(runtime, request, options)
+      })
+    ) {
       return;
     }
 
@@ -201,6 +259,11 @@ export async function handleApiRequest(
       parts[2] === "apps" &&
       parts[4] === "state"
     ) {
+      requireToken(runtime, request, {
+        code: "UNAUTHORIZED_APP_STATE",
+        message: "Unauthorized Relaybase app state read.",
+        userAction: "Use the session token from this daemon state directory before reading full app state."
+      });
       sendJson(response, 200, { state: await getAppState(runtime, parts[3]) });
       return;
     }
@@ -321,7 +384,7 @@ export function enqueueLifecycleOperation(
         if (action === "restart") {
           context.addProgress("Restart is a daemon-owned stop phase followed by a start phase.", 30, "restart");
         }
-        const lifecycleRuntime = await runLifecycleAction(runtime, id, action);
+        const lifecycleRuntime = await runLifecycleAction(runtime, id, action, context.signal);
         context.addProgress(`Daemon lifecycle call completed for ${action}.`, 85, "state-refresh");
         return {
           runtime: lifecycleRuntime,
@@ -338,24 +401,87 @@ export function enqueueLifecycleOperation(
         userAction: "Poll the active operation before starting a conflicting lifecycle action."
       });
     }
+    if (error instanceof OperationStoreClosedError) {
+      throw new ApiError(503, "LIFECYCLE_STORE_SHUTTING_DOWN", error.message, {
+        retryable: true,
+        userAction: "Wait for the daemon to restart before submitting another lifecycle action."
+      });
+    }
     throw error;
   }
+}
+
+function operationListOptions(url: URL): OperationListOptions {
+  const statusValues = url.searchParams
+    .getAll("status")
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const invalidStatus = statusValues.find((status) => !OPERATION_STATUSES.has(status as OperationStatus));
+  if (invalidStatus) {
+    throw new ApiError(400, "OPERATION_STATUS_FILTER_INVALID", `Unknown operation status filter: ${invalidStatus}`, {
+      retryable: false,
+      userAction: "Use a documented operation status such as failed, timed_out, or succeeded."
+    });
+  }
+
+  const operationType = url.searchParams.get("type")?.trim();
+  if (operationType && !isLifecycleOperationType(operationType)) {
+    throw new ApiError(400, "OPERATION_TYPE_FILTER_INVALID", `Unknown lifecycle operation type: ${operationType}`, {
+      retryable: false,
+      userAction: "Use start, stop, or restart."
+    });
+  }
+
+  const retryable = url.searchParams.get("retryable")?.trim().toLowerCase();
+  if (retryable && retryable !== "true" && retryable !== "false") {
+    throw new ApiError(400, "OPERATION_RETRYABLE_FILTER_INVALID", "Operation retryable filter must be true or false.", {
+      retryable: false,
+      userAction: "Use retryable=true to list only retryable operations."
+    });
+  }
+
+  const rawLimit = url.searchParams.get("limit")?.trim();
+  const limit = rawLimit ? Number(rawLimit) : 50;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+    throw new ApiError(400, "OPERATION_LIMIT_INVALID", "Operation list limit must be an integer from 1 through 200.", {
+      retryable: false,
+      userAction: "Use a bounded limit between 1 and 200."
+    });
+  }
+
+  const targetId = url.searchParams.get("targetId")?.trim();
+  if (targetId && targetId.length > 200) {
+    throw new ApiError(400, "OPERATION_TARGET_FILTER_INVALID", "Operation target filter is too long.", {
+      retryable: false,
+      userAction: "Use an exact registered app id no longer than 200 characters."
+    });
+  }
+
+  return {
+    ...(statusValues.length ? { statuses: statusValues as OperationStatus[] } : {}),
+    ...(operationType ? { operationType: operationType as LifecycleOperationType } : {}),
+    ...(targetId ? { targetId } : {}),
+    retryableOnly: retryable === "true",
+    limit
+  };
 }
 
 async function runLifecycleAction(
   runtime: RelaybaseRuntime,
   id: string,
-  action: LifecycleOperationType
+  action: LifecycleOperationType,
+  signal?: AbortSignal
 ): Promise<RuntimeView> {
   if (action === "start") {
-    return runtime.processes.start(id);
+    return runtime.processes.start(id, { signal });
   }
 
   if (action === "stop") {
-    return runtime.processes.stop(id);
+    return runtime.processes.stop(id, { signal });
   }
 
-  return runtime.processes.restart(id);
+  return runtime.processes.restart(id, { signal });
 }
 
 function evaluateLifecycleOutcome(action: LifecycleOperationType, id: string, runtime: RuntimeView): OperationOutcome {

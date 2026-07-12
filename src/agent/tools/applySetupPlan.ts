@@ -1,13 +1,25 @@
 import { z } from "zod";
-import { applySetup } from "../../setupApi.ts";
+import { applySetup, previewSetup } from "../../setupApi.ts";
 import {
   confirmationContextSchema,
   correlationId,
+  diagnosticResult,
   requireApproved,
   safeToolExecute,
   successResult,
   type RelaybaseAgentToolDefinition
 } from "./common.ts";
+import { createSetupPreviewBinding, verifySetupPreviewBinding } from "./setupPreviewBinding.ts";
+
+const previewBindingSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    algorithm: z.literal("sha256"),
+    digest: z.string().regex(/^[a-f0-9]{64}$/i),
+    revision: z.string().regex(/^[a-f0-9]{64}$/i),
+    setupPlanId: z.string().min(1)
+  })
+  .strict();
 
 const runtimeIdSchema = z.enum([
   "javascript-typescript",
@@ -70,6 +82,7 @@ const parameters = z
     envStrategy: z.enum(["runtime-injection", "env-relaybase-file", "guarded-env-block", "none"]).optional(),
     componentMetadata: componentMetadataSchema.optional(),
     reason: z.string().optional(),
+    previewBinding: previewBindingSchema.optional(),
     confirmationContext: confirmationContextSchema
   })
   .strict();
@@ -84,21 +97,50 @@ export function createApplySetupPlanTool(): RelaybaseAgentToolDefinition<z.infer
     risk: "high",
     execute: (input, context) =>
       safeToolExecute(definition, input, async () => {
+        const setupArgs = {
+          ...input,
+          cwd: input.cwd ?? input.currentDirectory ?? context.tuiContext.currentCwd,
+          commandHint: input.commandHint ?? input.command
+        };
+        const preview = await previewSetup(setupArgs);
+        const currentBinding = createSetupPreviewBinding(preview);
         const approval = requireApproved(
           definition,
-          input,
+          { ...input, previewBinding: currentBinding },
           context,
-          "Apply approved setup writes and register manifest."
+          "Apply only the setup writes bound to this exact preview revision, then register the manifest."
         );
         if (approval) {
-          return approval;
+          return {
+            ...approval,
+            data: { preview, previewBinding: currentBinding },
+            setupPlanId: preview.selectedPlan.id
+          };
+        }
+        const bindingVerification = verifySetupPreviewBinding(preview, input.previewBinding);
+        if (!bindingVerification.ok) {
+          const missing = bindingVerification.failure === "missing";
+          return diagnosticResult(
+            definition.name,
+            missing ? "SETUP_PREVIEW_BINDING_REQUIRED" : "SETUP_PREVIEW_STALE",
+            missing
+              ? "Approved setup apply is missing its immutable preview binding."
+              : "The approved setup preview no longer matches the current project state.",
+            {
+              severity: "error",
+              userAction: "Generate a fresh setup preview, review it, and approve that exact revision before applying.",
+              detail: {
+                failure: bindingVerification.failure,
+                setupPlanId: preview.selectedPlan.id,
+                mutationPerformed: false
+              }
+            }
+          );
         }
         const setup = await applySetup(
           context.runtime,
           {
-            ...input,
-            cwd: input.cwd ?? input.currentDirectory ?? context.tuiContext.currentCwd,
-            commandHint: input.commandHint ?? input.command,
+            ...setupArgs,
             confirm: true,
             confirmation: { confirmed: true, reason: input.reason }
           },

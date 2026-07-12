@@ -10,6 +10,7 @@ import type {
   AgentConfig,
   AgentDiagnostic,
   AgentMessage,
+  AgentProjectRootGrant,
   AgentRun,
   AgentSession,
   AgentThreadContextPreview,
@@ -39,9 +40,11 @@ export interface OperatorAgentRuntimeInput {
   message: AgentMessage;
   run: AgentRun;
   context: TuiAgentContext;
+  projectRootGrants?: readonly AgentProjectRootGrant[];
   threadContext?: AgentThreadContextPreview;
   emit: (event: AgentRuntimeEvent) => void;
   knownSecrets?: string[];
+  signal?: AbortSignal;
 }
 
 export interface OperatorAgentRuntimeResult {
@@ -102,6 +105,7 @@ export class OperatorAgentRuntime {
         modelSlug: input.config.provider.modelSlug,
         runtime: input.relaybase,
         tuiContext: input.context,
+        projectRootGrants: input.projectRootGrants,
         config: input.config,
         emit: input.emit
       });
@@ -148,7 +152,8 @@ export class OperatorAgentRuntime {
             }
           });
         },
-        (event) => input.emit(event)
+        (event) => input.emit(event),
+        input.signal
       );
       const interruptions = pendingApprovalsFromResult(result);
       if (interruptions.length) {
@@ -227,7 +232,8 @@ export class OperatorAgentRuntime {
           userAction: "Retry or choose another OpenRouter model."
         });
       }
-      const outputDiagnostic = outputGuardrail(output, toolResultCount(result));
+      const toolResults = toolResultSummary(result);
+      const outputDiagnostic = outputGuardrail(output, toolResults.count, input.message.content, toolResults.toolNames);
       if (outputDiagnostic) {
         input.emit({ type: "diagnostic", data: outputDiagnostic });
         input.emit({
@@ -295,30 +301,50 @@ export class OperatorAgentRuntime {
     agent: unknown,
     prompt: string,
     emitDelta: (delta: string) => void,
-    emitEvent: (event: AgentRuntimeEvent) => void
+    emitEvent: (event: AgentRuntimeEvent) => void,
+    externalSignal?: AbortSignal
   ): Promise<any> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.#timeoutMs);
+    let timedOut = false;
+    const timeoutError = () =>
+      new AgentRuntimeError("AGENT_PROVIDER_TIMEOUT", "Operator Agent provider request timed out.", {
+        retryable: true,
+        userAction: "Retry the request or choose a faster OpenRouter model."
+      });
+    const cancelledError = () =>
+      new AgentRuntimeError("AGENT_RUN_CANCELLED", "Operator Agent run was cancelled.", {
+        retryable: true,
+        userAction: "Retry the run if the request is still needed."
+      });
+    let rejectAbort: ((error: Error) => void) | undefined;
+    const abortPromise = new Promise<never>((_resolve, reject) => {
+      rejectAbort = reject;
+    });
+    const onExternalAbort = () => {
+      if (!controller.signal.aborted) {
+        controller.abort(externalSignal?.reason);
+      }
+      rejectAbort?.(cancelledError());
+    };
+    if (externalSignal?.aborted) {
+      onExternalAbort();
+    } else {
+      externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (!controller.signal.aborted) {
+        controller.abort();
+      }
+      rejectAbort?.(timeoutError());
+    }, this.#timeoutMs);
     try {
       const runPromise = runner.run(agent, prompt, {
         stream: true,
         maxTurns: this.#maxTurns,
         signal: controller.signal
       });
-      const timeoutPromise = new Promise<never>((_resolve, reject) => {
-        controller.signal.addEventListener(
-          "abort",
-          () =>
-            reject(
-              new AgentRuntimeError("AGENT_PROVIDER_TIMEOUT", "Operator Agent provider request timed out.", {
-                retryable: true,
-                userAction: "Retry the request or choose a faster OpenRouter model."
-              })
-            ),
-          { once: true }
-        );
-      });
-      const result = await Promise.race([runPromise, timeoutPromise]);
+      const result = await Promise.race([runPromise, abortPromise]);
       if (isAsyncIterable(result)) {
         await Promise.race([
           (async () => {
@@ -327,12 +353,16 @@ export class OperatorAgentRuntime {
             }
             await result.completed;
           })(),
-          timeoutPromise
+          abortPromise
         ]);
       }
       return result;
     } finally {
       clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", onExternalAbort);
+      if (timedOut && !controller.signal.aborted) {
+        controller.abort();
+      }
     }
   }
 }
@@ -366,17 +396,56 @@ function usageFromResult(result: unknown): AgentUsage {
   const rawResponses = arrayProperty(result, "rawResponses");
   const usage = valueProperty(result, "usage") ?? valueProperty(rawResponses.at(-1), "usage");
   const record = usage && typeof usage === "object" ? (usage as Record<string, unknown>) : {};
-  const inputTokens = numeric(record.inputTokens ?? record.promptTokens ?? record.input_tokens ?? record.prompt_tokens);
-  const outputTokens = numeric(
+  const inputTokens = tokenCount(
+    record.inputTokens ?? record.promptTokens ?? record.input_tokens ?? record.prompt_tokens
+  );
+  const outputTokens = tokenCount(
     record.outputTokens ?? record.completionTokens ?? record.output_tokens ?? record.completion_tokens
   );
-  const totalTokens = numeric(record.totalTokens ?? record.total_tokens) || inputTokens + outputTokens;
+  const reportedTotal = optionalTokenCount(record.totalTokens ?? record.total_tokens);
+  const derivedTotal = inputTokens + outputTokens;
+  if (!Number.isSafeInteger(derivedTotal)) {
+    throw new Error("AGENT_USAGE_TOKEN_OVERFLOW");
+  }
+  const totalTokens = reportedTotal ?? derivedTotal;
   const estimatedCostUsd = numeric(record.estimatedCostUsd ?? record.totalCostUsd ?? record.costUsd ?? record.cost_usd);
-  return { inputTokens, outputTokens, totalTokens, estimatedCostUsd };
+  const providerCost = nonNegativeDecimal(record.cost ?? record.total_cost);
+  const estimatedCost = nonNegativeDecimal(
+    record.estimatedCostUsd ?? record.totalCostUsd ?? record.costUsd ?? record.cost_usd
+  );
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    estimatedCostUsd,
+    ...(providerCost !== undefined
+      ? { costUsd: providerCost, costSource: "provider_reported" as const }
+      : estimatedCost !== undefined
+        ? { costUsd: estimatedCost, costSource: "estimated" as const }
+        : { costSource: "unavailable" as const })
+  };
 }
 
 function numeric(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function tokenCount(value: unknown): number {
+  return optionalTokenCount(value) ?? 0;
+}
+
+function optionalTokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function nonNegativeDecimal(value: unknown): string | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value >= 0 ? String(value) : undefined;
+  }
+  if (typeof value === "string" && /^\d+(?:\.\d{1,12})?$/.test(value.trim())) {
+    return value.trim();
+  }
+  return undefined;
 }
 
 function pendingApprovalsFromResult(result: unknown): OperatorAgentPendingApprovalRequest[] {
@@ -480,11 +549,19 @@ function normalizeText(value: string): string {
     .trim();
 }
 
-function toolResultCount(result: unknown): number {
+function toolResultSummary(result: unknown): { count: number; toolNames: string[] } {
   const newItems = arrayProperty(result, "newItems");
-  return newItems.filter(
+  const toolItems = newItems.filter(
     (item) => textProperty(item, "type")?.includes("tool") && textProperty(item, "type") !== "tool_approval_item"
-  ).length;
+  );
+  return {
+    count: toolItems.length,
+    toolNames: toolItems.flatMap((item) => {
+      const raw = rawItem(item);
+      const toolName = textProperty(item, "name") ?? textProperty(item, "toolName") ?? textProperty(raw, "name");
+      return toolName ? [toolName] : [];
+    })
+  };
 }
 
 function rawItem(value: unknown): unknown {

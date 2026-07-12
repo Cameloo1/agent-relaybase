@@ -54,6 +54,37 @@ export interface AgentUsage {
   outputTokens: number;
   totalTokens: number;
   estimatedCostUsd: number;
+  costUsd?: string;
+  costSource?: "provider_reported" | "estimated" | "unavailable";
+}
+
+export interface AgentUsageSnapshot {
+  scope: "active-thread";
+  sessionId: string | null;
+  lastRequest: {
+    runId: string;
+    modelSlug: string;
+    provider: AgentProvider;
+    completedAt: string;
+    tokens: {
+      input: number;
+      output: number;
+      total: number;
+      totalSource: "provider_reported" | "derived";
+    };
+    cost: { usd: string | null; source: "provider_reported" | "estimated" | "unavailable" };
+  } | null;
+  threadTotals: {
+    requestCount: number;
+    tokens: { input: number; output: number; total: number };
+    cost: {
+      knownUsd: string;
+      knownRequestCount: number;
+      unavailableRequestCount: number;
+      sources: Array<"provider_reported" | "estimated">;
+    };
+  };
+  updatedAt: string | null;
 }
 
 export interface AgentDiagnostic {
@@ -74,6 +105,7 @@ export interface TuiAgentContext {
   currentRoute?: string;
   currentPage?: number;
   currentCwd?: string;
+  authorizedProjectRoots?: string[];
   daemonHasZeroApps: boolean;
   setupWizardState?: "inactive" | "no_apps" | "detecting" | "planning" | "previewing" | "applying" | "repairing";
   currentSetupPlanId?: string;
@@ -83,6 +115,22 @@ export interface TuiAgentContext {
     browserOpen: "available" | "unavailable" | "unknown";
     colorDepth?: "none" | "ansi" | "256" | "truecolor";
   };
+}
+
+export type AgentProjectRootGrantSource = "tui_current_cwd" | "user_selected_folder" | "approved_setup";
+
+export interface AgentProjectRootGrant {
+  grantId: string;
+  canonicalRoot: string;
+  source: AgentProjectRootGrantSource;
+}
+
+export interface AgentSetupPreviewBinding {
+  schemaVersion: 1;
+  algorithm: "sha256";
+  digest: string;
+  revision: string;
+  setupPlanId: string;
 }
 
 export interface AgentSetupPlanReference {

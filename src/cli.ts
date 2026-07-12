@@ -1,5 +1,9 @@
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import http from "node:http";
+import path from "node:path";
 import readline from "node:readline";
+import { fileURLToPath } from "node:url";
 import {
   buildAppListResult,
   buildOfflineAppListResult,
@@ -48,6 +52,21 @@ import {
 } from "./agent/liveFolderStart.ts";
 import { formatRelaybaseEnvFileDiagnostics, loadRelaybaseEnvFile } from "./envFile.ts";
 import { runRelaybaseTui } from "./tuiBridge.ts";
+import { removeRecognizedRelaybasePowerShellShim } from "./prefixShim.ts";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const PACKAGE_NAME = "@cameloo/relaybase";
+const DEFAULT_API_TIMEOUT_MS = 2000;
+const STATE_API_TIMEOUT_MS = 65_000;
+const LIFECYCLE_API_TIMEOUT_MS = 65_000;
+const AGENT_LIVE_ENV_NAMES = [
+  "OPENROUTER_API_KEY",
+  "OPENROUTER_HTTP_REFERER",
+  "OPENROUTER_TITLE",
+  "RELAYBASE_AGENT_MODEL",
+  "RELAYBASE_AGENT_ENABLED",
+  "RELAYBASE_AGENT_REMOTE_MODEL_ENABLED"
+];
 
 interface CliOptions {
   port: number;
@@ -63,6 +82,13 @@ interface CliOptions {
   mcpInstall: boolean;
   prove: boolean;
   verbose: boolean;
+  plan: boolean;
+  full: boolean;
+  release: boolean;
+  live: boolean;
+  all: boolean;
+  race: boolean;
+  diagnose: boolean;
   daemonStartPolicy: "auto" | "never";
   listFilter: AppListFilter;
   profile?: string;
@@ -97,8 +123,9 @@ async function main(): Promise<void> {
     throw new Error(formatRelaybaseEnvFileDiagnostics(envFile));
   }
 
+  const isBundledStart = command === "start" && isBundledStartArgs(args);
   const { cliArgs, passthroughArgs } =
-    command === "tui" ? splitPassthroughArgs(args) : { cliArgs: args, passthroughArgs: [] };
+    command === "tui" || isBundledStart ? splitPassthroughArgs(args) : { cliArgs: args, passthroughArgs: [] };
   const options = parseOptions(cliArgs);
 
   switch (command) {
@@ -114,6 +141,15 @@ async function main(): Promise<void> {
     case "health":
       await health(options);
       return;
+    case "check":
+      process.exitCode = await checkRelaybase(options);
+      return;
+    case "verify":
+      process.exitCode = await verifyRelaybase(options);
+      return;
+    case "repair-prefix":
+      process.exitCode = repairRelaybaseCommandPrefix(options);
+      return;
     case "list":
       await listApps(options);
       return;
@@ -127,6 +163,12 @@ async function main(): Promise<void> {
       await register(args[0], options);
       return;
     case "start":
+      if (isBundledStart) {
+        process.exitCode = await startRelaybase(options, passthroughArgs);
+        return;
+      }
+      await mutateApp(command, requiredArg(args[0], command), options);
+      return;
     case "stop":
     case "restart":
       await mutateApp(command, requiredArg(args[0], command), options);
@@ -142,6 +184,428 @@ async function main(): Promise<void> {
       return;
     default:
       throw new Error(`Unknown command: ${command}`);
+  }
+}
+
+interface WorkflowStep {
+  name: string;
+  command: string;
+  args: string[];
+  required?: boolean;
+  blockerExitCode?: number;
+  live?: boolean;
+}
+
+function isBundledStartArgs(args: string[]): boolean {
+  const first = args[0];
+  return first === undefined || first === "--" || first.startsWith("-");
+}
+
+async function startRelaybase(options: CliOptions, passthroughArgs: string[]): Promise<number> {
+  if (options.plan) {
+    printWorkflowPlan("relaybase start", [
+      {
+        name: "Launch TUI through Node bridge",
+        command: "relaybase",
+        args: ["tui", ...passthroughArgs]
+      }
+    ]);
+    return 0;
+  }
+
+  return runRelaybaseTui(options, passthroughArgs);
+}
+
+async function checkRelaybase(options: CliOptions): Promise<number> {
+  const steps: WorkflowStep[] = [
+    { name: "TUI/toolchain doctor", command: process.execPath, args: [scriptPath("tui-go.mjs"), "doctor"] }
+  ];
+  if (options.plan) {
+    printWorkflowPlan("relaybase check", [
+      ...steps,
+      { name: "Project and daemon health", command: "relaybase", args: ["health"] },
+      { name: "Registered apps and runtime state", command: "relaybase", args: ["list", "--verbose"] }
+    ]);
+    return 0;
+  }
+
+  console.log("Relaybase check");
+  let exitCode = 0;
+  for (const step of steps) {
+    const status = runWorkflowStep(step, { allowLiveEnv: false });
+    if (status !== 0) {
+      exitCode = status;
+    }
+  }
+
+  try {
+    await withNonLiveAgentEnv(() => health(options));
+  } catch (error) {
+    exitCode = 1;
+    console.error(errorMessage(error));
+  }
+
+  try {
+    await withNonLiveAgentEnv(() => listApps(options));
+  } catch (error) {
+    exitCode = 1;
+    console.error(errorMessage(error));
+  }
+
+  return exitCode;
+}
+
+async function verifyRelaybase(options: CliOptions): Promise<number> {
+  const steps = verifySteps(options);
+  if (options.plan) {
+    printWorkflowPlan("relaybase verify", steps);
+    return 0;
+  }
+
+  let exitCode = 0;
+  for (const step of steps) {
+    const status = runWorkflowStep(step, { allowLiveEnv: step.live === true });
+    if (status !== 0) {
+      exitCode = step.blockerExitCode ?? status;
+      if (step.required !== false) {
+        break;
+      }
+    }
+  }
+  return exitCode;
+}
+
+function verifySteps(options: CliOptions): WorkflowStep[] {
+  const steps: WorkflowStep[] = [
+    npmStep("format:check"),
+    npmStep("lint"),
+    npmStep("typecheck"),
+    npmStep("test"),
+    npmStep("test:jest"),
+    npmStep("smoke")
+  ];
+
+  const includeFull = options.full || options.all;
+  const includeRelease = options.release || options.all;
+  const includeLive = options.live;
+
+  if (includeFull) {
+    steps.push(
+      npmStep("agent:test"),
+      npmStep("tui:build"),
+      npmStep("tui:test"),
+      npmStep("tui:vet"),
+      npmStep("tui:snapshot"),
+      npmStep("tui:smoke"),
+      npmStep("tui:smoke:8pane"),
+      npmStep("package:check"),
+      npmStep("verify:clean-worktree")
+    );
+  }
+
+  if (options.race) {
+    steps.push(npmStep("tui:race", { blockerExitCode: 2 }));
+  }
+
+  if (includeRelease) {
+    steps.push(npmStep("release:check", { blockerExitCode: 2 }));
+  }
+
+  if (includeLive) {
+    steps.push(
+      npmStep("agent:smoke:openrouter", { blockerExitCode: 2, live: true }),
+      npmStep("agent:live:folder-start", { blockerExitCode: 2, live: true }),
+      npmStep("agent:live:acceptance", { blockerExitCode: 2, live: true }),
+      npmStep("agent:live:command-matrix", { blockerExitCode: 2, live: true })
+    );
+  }
+
+  return steps;
+}
+
+function npmStep(script: string, options: Partial<WorkflowStep> = {}): WorkflowStep {
+  const runner = npmRunner();
+  return {
+    name: `npm run ${script}`,
+    command: runner.command,
+    args: [...runner.args, "run", script],
+    ...options
+  };
+}
+
+function npmRunner(): { command: string; args: string[] } {
+  const npmExecPath = process.env.npm_execpath;
+  if (npmExecPath) {
+    return { command: process.execPath, args: [npmExecPath] };
+  }
+  if (process.platform === "win32") {
+    return { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", "npm.cmd"] };
+  }
+  return { command: "npm", args: [] };
+}
+
+function repairRelaybaseCommandPrefix(options: CliOptions): number {
+  const runner = npmRunner();
+  if (options.plan) {
+    printWorkflowPlan("relaybase repair-prefix", [
+      {
+        name: "Inspect the current relaybase command target",
+        command: "relaybase",
+        args: ["repair-prefix", "--diagnose"]
+      },
+      {
+        name: "Link this source checkout into the npm global prefix",
+        command: runner.command,
+        args: [...runner.args, "link", "--no-audit", "--no-fund"]
+      },
+      {
+        name: "On Windows, remove relaybase.ps1 only when its relaybase.cmd sibling exists",
+        command: "relaybase",
+        args: ["repair-prefix"]
+      },
+      {
+        name: "Verify the relaybase command targets this source checkout",
+        command: "relaybase",
+        args: ["repair-prefix", "--diagnose"]
+      }
+    ]);
+    return 0;
+  }
+
+  if (!isSourceCheckout()) {
+    console.error("Relaybase prefix: repair requires a Relaybase source checkout.");
+    return 1;
+  }
+
+  const commandVisible = relaybaseCommandVisible();
+  const targetsSourceCheckout = commandVisible && relaybaseCommandTargetsSourceCheckout();
+  console.log(`Relaybase command visible: ${commandVisible ? "yes" : "no"}`);
+  console.log(`Relaybase command targets this source checkout: ${targetsSourceCheckout ? "yes" : "no"}`);
+
+  if (options.diagnose) {
+    if (!targetsSourceCheckout) {
+      console.log("Repair available: relaybase repair-prefix");
+    }
+    return targetsSourceCheckout ? 0 : 1;
+  }
+
+  if (!targetsSourceCheckout) {
+    console.error(
+      commandVisible
+        ? "Relaybase prefix: linking this source checkout because `relaybase` points to another install."
+        : "Relaybase prefix: linking this source checkout because `relaybase` is not available on PATH."
+    );
+    const result = spawnSync(runner.command, [...runner.args, "link", "--no-audit", "--no-fund"], {
+      cwd: ROOT,
+      stdio: "inherit",
+      shell: false,
+      env: process.env
+    });
+
+    if (result.error || result.status !== 0) {
+      console.error(
+        [
+          "Relaybase prefix: explicit npm link did not complete.",
+          result.error ? `Reason: ${result.error.message}` : `Exit code: ${result.status ?? 1}`,
+          "No startup workflow was attempted."
+        ].join("\n")
+      );
+      return result.status ?? 1;
+    }
+  }
+
+  if (!relaybaseCommandVisible() || !relaybaseCommandTargetsSourceCheckout()) {
+    console.error(
+      [
+        "Relaybase prefix: npm link completed, but `relaybase` is still not linked to this source checkout.",
+        `Global npm prefix: ${globalNpmPrefix() ?? "unknown"}`,
+        "Open a new terminal, make sure the npm global prefix is on PATH, or continue with: npm.cmd start"
+      ].join("\n")
+    );
+    return 1;
+  }
+
+  const shimRepairSucceeded = repairWindowsPowerShellShim();
+  if (shimRepairSucceeded) {
+    console.log("Relaybase prefix: `relaybase` command is linked and ready.");
+  }
+  return shimRepairSucceeded ? 0 : 1;
+}
+
+function isSourceCheckout(): boolean {
+  return existsSync(path.join(ROOT, "package.json")) && existsSync(path.join(ROOT, "bin", "relaybase.cjs"));
+}
+
+function relaybaseCommandVisible(): boolean {
+  if (process.platform === "win32") {
+    return windowsRelaybaseCmdVisible();
+  }
+
+  const result = spawnSync("sh", ["-c", "command -v relaybase"], {
+    cwd: ROOT,
+    encoding: "utf8",
+    shell: false,
+    env: process.env
+  });
+  return !result.error && result.status === 0 && String(result.stdout ?? "").trim().length > 0;
+}
+
+function relaybaseCommandTargetsSourceCheckout(): boolean {
+  const packageRoot = globalRelaybasePackageRoot();
+  if (!packageRoot || !existsSync(packageRoot)) {
+    return false;
+  }
+
+  try {
+    return samePath(realpathSync(packageRoot), realpathSync(ROOT));
+  } catch {
+    return false;
+  }
+}
+
+function globalRelaybasePackageRoot(): string | undefined {
+  const prefix = globalNpmPrefix();
+  if (!prefix) {
+    return undefined;
+  }
+
+  const [scope, name] = PACKAGE_NAME.split("/");
+  return name ? path.join(prefix, "node_modules", scope, name) : path.join(prefix, "node_modules", PACKAGE_NAME);
+}
+
+function samePath(left: string, right: string): boolean {
+  const resolvedLeft = path.resolve(left);
+  const resolvedRight = path.resolve(right);
+  return process.platform === "win32"
+    ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
+    : resolvedLeft === resolvedRight;
+}
+
+function windowsRelaybaseCmdVisible(): boolean {
+  const result = spawnSync(
+    "powershell.exe",
+    ["-NoProfile", "-Command", "(Get-Command relaybase.cmd -ErrorAction SilentlyContinue).Source"],
+    {
+      cwd: ROOT,
+      encoding: "utf8",
+      shell: false,
+      env: process.env
+    }
+  );
+  return !result.error && result.status === 0 && String(result.stdout ?? "").trim().length > 0;
+}
+
+function repairWindowsPowerShellShim(): boolean {
+  if (process.platform !== "win32" || process.env.RELAYBASE_KEEP_POWERSHELL_SHIM === "1") {
+    return true;
+  }
+
+  let succeeded = true;
+  for (const prefix of npmGlobalBinDirectories()) {
+    const ps1Shim = path.join(prefix, "relaybase.ps1");
+    const cmdShim = path.join(prefix, "relaybase.cmd");
+    if (!existsSync(ps1Shim) || !existsSync(cmdShim)) {
+      continue;
+    }
+
+    const repair = removeRecognizedRelaybasePowerShellShim(ps1Shim, cmdShim);
+    if (repair.removed) {
+      console.error(
+        "Relaybase prefix: removed generated PowerShell relaybase.ps1 shim; PowerShell will use relaybase.cmd."
+      );
+      continue;
+    }
+    succeeded = false;
+    console.error(
+      repair.reason === "unrecognized"
+        ? "Relaybase prefix: preserved relaybase.ps1 because it is not a recognized npm-generated Relaybase shim."
+        : [
+            "Relaybase prefix: relaybase.ps1 could not be safely removed.",
+            ...(repair.error ? [`Reason: ${repair.error}`] : []),
+            "Use relaybase.cmd start, npm.cmd start, or inspect the PowerShell shim manually."
+          ].join("\n")
+    );
+  }
+  return succeeded;
+}
+
+function npmGlobalBinDirectories(): string[] {
+  const candidates = [
+    globalNpmPrefix(),
+    process.platform === "win32" && process.env.APPDATA ? path.join(process.env.APPDATA, "npm") : undefined
+  ].filter((entry): entry is string => Boolean(entry));
+  return [...new Set(candidates.map((entry) => path.resolve(entry)))];
+}
+
+function globalNpmPrefix(): string | undefined {
+  const runner = npmRunner();
+  const result = spawnSync(runner.command, [...runner.args, "config", "get", "prefix"], {
+    cwd: ROOT,
+    encoding: "utf8",
+    shell: false,
+    env: process.env
+  });
+  if (result.error || result.status !== 0) {
+    return undefined;
+  }
+  return String(result.stdout ?? "").trim() || undefined;
+}
+
+function scriptPath(name: string): string {
+  return path.join(ROOT, "scripts", name);
+}
+
+function runWorkflowStep(step: WorkflowStep, options: { allowLiveEnv?: boolean } = {}): number {
+  console.log("");
+  console.log(`==> ${step.name}`);
+  const result = spawnSync(step.command, step.args, {
+    cwd: ROOT,
+    stdio: "inherit",
+    shell: false,
+    env: options.allowLiveEnv === false ? nonLiveAgentEnv(process.env) : process.env
+  });
+  if (result.error) {
+    console.error(`${step.name} failed to launch: ${result.error.message}`);
+    return 1;
+  }
+  return result.status ?? 1;
+}
+
+function nonLiveAgentEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = { ...source };
+  for (const name of AGENT_LIVE_ENV_NAMES) {
+    env[name] = "";
+  }
+  env.RELAYBASE_AGENT_ENABLED = "0";
+  env.RELAYBASE_AGENT_REMOTE_MODEL_ENABLED = "0";
+  return env;
+}
+
+async function withNonLiveAgentEnv<T>(callback: () => Promise<T>): Promise<T> {
+  const previous = new Map(AGENT_LIVE_ENV_NAMES.map((name) => [name, process.env[name]]));
+  const env = nonLiveAgentEnv(process.env);
+  for (const name of AGENT_LIVE_ENV_NAMES) {
+    process.env[name] = env[name];
+  }
+  try {
+    return await callback();
+  } finally {
+    for (const [name, value] of previous.entries()) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  }
+}
+
+function printWorkflowPlan(title: string, steps: WorkflowStep[]): void {
+  console.log(title);
+  console.log("");
+  for (const [index, step] of steps.entries()) {
+    console.log(`${index + 1}. ${step.name}`);
+    console.log(`   ${step.command} ${step.args.join(" ")}`.trimEnd());
   }
 }
 
@@ -360,8 +824,14 @@ async function register(manifestPath: string | undefined, options: CliOptions): 
 }
 
 async function listApps(options: CliOptions): Promise<void> {
-  const stateResponse = await apiRequest(options, "GET", "/__hub/api/state");
+  const token = readExistingSessionToken(options.stateDir);
+  const stateResponse = await apiRequest(options, "GET", "/__hub/api/state", undefined, token, STATE_API_TIMEOUT_MS);
   if (!stateResponse.ok) {
+    if (stateResponse.statusCode === 401) {
+      throw new Error(
+        "Relaybase is reachable, but its session token is unavailable or does not match this state directory. Run relaybase diagnose_token."
+      );
+    }
     if (listFilterNeedsRuntime(options.listFilter)) {
       throw new Error(
         `Relaybase server is not reachable, so --${options.listFilter} cannot be proven. Run relaybase serve or use relaybase list without runtime filters.`
@@ -389,7 +859,7 @@ async function listApps(options: CliOptions): Promise<void> {
   }
 
   const stateBody = JSON.parse(stateResponse.body) as { apps: AppState[] };
-  const appsResponse = await apiRequest(options, "GET", "/__hub/api/apps");
+  const appsResponse = await apiRequest(options, "GET", "/__hub/api/apps", undefined, token);
   const appsBody = appsResponse.ok ? (JSON.parse(appsResponse.body) as { apps: AppStatusView[] }) : { apps: [] };
   const result = buildAppListResult({
     states: stateBody.apps,
@@ -407,13 +877,23 @@ async function listApps(options: CliOptions): Promise<void> {
   printAppList(result, options);
 }
 
+function readExistingSessionToken(stateDir: string): string | undefined {
+  try {
+    const token = readFileSync(path.join(stateDir, "session-token"), "utf8").trim();
+    return token.length >= 32 ? token : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function mutateApp(action: string, id: string, options: CliOptions): Promise<void> {
   const response = await apiRequest(
     options,
     "POST",
     `/__hub/api/apps/${encodeURIComponent(id)}/${action}`,
     undefined,
-    await getOrCreateSessionToken(options.stateDir)
+    await getOrCreateSessionToken(options.stateDir),
+    LIFECYCLE_API_TIMEOUT_MS
   );
   if (!response.ok) {
     throw new Error(response.body || `Relaybase ${action} failed.`);
@@ -524,6 +1004,13 @@ function parseOptions(args: string[]): CliOptions {
     mcpInstall: false,
     prove: false,
     verbose: false,
+    plan: false,
+    full: false,
+    release: false,
+    live: false,
+    all: false,
+    race: false,
+    diagnose: false,
     daemonStartPolicy: "auto",
     listFilter: "all",
     docker: {}
@@ -543,6 +1030,20 @@ function parseOptions(args: string[]): CliOptions {
       options.json = true;
     } else if (arg === "--verbose") {
       options.verbose = true;
+    } else if (arg === "--plan") {
+      options.plan = true;
+    } else if (arg === "--full") {
+      options.full = true;
+    } else if (arg === "--release") {
+      options.release = true;
+    } else if (arg === "--live") {
+      options.live = true;
+    } else if (arg === "--all") {
+      options.all = true;
+    } else if (arg === "--race") {
+      options.race = true;
+    } else if (arg === "--diagnose") {
+      options.diagnose = true;
     } else if (arg === "--no-daemon-start") {
       options.daemonStartPolicy = "never";
     } else if (arg === "--daemon-start-policy") {
@@ -720,12 +1221,17 @@ function requiredArg(value: string | undefined, command: string): string {
   return value;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function apiRequest(
   options: CliOptions,
   method: string,
   path: string,
   body?: unknown,
-  token?: string
+  token?: string,
+  timeoutMs = DEFAULT_API_TIMEOUT_MS
 ): Promise<{ ok: boolean; statusCode: number; body: string }> {
   const payload = body === undefined ? undefined : JSON.stringify(body);
 
@@ -736,7 +1242,7 @@ function apiRequest(
         port: options.port,
         path,
         method,
-        timeout: 2000,
+        timeout: timeoutMs,
         headers: {
           ...(payload ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } : {}),
           ...(token ? { "x-relaybase-token": token } : {})
@@ -791,13 +1297,78 @@ Options:
     return;
   }
 
-  if (topic === "start" || topic === "stop" || topic === "restart") {
+  if (topic === "start") {
+    console.log(`Relaybase start
+
+Usage:
+  relaybase start [--port <number>] [--host <host>] [--state-dir <path>] [--cwd <path>] [--plan] [-- <tui-args>]
+  relaybase start <app-id> [--port <number>] [--host <host>] [--state-dir <path>]
+
+Without an app id, starts the normal Relaybase operator surface by launching the Go TUI through the Node bridge. The bridge safely ensures the Relaybase daemon when possible and never starts unknown user apps.
+
+With an app id, starts that registered app through the running Relaybase daemon.
+
+Options:
+  --plan                         Print the bundled command plan without launching the TUI
+  --no-daemon-start              Do not auto-start the Relaybase daemon before launching the TUI
+  --daemon-start-policy <mode>   auto or never
+`);
+    return;
+  }
+
+  if (topic === "stop" || topic === "restart") {
     console.log(`Relaybase ${topic}
 
 Usage:
   relaybase ${topic} <app-id> [--port <number>] [--host <host>] [--state-dir <path>]
 
 ${topic} calls the running Relaybase daemon and requires the local mutation token.
+`);
+    return;
+  }
+
+  if (topic === "check") {
+    console.log(`Relaybase check
+
+Usage:
+  relaybase check [--port <number>] [--host <host>] [--state-dir <path>] [--cwd <path>] [--plan]
+
+Runs a bundled local diagnosis: TUI/toolchain doctor, project/daemon health, and registered app state. This is read-only, does not run a package dry-run, and does not make OpenRouter requests.
+`);
+    return;
+  }
+
+  if (topic === "repair-prefix") {
+    console.log(`Relaybase repair-prefix
+
+Usage:
+  relaybase repair-prefix [--plan|--diagnose]
+
+Explicitly repairs the source-checkout command prefix with npm link, then removes a generated Windows relaybase.ps1 shim only when its relaybase.cmd sibling exists. Ordinary start and check commands never perform this repair.
+
+Options:
+  --plan                         Print the exact repair plan without changing anything
+  --diagnose                     Inspect command visibility and target without changing anything
+`);
+    return;
+  }
+
+  if (topic === "verify") {
+    console.log(`Relaybase verify
+
+Usage:
+  relaybase verify [--full] [--release] [--live] [--race] [--all] [--plan]
+
+Default gate:
+  format:check, lint, typecheck, Node tests, Jest tests, and relaybase health.
+
+Options:
+  --full                         Add agent tests, TUI build/test/vet/snapshot/smoke, package check, and clean-worktree check
+  --release                      Add GoReleaser config validation
+  --live                         Add explicit live OpenRouter Operator Agent checks
+  --race                         Add Go race tests; blocked hosts return the documented race blocker code
+  --all                          Run full and release gates; use --live to add OpenRouter live checks
+  --plan                         Print the selected gate without executing it
 `);
     return;
   }
@@ -866,6 +1437,9 @@ Thread commands call the daemon Agent Gateway session API; they do not read or m
 
 Commands:
   agent                        Agent Gateway diagnostics and live provider smokes
+  start                        Launch Relaybase daemon/TUI, or start an app when given <app-id>
+  check                        Diagnose local Relaybase, TUI, project, and app state
+  verify                       Run bundled source-checkout verification gates
   configure                     Set up or repair the current project for Relaybase
   open                          Start the configured app and open its Relaybase route
   health                        Inspect Relaybase, project config, route, logs, and readiness
@@ -873,10 +1447,10 @@ Commands:
   tui                           Launch the Go Bubble Tea TUI client
 
 Advanced:
+  repair-prefix                 Diagnose or explicitly repair the source-checkout command prefix
   serve                         Start the localhost hub daemon
   mcp                           Run Relaybase as a stdio MCP server
   register <manifest>           Register or update an app manifest
-  start <app-id>                 Start an app through the daemon
   stop <app-id>                  Stop an app through the daemon
   restart <app-id>               Restart an app through the daemon
   status                        Alias for list

@@ -15,6 +15,13 @@ import { createPlanAppSetupTool } from "./planAppSetup.ts";
 import { createPreviewSetupWritesTool } from "./previewSetupWrites.ts";
 import { createProposeTuiActionTool } from "./proposeTuiAction.ts";
 import { createProveAppHealthTool } from "./proveAppHealth.ts";
+import {
+  createProjectDetectStartCommandsTool,
+  createProjectInspectPackageScriptsTool,
+  createProjectListFilesTool,
+  createProjectReadFileTool,
+  createProjectSearchFilesTool
+} from "./projectInspection.ts";
 import { createRegisterManifestTool } from "./registerManifest.ts";
 import { createRepairAppSetupTool } from "./repairAppSetup.ts";
 import { createRestartAppTool } from "./restartApp.ts";
@@ -27,6 +34,9 @@ import { createStartAppTool } from "./startApp.ts";
 import { createStopAppTool } from "./stopApp.ts";
 import { createTailLogsTool } from "./tailLogs.ts";
 import { createValidateManifestTool } from "./validateManifest.ts";
+import { authorizeAgentToolProjectScope } from "./projectSafety.ts";
+import { diagnosticResult } from "./common.ts";
+import { bindAgentToolApprovalState, verifyAgentToolApprovalState } from "./approvalStateBinding.ts";
 
 export interface RelaybaseAgentToolRegistry {
   definitions: RelaybaseAgentToolDefinition[];
@@ -44,6 +54,11 @@ export function relaybaseAgentToolDefinitions(): RelaybaseAgentToolDefinition[] 
     createGetDiagnosticsTool(),
     createTailLogsTool(),
     createSearchLogsTool(),
+    createProjectListFilesTool(),
+    createProjectSearchFilesTool(),
+    createProjectReadFileTool(),
+    createProjectDetectStartCommandsTool(),
+    createProjectInspectPackageScriptsTool(),
     createStartAppTool(),
     createStopAppTool(),
     createRestartAppTool(),
@@ -115,7 +130,48 @@ export async function executeRelaybaseAgentTool(
   if (!definition) {
     throw new Error(`Unknown Relaybase agent tool: ${name}`);
   }
-  return definition.execute(input, context);
+  const authorization = await authorizeAgentToolProjectScope(
+    name,
+    input,
+    context.tuiContext,
+    context.projectRootGrants
+  );
+  if (!authorization.ok) {
+    return diagnosticResult(name, authorization.code, authorization.message, {
+      severity: "error",
+      userAction: authorization.userAction,
+      detail: authorization.detail
+    });
+  }
+  if (context.approved === true) {
+    const verification = await verifyAgentToolApprovalState(name, input, context.runtime, context.tuiContext);
+    if (!verification.ok) {
+      return diagnosticResult(name, verification.code, verification.message, {
+        severity: "error",
+        userAction: verification.userAction,
+        detail: verification.detail
+      });
+    }
+    return definition.execute(input, context);
+  }
+  let boundInput: Record<string, unknown>;
+  try {
+    boundInput = await bindAgentToolApprovalState(name, input, context.runtime, context.tuiContext);
+  } catch (error) {
+    return diagnosticResult(name, "AGENT_APPROVAL_STATE_UNAVAILABLE", "Manifest approval state could not be bound.", {
+      severity: "error",
+      userAction: "Inspect the manifest target, then request a fresh approval preview.",
+      detail: error
+    });
+  }
+  const result = await definition.execute(boundInput, context);
+  if (result.status === "approval_required" && result.approval && boundInput !== input) {
+    return {
+      ...result,
+      approval: { ...result.approval, arguments: boundInput }
+    };
+  }
+  return result;
 }
 
 export type { AgentToolExecutionContext, RelaybaseAgentToolDefinition } from "./common.ts";

@@ -1,8 +1,8 @@
 package keymap
 
 import (
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 )
 
 type KeyMap struct {
@@ -12,6 +12,8 @@ type KeyMap struct {
 	Right           key.Binding
 	PageUp          key.Binding
 	PageDown        key.Binding
+	Home            key.Binding
+	End             key.Binding
 	Enter           key.Binding
 	Escape          key.Binding
 	Follow          key.Binding
@@ -19,6 +21,9 @@ type KeyMap struct {
 	ContextualMenu  key.Binding
 	ContextFallback key.Binding
 	Help            key.Binding
+	Diagnostics     key.Binding
+	Tab             key.Binding
+	CopyLogs        key.Binding
 	Quit            key.Binding
 }
 
@@ -50,6 +55,8 @@ func WithContextMenu(contextMenu []string) KeyMap {
 		Right:           key.NewBinding(key.WithKeys("right"), key.WithHelp("right", "pane right")),
 		PageUp:          key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "previous page")),
 		PageDown:        key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "next page")),
+		Home:            key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "top")),
+		End:             key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "bottom")),
 		Enter:           key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "focus pane")),
 		Escape:          key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "dashboard")),
 		Follow:          key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "follow")),
@@ -57,7 +64,10 @@ func WithContextMenu(contextMenu []string) KeyMap {
 		ContextualMenu:  key.NewBinding(key.WithKeys(contextual), key.WithHelp(contextual, "menu")),
 		ContextFallback: key.NewBinding(key.WithKeys(fallbackKeys...), key.WithHelp(fallbackHelp, "menu")),
 		Help:            key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Quit:            key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
+		Diagnostics:     key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "diagnostics")),
+		Tab:             key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "complete")),
+		CopyLogs:        key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy 20 logs")),
+		Quit:            key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q/ctrl+c", "quit")),
 	}
 }
 
@@ -73,6 +83,8 @@ func (k KeyMap) FullHelp() []key.Binding {
 		k.Right,
 		k.PageUp,
 		k.PageDown,
+		k.Home,
+		k.End,
 		k.Enter,
 		k.Escape,
 		k.Follow,
@@ -80,6 +92,9 @@ func (k KeyMap) FullHelp() []key.Binding {
 		k.ContextualMenu,
 		k.ContextFallback,
 		k.Help,
+		k.Diagnostics,
+		k.Tab,
+		k.CopyLogs,
 		k.Quit,
 	}
 }

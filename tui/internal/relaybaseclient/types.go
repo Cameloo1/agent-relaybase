@@ -1,6 +1,9 @@
 package relaybaseclient
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+)
 
 type RelaybaseState struct {
 	Apps        []AppState      `json:"apps"`
@@ -123,14 +126,41 @@ type LogSnapshot struct {
 
 type LogPage struct {
 	Limit          int    `json:"limit,omitempty"`
-	Before         string `json:"before,omitempty"`
-	After          string `json:"after,omitempty"`
-	NextBefore     string `json:"nextBefore,omitempty"`
+	Before         Cursor `json:"before,omitempty"`
+	After          Cursor `json:"after,omitempty"`
+	NextBefore     Cursor `json:"nextBefore,omitempty"`
 	HasMore        bool   `json:"hasMore,omitempty"`
 	HasOlder       bool   `json:"hasOlder,omitempty"`
 	HasNewer       bool   `json:"hasNewer,omitempty"`
 	OldestSequence int64  `json:"oldestSequence,omitempty"`
 	NewestSequence int64  `json:"newestSequence,omitempty"`
+}
+
+type Cursor string
+
+func (c *Cursor) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*c = Cursor(text)
+		return nil
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return err
+	}
+
+	switch typed := value.(type) {
+	case json.Number:
+		*c = Cursor(typed.String())
+	case nil:
+		*c = ""
+	default:
+		*c = Cursor(string(data))
+	}
+	return nil
 }
 
 type LogEvent struct {
@@ -618,18 +648,19 @@ type TerminalCapabilities struct {
 }
 
 type TuiAgentContext struct {
-	SelectedPaneID        string                `json:"selectedPaneId,omitempty"`
-	SelectedAppID         string                `json:"selectedAppId,omitempty"`
-	SelectedGroupID       string                `json:"selectedGroupId,omitempty"`
-	SelectedComponentRole string                `json:"selectedComponentRole,omitempty"`
-	CurrentRoute          string                `json:"currentRoute,omitempty"`
-	CurrentPage           int                   `json:"currentPage,omitempty"`
-	CurrentCWD            string                `json:"currentCwd,omitempty"`
-	DaemonHasZeroApps     bool                  `json:"daemonHasZeroApps"`
-	SetupWizardState      string                `json:"setupWizardState,omitempty"`
-	CurrentSetupPlanID    string                `json:"currentSetupPlanId,omitempty"`
-	Diagnostics           []AgentDiagnostic     `json:"diagnostics"`
-	TerminalCapabilities  *TerminalCapabilities `json:"terminalCapabilities,omitempty"`
+	SelectedPaneID         string                `json:"selectedPaneId,omitempty"`
+	SelectedAppID          string                `json:"selectedAppId,omitempty"`
+	SelectedGroupID        string                `json:"selectedGroupId,omitempty"`
+	SelectedComponentRole  string                `json:"selectedComponentRole,omitempty"`
+	CurrentRoute           string                `json:"currentRoute,omitempty"`
+	CurrentPage            int                   `json:"currentPage,omitempty"`
+	CurrentCWD             string                `json:"currentCwd,omitempty"`
+	AuthorizedProjectRoots []string              `json:"authorizedProjectRoots,omitempty"`
+	DaemonHasZeroApps      bool                  `json:"daemonHasZeroApps"`
+	SetupWizardState       string                `json:"setupWizardState,omitempty"`
+	CurrentSetupPlanID     string                `json:"currentSetupPlanId,omitempty"`
+	Diagnostics            []AgentDiagnostic     `json:"diagnostics"`
+	TerminalCapabilities   *TerminalCapabilities `json:"terminalCapabilities,omitempty"`
 }
 
 type AgentSetupPlanReference struct {

@@ -6,7 +6,14 @@ import type { RelaybaseRuntime } from "../../server.ts";
 import type { AppComponentRole, AppRecord, AppState } from "../../types.ts";
 import { sanitizeAgentPayload } from "../errors.ts";
 import { loadOpenAIAgentsSdk } from "../openrouterProvider.ts";
-import type { AgentConfig, AgentRunEventType, AgentToolRisk, TuiAgentContext } from "../types.ts";
+import type {
+  AgentConfig,
+  AgentProjectRootGrant,
+  AgentRunEventType,
+  AgentToolRisk,
+  TuiAgentContext
+} from "../types.ts";
+import { authorizeAgentToolProjectScope } from "./projectSafety.ts";
 
 export const componentRoleSchema = z.enum(["frontend", "backend", "worker", "database", "service", "other"]);
 
@@ -21,6 +28,7 @@ export const confirmationContextSchema = z
 export interface AgentToolExecutionContext {
   runtime: RelaybaseRuntime;
   tuiContext: TuiAgentContext;
+  projectRootGrants?: readonly AgentProjectRootGrant[];
   config?: AgentConfig;
   approved?: boolean;
   correlationId?: string;
@@ -80,10 +88,23 @@ export function createSdkTool(definition: RelaybaseAgentToolDefinition, context:
     parameters: z.toJSONSchema(definition.parameters),
     strict: true,
     needsApproval: definition.approvalRequired,
-    execute: async (input: Record<string, unknown>) =>
-      sanitizeAgentPayload(
-        await definition.execute(definition.parameters.parse(input), { ...context, approved: false })
-      )
+    execute: async (input: Record<string, unknown>) => {
+      const parsed = definition.parameters.parse(input);
+      const authorization = await authorizeAgentToolProjectScope(
+        definition.name,
+        parsed,
+        context.tuiContext,
+        context.projectRootGrants
+      );
+      if (!authorization.ok) {
+        return diagnosticResult(definition.name, authorization.code, authorization.message, {
+          severity: "error",
+          userAction: authorization.userAction,
+          detail: authorization.detail
+        });
+      }
+      return sanitizeAgentPayload(await definition.execute(parsed, { ...context, approved: false }));
+    }
   });
 }
 

@@ -62,6 +62,18 @@ npm run doctor:tui
 
 ## Local TUI Checks
 
+For day-to-day source checkout work, use the bundled commands first:
+
+```powershell
+npm.cmd start
+npm.cmd run check
+npm.cmd run verify
+```
+
+`npm.cmd start` calls `relaybase start`, which launches the TUI through the Node bridge and lets the bridge safely ensure the daemon. `npm.cmd run check` performs read-only local diagnosis without a package dry-run. `npm.cmd run verify` runs the default source-checkout verification gate; add `-- --full`, `-- --release`, `-- --live`, or `-- --race` for deeper gates.
+
+On a fresh checkout, `npm.cmd start` is the bootstrap-safe entrypoint because it launches the source checkout directly. It does not inspect or mutate the global command prefix. When global command repair is intentional, use `relaybase repair-prefix --diagnose` or `--plan` first, then run `relaybase repair-prefix` explicitly. Only that repair command may run `npm link`. On Windows it preserves unrecognized/custom PowerShell shims and removes only a recognized npm-generated Relaybase `.ps1` shim with a recognized `.cmd` sibling, using atomic rename/restore behavior on failure.
+
 Run TUI checks from the repository root:
 
 ```powershell
@@ -126,6 +138,8 @@ $env:RELAYBASE_REQUIRE_TUI_BINARY = "1"; npm.cmd run package:check; Remove-Item 
 ```
 
 The normal package check remains usable on hosts without Go and reports the package as source-only until the binary is built. Release verification should use the strict environment variable after `npm.cmd run tui:build` so the tarball must include the current-platform binary.
+
+Package checks use a newly created OS-temp npm cache by default and remove it when the check finishes, including failure paths. Set `RELAYBASE_PACKAGE_NPM_CACHE` to an explicit directory only when the operator deliberately wants to preserve and reuse that cache.
 
 ## Release Checks
 

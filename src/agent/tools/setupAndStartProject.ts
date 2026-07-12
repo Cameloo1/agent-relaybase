@@ -23,6 +23,7 @@ import {
   type AgentToolStructuredResult,
   type RelaybaseAgentToolDefinition
 } from "./common.ts";
+import { createSetupPreviewBinding, verifySetupPreviewBinding } from "./setupPreviewBinding.ts";
 
 const componentMetadataSchema = z
   .object({
@@ -36,6 +37,16 @@ const componentMetadataSchema = z
     displayName: z.string().optional(),
     paneLabel: z.string().optional(),
     paneOrder: z.number().int().optional()
+  })
+  .strict();
+
+const previewBindingSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    algorithm: z.literal("sha256"),
+    digest: z.string().regex(/^[a-f0-9]{64}$/i),
+    revision: z.string().regex(/^[a-f0-9]{64}$/i),
+    setupPlanId: z.string().min(1)
   })
   .strict();
 
@@ -66,6 +77,7 @@ const parameters = z
       .optional(),
     envStrategy: z.enum(["runtime-injection", "env-relaybase-file", "guarded-env-block", "none"]).optional(),
     componentMetadata: componentMetadataSchema.optional(),
+    previewBinding: previewBindingSchema.optional(),
     reason: z.string().optional(),
     confirmationContext: confirmationContextSchema
   })
@@ -102,18 +114,46 @@ async function setupApplyPhase(
 ): Promise<AgentToolStructuredResult> {
   const setupArgs = setupRequest(input, context);
   const preview = await previewSetup(setupArgs);
-  context.emit?.({ type: "setup.plan_preview", data: { preview } });
-  const approval = requireApproved(definition, input, context, "Apply approved setup writes and register the app.");
+  const currentBinding = createSetupPreviewBinding(preview);
+  context.emit?.({ type: "setup.plan_preview", data: { preview, previewBinding: currentBinding } });
+  const approval = requireApproved(
+    definition,
+    { ...input, previewBinding: currentBinding },
+    context,
+    "Apply only the setup writes bound to this exact preview revision, then register the app."
+  );
   if (approval) {
     return {
       ...approval,
       data: {
         phase: "apply_setup",
         preview,
+        previewBinding: currentBinding,
         nextApprovedPhase: "apply_setup"
       },
       setupPlanId: preview.selectedPlan.id
     };
+  }
+
+  const bindingVerification = verifySetupPreviewBinding(preview, input.previewBinding);
+  if (!bindingVerification.ok) {
+    const missing = bindingVerification.failure === "missing";
+    return diagnosticResult(
+      definition.name,
+      missing ? "SETUP_PREVIEW_BINDING_REQUIRED" : "SETUP_PREVIEW_STALE",
+      missing
+        ? "Approved setup apply is missing its immutable preview binding."
+        : "The approved setup preview no longer matches the current project state.",
+      {
+        severity: "error",
+        userAction: "Generate a fresh setup preview, review it, and approve that exact revision before applying.",
+        detail: {
+          failure: bindingVerification.failure,
+          setupPlanId: preview.selectedPlan.id,
+          mutationPerformed: false
+        }
+      }
+    );
   }
 
   const setup = await applySetup(

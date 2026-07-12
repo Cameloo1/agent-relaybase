@@ -39,7 +39,8 @@ export function artifactPaths(artifactRoot = defaultArtifactRoot) {
     groupedEightPanes: path.join(artifactRoot, "grouped-8pane-transcript.txt"),
     slashConfirmation: path.join(artifactRoot, "slash-stop-confirmation-transcript.txt"),
     exportConfirmation: path.join(artifactRoot, "export-confirmation-transcript.txt"),
-    assistantConfirmation: path.join(artifactRoot, "assistant-confirmation-transcript.txt")
+    assistantConfirmation: path.join(artifactRoot, "assistant-confirmation-transcript.txt"),
+    usageMenu: path.join(artifactRoot, "usage-menu-transcript.txt")
   };
 }
 
@@ -245,6 +246,9 @@ export async function runTuiSmoke(args = process.argv.slice(2), options = {}) {
     evidence.cases.directLaunch = directLaunch.launched ? "passed" : "failed";
     evidence.cases.daemonConnection = transcriptShowsConnection(directLaunch.transcript) ? "passed" : "failed";
     evidence.cases.groupedPanes = transcriptShowsGroupedPanes(directLaunch.transcript, fixture) ? "passed" : "failed";
+    evidence.cases.styledOperatorShell = transcriptHasStyledOperatorShell(directLaunch.transcript, fixture)
+      ? "passed"
+      : "failed";
     if (fixture.name === fixtureEightPane) {
       evidence.cases.groupedEightPanes = transcriptShowsEightPaneDetails(directLaunch.transcript, fixture)
         ? "passed"
@@ -254,6 +258,9 @@ export async function runTuiSmoke(args = process.argv.slice(2), options = {}) {
     const bridgeLaunch = await captureBridgeLaunch(paths, tempStateDir, hub);
     commands.push(bridgeLaunch.command);
     evidence.cases.bridgeLaunch = bridgeLaunch.launched ? "passed" : "failed";
+    evidence.cases.bridgeResponsiveLayout = transcriptHasResponsiveBridgeLayout(bridgeLaunch.transcript, fixture)
+      ? "passed"
+      : "failed";
 
     const slash = await launchTuiAndCapture(
       prerequisite.binaryPath,
@@ -325,6 +332,28 @@ export async function runTuiSmoke(args = process.argv.slice(2), options = {}) {
       ? "passed"
       : "failed";
 
+    const usageMenu = await launchTuiAndCapture(
+      prerequisite.binaryPath,
+      [
+        "--base-url",
+        baseURL(hub),
+        "--state-dir",
+        tempStateDir,
+        "--theme",
+        "light",
+        "--smoke-render",
+        "--smoke-input",
+        "/usage"
+      ],
+      { title: "usage menu empty state", timeoutMs: 8000 }
+    );
+    commands.push(usageMenu.command);
+    await writeFile(paths.usageMenu, usageMenu.transcript, "utf8");
+    evidence.cases.usageMenu =
+      usageMenu.transcript.includes("Usage") && usageMenu.transcript.includes("No completed model usage yet.")
+        ? "passed"
+        : "failed";
+
     await copyJsonArtifact(paths.preferencesAfter, preferencePath(tempStateDir));
     evidence.cases.preferences = await preferencesSurvived(paths.preferencesBefore, paths.preferencesAfter);
 
@@ -346,7 +375,8 @@ export async function runTuiSmoke(args = process.argv.slice(2), options = {}) {
         bridgeLaunch.transcript,
         slash.transcript,
         exportConfirmation.transcript,
-        assistantConfirmation.transcript
+        assistantConfirmation.transcript,
+        usageMenu.transcript
       ].join("\n\n"),
       "utf8"
     );
@@ -411,13 +441,16 @@ function createEvidenceState(paths, fixture) {
       daemonUnavailable: "not_run",
       directLaunch: "not_run",
       bridgeLaunch: "not_run",
+      bridgeResponsiveLayout: "not_run",
       daemonConnection: "not_run",
       groupedPanes: "not_run",
+      styledOperatorShell: "not_run",
       groupedEightPanes: fixture.name === fixtureEightPane ? "not_run" : "not_applicable",
       preferences: "not_run",
       slashConfirmation: "not_run",
       exportConfirmation: "not_run",
       assistantConfirmation: "not_run",
+      usageMenu: "not_run",
       noDestructiveBeforeConfirmation: "not_run",
       recording: "not_run"
     },
@@ -851,7 +884,9 @@ function terminateProcessTree(child) {
 }
 
 async function getStateSnapshot(hub) {
-  const response = await fetch(`${baseURL(hub)}/__hub/api/state`);
+  const response = await fetch(`${baseURL(hub)}/__hub/api/state`, {
+    headers: { "x-relaybase-token": hub.runtime.token }
+  });
   return response.json();
 }
 
@@ -976,6 +1011,59 @@ function transcriptShowsConfirmation(text) {
   return /confirm|preview|risk|expected/i.test(stripAnsi(renderedTranscriptOutput(text)));
 }
 
+export function transcriptHasStyledOperatorShell(text, fixture = smokeFixtureDefinition()) {
+  const rendered = renderedTranscriptOutput(text);
+  const plain = stripAnsi(rendered);
+  const sgr = rendered.match(new RegExp(String.raw`\x1B\[[0-9;]*m`, "g")) ?? [];
+  const exactLightPalette = [
+    "38;2;47;33;24",
+    "38;2;109;76;61",
+    "38;2;125;106;95",
+    "38;2;33;104;105",
+    "38;2;40;122;61",
+    "38;2;138;90;0",
+    "38;2;155;28;49",
+    "48;2;248;244;236"
+  ];
+  const hasExactLightPalette = exactLightPalette.every((code) => sgr.some((sequence) => sequence.includes(code)));
+  const hasExactComposerDivider = rendered
+    .split(/\r?\n/)
+    .some(
+      (line) =>
+        stripAnsi(line) === "─".repeat(fixture.smokeWidth) &&
+        line.includes("38;2;109;76;61") &&
+        line.includes("48;2;248;244;236")
+    );
+  const completePaneBorders =
+    (plain.match(/\u2514/g) ?? []).length >= fixture.expectedPaneCount &&
+    (plain.match(/\u2518/g) ?? []).length >= fixture.expectedPaneCount;
+  const truthfulAppCounts = plain.includes(
+    `Apps ${fixture.expectedPaneCount} active / ${fixture.expectedPaneCount} registered`
+  );
+  return (
+    hasExactLightPalette &&
+    hasExactComposerDivider &&
+    completePaneBorders &&
+    truthfulAppCounts &&
+    !/scroll 0\/\d+/.test(plain)
+  );
+}
+
+export function transcriptHasResponsiveBridgeLayout(text, fixture = smokeFixtureDefinition()) {
+  const plain = stripAnsi(renderedTranscriptOutput(text));
+  const visiblePaneCount = fixture.expectedPaneCount === 8 ? 6 : fixture.expectedPaneCount;
+  const completePaneBorders =
+    (plain.match(/\u2514/g) ?? []).length >= visiblePaneCount &&
+    (plain.match(/\u2518/g) ?? []).length >= visiblePaneCount;
+  const visiblePaneDetails = fixture.apps.slice(0, visiblePaneCount).every((app) => {
+    const title = `${app.displayName}: ${app.paneLabel}`;
+    const visibleLogPrefix = new RegExp(`\\[stdout\\]\\s+${escapeRegExp(app.id)}`, "i");
+    return new RegExp(escapeRegExp(title), "i").test(plain) && visibleLogPrefix.test(plain);
+  });
+  const responsivePage = fixture.expectedPaneCount !== 8 || /Page 1\/2/i.test(plain);
+  return completePaneBorders && visiblePaneDetails && responsivePage && !/scroll 0\/\d+/.test(plain);
+}
+
 export function renderedTranscriptOutput(text) {
   const stdout = transcriptSections(text, "STDOUT:");
   return stdout.length ? stdout.join("\n") : text;
@@ -1021,12 +1109,15 @@ function allRequiredCasesPass(cases, fixture = smokeFixtureDefinition()) {
     cases.daemonUnavailable,
     cases.directLaunch,
     cases.bridgeLaunch,
+    cases.bridgeResponsiveLayout,
     cases.daemonConnection,
     cases.groupedPanes,
+    cases.styledOperatorShell,
     cases.preferences,
     cases.slashConfirmation,
     cases.exportConfirmation,
     cases.assistantConfirmation,
+    cases.usageMenu,
     cases.noDestructiveBeforeConfirmation
   ];
   if (fixture.name === fixtureEightPane) {
@@ -1081,6 +1172,7 @@ async function writeEvidenceReport(evidence, paths, cleanupStatus, reportPath) {
     `- Slash stop confirmation transcript: ${paths.slashConfirmation}`,
     `- Export confirmation transcript: ${paths.exportConfirmation}`,
     `- Assistant confirmation transcript: ${paths.assistantConfirmation}`,
+    `- Usage menu transcript: ${paths.usageMenu}`,
     "",
     "## Notes",
     "",

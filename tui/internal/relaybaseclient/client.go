@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -290,13 +291,29 @@ func (c *Client) SendAgentMessage(ctx context.Context, sessionID string, request
 }
 
 func (c *Client) StreamAgentSessionEvents(ctx context.Context, sessionID string) (*AgentEventStream, error) {
+	resp, err := c.openAgentSessionEventResponse(ctx, sessionID, 0)
+	if err != nil {
+		return nil, err
+	}
+	return newAgentEventStream(resp, func(reconnectContext context.Context, sequence int64) (*http.Response, error) {
+		reconnected, reconnectErr := c.openAgentSessionEventResponse(reconnectContext, sessionID, sequence)
+		return reconnected, reconnectErr
+	}), nil
+}
+
+func (c *Client) openAgentSessionEventResponse(ctx context.Context, sessionID string, afterSequence int64) (*http.Response, error) {
 	path := fmt.Sprintf("/__hub/api/agent/sessions/%s/events", url.PathEscape(sessionID))
+	if afterSequence > 0 {
+		path += "?afterSequence=" + strconv.FormatInt(afterSequence, 10)
+	}
 	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "text/event-stream")
-
+	if afterSequence > 0 {
+		req.Header.Set("Last-Event-ID", strconv.FormatInt(afterSequence, 10))
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -305,7 +322,7 @@ func (c *Client) StreamAgentSessionEvents(ctx context.Context, sessionID string)
 		defer resp.Body.Close()
 		return nil, decodeAPIError(resp)
 	}
-	return newAgentEventStream(resp), nil
+	return resp, nil
 }
 
 func (c *Client) ApproveAgentToolCall(ctx context.Context, approvalID string, request AgentApprovalResolutionRequest) (*AgentApproval, error) {

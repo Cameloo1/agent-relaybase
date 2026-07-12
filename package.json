@@ -18,6 +18,7 @@
     "skills/"
   ],
   "scripts": {
+    "start": "node scripts/relaybase-start.mjs",
     "serve": "node --experimental-strip-types src/cli.ts serve",
     "relaybase": "node --experimental-strip-types src/cli.ts",
     "lint": "eslint .",
@@ -46,6 +47,7 @@
     "agent:test": "node --experimental-strip-types --test tests/agent-*.test.ts",
     "release:check": "node scripts/tui-go.mjs release-check",
     "release:dry-run": "node scripts/tui-go.mjs release-dry-run",
+    "check": "node --experimental-strip-types src/cli.ts check",
     "smoke": "node --experimental-strip-types src/cli.ts health",
     "package:check": "node scripts/package-check.mjs",
     "package:check:strict": "node scripts/package-check.mjs --require-tui-binary",
@@ -53,7 +55,7 @@
     "verify:clean-worktree:allow-reports": "node scripts/check-worktree-clean.mjs --allow-reports",
     "verify:workspace:before": "node scripts/check-worktree-clean.mjs --write-status artifacts/workspace-status-before.json",
     "verify:workspace:after": "node scripts/check-worktree-clean.mjs --write-status artifacts/workspace-status-after.json",
-    "verify": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run test:jest && npm run smoke"
+    "verify": "node --experimental-strip-types src/cli.ts verify"
   },
   "engines": {
     "node": ">=24.0.0"

@@ -82,6 +82,7 @@ As of RA010, the daemon Agent Gateway can receive TUI context for setup/onboardi
 - current route
 - current TUI page
 - current cwd from TUI launch
+- bounded project roots selected through parsed setup commands
 - whether the daemon has zero apps
 - current setup wizard state
 - current setup plan id
@@ -98,12 +99,23 @@ The Agent Gateway event contract represents setup-related event shapes that the 
 
 The daemon implements tools for project detection, setup planning, setup write preview, approved setup apply, manifest registration, manifest inspect/validate/patch, health route and pinned-port patches, component metadata patches, safe env override patches, open/prove flows, and repair previews. Mutating tools return `approval_required` unless executed through an approved daemon path. As of RA010, the Go TUI can render model-selected setup previews, file-write/manifest approval prompts, repair choices, and prove results, then approve or reject the pending daemon approval.
 
+All path-bearing setup/manifest Agent tools are authorized only for a canonical trusted current directory or a canonical root selected through parsed `/add`, `/configure`, or folder `/register` input. Arbitrary model text cannot create a root grant. `apply_setup_plan` and the composed `setup_and_start_project` `apply_setup` phase are bound to the exact generated preview; preview drift fails closed before mutation and requires a fresh review. Manifest registration and safe manifest/env edits also bind their canonical target and file-content revision before approval.
+
 ## Desired User Workflow
 
 Example natural-language flow:
 
 ```text
-TUI > add C:\path\to\ratemygithub using npm run dev
+TUI > /add C:\path\to\ratemygithub
+TUI > approve setup
+TUI > approve start
+TUI > launch ratemygithub
+```
+
+When the start command is already known, the user may provide it as a setup hint:
+
+```text
+TUI > /add C:\path\to\ratemygithub using npm run dev
 TUI > launch ratemygithub
 ```
 
@@ -143,12 +155,15 @@ The current daemon/TUI behavior is:
 Implemented TUI setup commands:
 
 ```text
-/add app
+/add <path>
+/add <path> using <command>
 /add app <path> using <command>
-/register <manifest-path>
+/register <manifest-or-project-path>
 /configure
 /configure cwd
 /configure current folder
+/configure .
+/configure <path>
 /configure <path> --dry-run
 /open <path-or-app>
 /health <app> --prove
@@ -163,7 +178,7 @@ Implemented TUI setup commands:
 /component label <app> <label>
 ```
 
-These commands call daemon setup/onboarding APIs. They must not write files or spawn app processes directly from the TUI.
+These commands call daemon setup/onboarding APIs. They must not write files or spawn app processes directly from the TUI. `/add <path>` without a command, `/configure <path>` when details are unclear, and `/register <project-path>` can route to the daemon Agent Gateway when the Operator Agent is enabled. The daemon-owned agent may inspect the explicitly selected project with bounded read-only tools, return command candidates, and prepare setup previews. When the daemon is connected but the Operator Agent is disabled or incompletely configured, `/add <path>` falls back to the deterministic read-only `/setup/preview` path and populates the same setup preview state; it does not auto-apply. The compatibility alias `/add app <path> using <command>` remains accepted temporarily for older instructions.
 
 ## Configure Current Folder
 
@@ -180,6 +195,8 @@ When the daemon has no registered apps, the TUI offers:
 - choose a project path
 
 If the daemon is unavailable, the TUI may show how to start `relaybase serve`, but it must not silently start unknown user apps.
+
+Registered stopped apps are not treated as an empty daemon. When no active panes are open but registered apps exist, the TUI shows a separate sorted inventory with status and a confirmation-gated start action for the selected app.
 
 ## Setup Plan Choices
 
@@ -201,7 +218,7 @@ The daemon setup API returns setup candidates with:
 - setup questions
 - runtime repair candidates
 
-The TUI separates dry-run preview from apply. `/configure <path> --dry-run`, `/repair <app-or-path>`, and `/manifest inspect <app-or-path>` are read-only. `/configure <path>`, `/add app`, `/register`, `/open`, `/prove`, `/health --prove`, and manifest patch commands require confirmation before the daemon mutates files, registration state, proof artifacts, or lifecycle state.
+The TUI separates dry-run preview from apply. `/configure <path> --dry-run`, `/repair <app-or-path>`, and `/manifest inspect <app-or-path>` are read-only. `/configure <path>`, `/add <path>`, `/add <path> using <command>`, `/register`, `/open`, `/prove`, `/health --prove`, and manifest patch commands require confirmation or daemon approval before the daemon mutates files, registration state, proof artifacts, or lifecycle state.
 
 Runtime-specific setup choices now come through the daemon setup engine, not the TUI. The TUI should continue to render daemon-produced plan choices, setup questions, diffs, and diagnostics without detecting runtimes or writing files locally.
 

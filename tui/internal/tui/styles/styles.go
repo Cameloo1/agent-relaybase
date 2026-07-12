@@ -17,6 +17,7 @@ type Theme struct {
 	Accent     color.Color
 	Warning    color.Color
 	Error      color.Color
+	Success    color.Color
 }
 
 type Diagnostic struct {
@@ -26,17 +27,27 @@ type Diagnostic struct {
 }
 
 type Styles struct {
-	Theme      Theme
-	Header     lipgloss.Style
-	Status     lipgloss.Style
-	Body       lipgloss.Style
-	Diagnostic lipgloss.Style
-	Assistant  lipgloss.Style
-	Help       lipgloss.Style
-	Muted      lipgloss.Style
-	Pane       lipgloss.Style
-	PaneTitle  lipgloss.Style
-	PaneLog    lipgloss.Style
+	Theme           Theme
+	Header          lipgloss.Style
+	Status          lipgloss.Style
+	Body            lipgloss.Style
+	Diagnostic      lipgloss.Style
+	Assistant       lipgloss.Style
+	Help            lipgloss.Style
+	Muted           lipgloss.Style
+	Pane            lipgloss.Style
+	PaneTitle       lipgloss.Style
+	PaneLog         lipgloss.Style
+	PaneLogSuccess  lipgloss.Style
+	PaneLogError    lipgloss.Style
+	PaneLogWarning  lipgloss.Style
+	PaneLogMuted    lipgloss.Style
+	PaneLogStart    lipgloss.Style
+	PaneLogStop     lipgloss.Style
+	Control         lipgloss.Style
+	ControlMuted    lipgloss.Style
+	Palette         lipgloss.Style
+	PaletteSelected lipgloss.Style
 }
 
 type Options struct {
@@ -84,10 +95,7 @@ func New(theme Theme) Styles {
 }
 
 func NewWithOptions(theme Theme, options Options) Styles {
-	assistantColor := theme.Accent
-	if options.AssistantBarColor != "" && options.AssistantBarColor != "default" {
-		assistantColor = lipgloss.Color(options.AssistantBarColor)
-	}
+	assistantColor := AssistantColor(theme, options.AssistantBarColor)
 	return Styles{
 		Theme: theme,
 		Header: lipgloss.NewStyle().
@@ -136,7 +144,27 @@ func NewWithOptions(theme Theme, options Options) Styles {
 		PaneLog: lipgloss.NewStyle().
 			Foreground(theme.Text).
 			Background(theme.Background),
+		PaneLogSuccess: lipgloss.NewStyle().Foreground(theme.Success).Background(theme.Background),
+		PaneLogError:   lipgloss.NewStyle().Foreground(theme.Error).Background(theme.Background),
+		PaneLogWarning: lipgloss.NewStyle().Foreground(theme.Warning).Background(theme.Background),
+		PaneLogMuted:   lipgloss.NewStyle().Foreground(theme.Muted).Background(theme.Background),
+		PaneLogStart:   lipgloss.NewStyle().Foreground(theme.Accent).Background(theme.Background),
+		PaneLogStop:    lipgloss.NewStyle().Foreground(theme.Accent).Background(theme.Background),
+		Control:        lipgloss.NewStyle().Foreground(theme.Accent).Background(theme.Background).Bold(true),
+		ControlMuted:   lipgloss.NewStyle().Foreground(theme.Muted).Background(theme.Background),
+		Palette: lipgloss.NewStyle().Foreground(theme.Text).Background(theme.Background).
+			Border(lipgloss.NormalBorder(), true, false, false, false).BorderForeground(theme.Border).Padding(0, 1),
+		PaletteSelected: lipgloss.NewStyle().Foreground(theme.Background).Background(theme.Accent).Bold(true),
 	}
+}
+
+// AssistantColor resolves the operator-selected assistant accent once so the
+// shell and the Bubbles composer cannot drift onto different prompt colors.
+func AssistantColor(theme Theme, configured string) color.Color {
+	if configured != "" && configured != "default" {
+		return lipgloss.Color(configured)
+	}
+	return theme.Accent
 }
 
 func lightTheme() Theme {
@@ -150,6 +178,7 @@ func lightTheme() Theme {
 		Accent:     lipgloss.Color("#216869"),
 		Warning:    lipgloss.Color("#8a5a00"),
 		Error:      lipgloss.Color("#9b1c31"),
+		Success:    lipgloss.Color("#287a3d"),
 	}
 }
 
@@ -164,6 +193,7 @@ func darkTheme(name string) Theme {
 		Accent:     lipgloss.Color("#71b7b8"),
 		Warning:    lipgloss.Color("#f2bd5c"),
 		Error:      lipgloss.Color("#ff7a8a"),
+		Success:    lipgloss.Color("#61d381"),
 	}
 }
 

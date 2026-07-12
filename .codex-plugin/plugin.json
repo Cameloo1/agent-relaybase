@@ -6,17 +6,10 @@
     "name": "Cameloo1",
     "url": "https://github.com/Cameloo1"
   },
-  "homepage": "https://github.com/Cameloo1/agent-relaybase",
-  "repository": "https://github.com/Cameloo1/agent-relaybase",
+  "homepage": "https://github.com/Cameloo1/relaybase",
+  "repository": "https://github.com/Cameloo1/relaybase",
   "license": "MIT",
-  "keywords": [
-    "relaybase",
-    "mcp",
-    "lifecycle",
-    "localhost",
-    "codex",
-    "developer-tools"
-  ],
+  "keywords": ["relaybase", "mcp", "lifecycle", "localhost", "codex", "developer-tools"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
@@ -25,14 +18,10 @@
     "longDescription": "Relaybase gives Codex a local-first runtime surface for app lifecycle, stable localhost routes, logs, health, stop verification, and child MCP aggregation. Use it to configure projects, list registered apps, run routed verification, diagnose token or daemon mismatches, and keep direct ports as an explicit fallback.",
     "developerName": "Cameloo1",
     "category": "Developer Tools",
-    "capabilities": [
-      "Interactive",
-      "Read",
-      "Local Files"
-    ],
-    "websiteURL": "https://github.com/Cameloo1/agent-relaybase",
-    "privacyPolicyURL": "https://github.com/Cameloo1/agent-relaybase/blob/main/docs/security-and-limits.md",
-    "termsOfServiceURL": "https://github.com/Cameloo1/agent-relaybase/blob/main/LICENSE",
+    "capabilities": ["Interactive", "Read", "Local Files"],
+    "websiteURL": "https://github.com/Cameloo1/relaybase",
+    "privacyPolicyURL": "https://github.com/Cameloo1/relaybase/blob/main/docs/security-and-limits.md",
+    "termsOfServiceURL": "https://github.com/Cameloo1/relaybase/blob/main/LICENSE",
     "defaultPrompt": [
       "Use $relaybase to run this app through Relaybase with direct ports only as fallback.",
       "Use $relaybase to inspect Relaybase MCP tools, app state, logs, and route health.",

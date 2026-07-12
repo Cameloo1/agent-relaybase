@@ -8,6 +8,8 @@ import { ApprovalStore } from "./approvalStore.ts";
 import { AgentAuditStore } from "./auditStore.ts";
 import { previewSetup } from "../setupApi.ts";
 import {
+  AgentRuntimeError,
+  diagnosticFromRuntimeError,
   diagnosticsForAgentConfig,
   mergeRedactionReport,
   redactAgentText,
@@ -17,8 +19,18 @@ import {
 import type { AgentRuntimeEvent } from "./events.ts";
 import { evaluateToolPolicy, stableArgumentsHash, userMessageGuardrail } from "./policy.ts";
 import { OperatorAgentRuntime } from "./runtime.ts";
+import {
+  activeRunForSession,
+  idempotentMessageId,
+  originalUserMessage,
+  retryableRun,
+  workflowContinuationForApprovedTool
+} from "./runCoordinator.ts";
 import { AgentSessionStore } from "./sessionStore.ts";
 import { executeRelaybaseAgentTool } from "./tools/index.ts";
+import { authorizeAgentToolProjectScope, createCanonicalProjectRootGrant } from "./tools/projectSafety.ts";
+import { createSetupPreviewBinding } from "./tools/setupPreviewBinding.ts";
+import { bindAgentToolApprovalState } from "./tools/approvalStateBinding.ts";
 import type {
   AgentApproval,
   AgentAuditEvent,
@@ -28,6 +40,7 @@ import type {
   AgentMessage,
   AgentMessageRequest,
   AgentProviderConfig,
+  AgentProjectRootGrant,
   AgentRun,
   AgentRunEvent,
   AgentRunEventType,
@@ -38,13 +51,18 @@ import type {
   AgentThreadContextPreview,
   AgentThreadUpdateRequest,
   AgentUsage,
+  AgentUsageSnapshot,
   TuiAgentContext
 } from "./types.ts";
+import { activeThreadUsageSnapshot } from "./usageSummary.ts";
 
 const DEFAULT_OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY";
 const AGENT_ENABLED_ENV = "RELAYBASE_AGENT_ENABLED";
 const AGENT_REMOTE_MODEL_ENABLED_ENV = "RELAYBASE_AGENT_REMOTE_MODEL_ENABLED";
 const AGENT_MODEL_ENV = "RELAYBASE_AGENT_MODEL";
+const MAX_AUTHORIZED_PROJECT_ROOTS = 8;
+const MAX_PROJECT_ROOT_LENGTH = 4_096;
+const AGENT_CONFIG_FILE = "config.json";
 const DEFAULT_TOOL_ALLOWLIST = [
   "list_apps",
   "get_app_state",
@@ -52,6 +70,11 @@ const DEFAULT_TOOL_ALLOWLIST = [
   "get_diagnostics",
   "tail_logs",
   "search_logs",
+  "project_list_files",
+  "project_search_files",
+  "project_read_file",
+  "project_detect_start_commands",
+  "project_inspect_package_scripts",
   "start_app",
   "stop_app",
   "restart_app",
@@ -99,6 +122,28 @@ export class AgentGatewayRequestError extends Error {
 
 type AgentSubscriber = (event: AgentRunEvent) => void;
 
+type AgentSubmissionRequest = AgentMessageRequest & {
+  idempotencyKey?: string;
+};
+
+interface RunExecution {
+  runId: string;
+  controller: AbortController;
+  kind: "queued_model" | "model" | "approved_tool";
+}
+
+interface QueuedRunInput {
+  runtime: RelaybaseRuntime;
+  sessionId: string;
+  runId: string;
+  messageId: string;
+  context: TuiAgentContext;
+  projectRootGrants: readonly AgentProjectRootGrant[];
+  config: AgentConfig;
+  knownSecrets: string[];
+  retryOfRunId?: string;
+}
+
 export interface AgentGatewayServiceOptions {
   agentRuntime?: OperatorAgentRuntime;
   sessionStore?: AgentSessionStore;
@@ -114,18 +159,23 @@ export class AgentGatewayService {
   #approvals: ApprovalStore;
   #audit: AgentAuditStore;
   #stateDir?: string;
+  #configPath?: string;
   #subscribers = new Map<string, Set<AgentSubscriber>>();
   #sequence = 0;
   #budgetReservations = new Map<string, { sessionId: string; estimatedUsd: number; createdAt: string }>();
+  #executions = new Map<string, RunExecution>();
 
   constructor(options: AgentGatewayServiceOptions = {}) {
     this.#stateDir = options.stateDir;
+    this.#configPath = options.stateDir ? path.join(options.stateDir, "agent", AGENT_CONFIG_FILE) : undefined;
+    this.#config = loadPersistedAgentConfig(defaultAgentConfig(), this.#configPath);
     this.#sessions = options.sessionStore ?? new AgentSessionStore({ stateDir: options.stateDir });
     this.#agentRuntime = options.agentRuntime ?? new OperatorAgentRuntime();
     this.#audit = options.auditStore ?? new AgentAuditStore({ stateDir: options.stateDir });
     this.#approvals = options.approvalStore ?? new ApprovalStore({ threadStore: this.#sessions.threadStore() });
     this.#sequence = this.#sessions.maxEventSequence();
-    for (const approval of this.#approvals.recoverPending()) {
+    const recoveredApprovals = this.#approvals.recoverPending();
+    for (const approval of recoveredApprovals) {
       this.#auditEvent(
         "agent.approval_recovered",
         {
@@ -138,6 +188,7 @@ export class AgentGatewayService {
         { sessionId: approval.sessionId, runId: approval.runId }
       );
     }
+    this.#reconcileInterruptedRuns(new Set(recoveredApprovals.map((approval) => approval.runId)));
   }
 
   getConfig(): AgentConfig {
@@ -193,30 +244,34 @@ export class AgentGatewayService {
       },
       updatedAt: now
     };
+    this.#persistConfig();
     this.#auditEvent("agent.config_updated", { config: this.#safeConfig() });
     return this.#safeConfig();
   }
 
   async diagnostics(runtime: RelaybaseRuntime): Promise<AgentDiagnostic[]> {
+    const configDiagnostics = this.#configDiagnostics();
     return [
-      ...this.#configDiagnostics(),
-      {
-        id: "agent.runtime.ready",
-        severity: "info",
-        code: "AGENT_RUNTIME_READY",
-        message: "Relaybase Operator Agent runtime is available when OpenRouter config is enabled.",
-        checkedAt: new Date().toISOString(),
-        userAction:
-          "Enable the agent, configure an OpenRouter model slug, and set the configured API key environment variable before sending model requests."
-      },
-      {
-        id: "agent.daemon.state",
-        severity: "info",
-        code: "AGENT_DAEMON_READY",
-        message: "Agent Gateway can read Relaybase daemon context.",
-        checkedAt: new Date().toISOString(),
-        detail: { stateDir: runtime.stateDir }
-      },
+      ...configDiagnostics,
+      ...(configDiagnostics.length === 0
+        ? [
+            {
+              id: "agent.runtime.ready",
+              severity: "info" as const,
+              code: "AGENT_RUNTIME_READY",
+              message: "Relaybase Operator Agent is enabled and configured for model requests.",
+              checkedAt: new Date().toISOString()
+            },
+            {
+              id: "agent.daemon.state",
+              severity: "info" as const,
+              code: "AGENT_DAEMON_READY",
+              message: "Agent Gateway can read Relaybase daemon context.",
+              checkedAt: new Date().toISOString(),
+              detail: { stateDir: runtime.stateDir }
+            }
+          ]
+        : []),
       ...this.#sessions.diagnostics().map((diagnostic) => ({
         id: `agent.storage.${diagnostic.code.toLowerCase()}`,
         severity: "warning" as const,
@@ -252,6 +307,10 @@ export class AgentGatewayService {
 
   getActiveSession(): AgentSession | undefined {
     return this.#sessions.getActive();
+  }
+
+  getActiveUsage(): AgentUsageSnapshot {
+    return activeThreadUsageSnapshot(this.getActiveSession()?.id, this.#audit.list());
   }
 
   activateSession(sessionId: string): AgentSession {
@@ -298,6 +357,19 @@ export class AgentGatewayService {
   }
 
   clearSession(sessionId: string): { sessionId: string; cleared: true } {
+    const activeRun = activeRunForSession(this.getSession(sessionId));
+    if (activeRun) {
+      throw new AgentGatewayRequestError(
+        409,
+        "AGENT_SESSION_RUN_ACTIVE",
+        "Active agent runs must finish or be cancelled before clearing the session.",
+        {
+          retryable: true,
+          detail: { sessionId, runId: activeRun.id, status: activeRun.status },
+          userAction: "Cancel the active run or resolve its pending approval, then clear the session."
+        }
+      );
+    }
     if (!this.#sessions.clear(sessionId)) {
       throw new AgentGatewayRequestError(404, "AGENT_SESSION_NOT_FOUND", "Agent session was not found.", {
         retryable: false,
@@ -370,9 +442,10 @@ export class AgentGatewayService {
   async addMessage(
     runtime: RelaybaseRuntime,
     sessionId: string,
-    raw: AgentMessageRequest
-  ): Promise<{ message: AgentMessage; run: AgentRun; diagnostics: AgentDiagnostic[] }> {
-    const session = this.getSession(sessionId);
+    raw: AgentSubmissionRequest,
+    options: { retryOfRunId?: string } = {}
+  ): Promise<{ message: AgentMessage; run: AgentRun; diagnostics: AgentDiagnostic[]; reused?: boolean }> {
+    let session = this.getSession(sessionId);
     const now = new Date().toISOString();
     const content = nonEmptyString(raw.content, "");
     if (!content) {
@@ -381,180 +454,408 @@ export class AgentGatewayService {
         userAction: "Send a non-empty message."
       });
     }
+    const idempotencyKey = normalizeIdempotencyKey(raw.idempotencyKey);
 
     const context = await normalizeTuiContext(runtime, raw.context ?? session.context);
+    const projectRootGrants = await canonicalProjectRootGrants(context);
     const config = this.#safeConfig();
     const knownSecrets = [process.env[config.provider.apiKeySource.envVar] ?? "", runtime.token].filter(
       (secret) => secret.length > 0
     );
+    const safeContent = redactAgentText(content, knownSecrets);
+    const messageId = idempotencyKey ? idempotentMessageId(sessionId, idempotencyKey) : randomUUID();
+    session = this.getSession(sessionId);
+    const existingMessage = session.messages.find((candidate) => candidate.id === messageId);
+    if (existingMessage) {
+      if (
+        submissionFingerprint(existingMessage.content, existingMessage.context) !==
+        submissionFingerprint(safeContent, context)
+      ) {
+        throw new AgentGatewayRequestError(
+          409,
+          "AGENT_IDEMPOTENCY_KEY_REUSED",
+          "The idempotency key was already used for a different Agent Gateway message.",
+          {
+            retryable: false,
+            detail: { sessionId, messageId },
+            userAction: "Reuse the key only for the same message and context, or submit with a new idempotency key."
+          }
+        );
+      }
+      const existingRun = existingMessage.runId
+        ? session.runs.find((candidate) => candidate.id === existingMessage.runId)
+        : undefined;
+      if (!existingRun) {
+        throw new AgentGatewayRequestError(
+          409,
+          "AGENT_IDEMPOTENT_RUN_MISSING",
+          "The idempotent message exists, but its persisted run record is unavailable.",
+          {
+            retryable: false,
+            detail: { sessionId, messageId, runId: existingMessage.runId },
+            userAction: "Inspect the session store before retrying with a new idempotency key."
+          }
+        );
+      }
+      this.#auditEvent(
+        "agent.run_submission_reused",
+        { sessionId, runId: existingRun.id, messageId },
+        { sessionId, runId: existingRun.id, modelSlug: existingRun.modelSlug, knownSecrets }
+      );
+      return {
+        message: existingMessage,
+        run: existingRun,
+        diagnostics: existingRun.diagnostic ? [existingRun.diagnostic] : [],
+        reused: true
+      };
+    }
+
+    const activeRun = activeRunForSession(session);
+    if (activeRun) {
+      throw new AgentGatewayRequestError(
+        409,
+        "AGENT_SESSION_RUN_ACTIVE",
+        "This agent session already has an active run.",
+        {
+          retryable: true,
+          detail: { sessionId, runId: activeRun.id, status: activeRun.status },
+          userAction: "Wait for the active run, resolve its approval, or cancel it before submitting another message."
+        }
+      );
+    }
+
     const draftMessage: AgentMessage = {
-      id: randomUUID(),
+      id: messageId,
       sessionId,
       role: "user",
-      content: redactAgentText(content, knownSecrets),
+      content: safeContent,
       createdAt: now,
       context
     };
     const draftRun: AgentRun = {
       id: randomUUID(),
       sessionId,
-      status: "running",
+      status: "queued",
       provider: "openrouter",
       modelSlug: config.provider.modelSlug,
       createdAt: now,
-      startedAt: now,
       events: []
     };
     draftMessage.runId = draftRun.id;
     const message = this.#sessions.appendMessage(sessionId, draftMessage) ?? draftMessage;
     const run = this.#sessions.appendRun(sessionId, draftRun) ?? draftRun;
     this.#sessions.updateContext(sessionId, context);
-    const threadContext = this.threadContextPreview(sessionId);
-
-    this.#publishRunEvent(session, run, "run.started", {
-      runId: run.id,
-      provider: "openrouter",
-      modelSlug: config.provider.modelSlug ?? null
-    });
 
     const inputDiagnostic = userMessageGuardrail(content);
     if (inputDiagnostic) {
-      run.status = "failed";
-      run.diagnostic = inputDiagnostic;
-      run.completedAt = new Date().toISOString();
-      this.#publishRunEvent(session, run, "diagnostic", inputDiagnostic, knownSecrets);
-      this.#publishRunEvent(session, run, "blocked", { kind: "blocked", diagnostic: inputDiagnostic }, knownSecrets);
-      this.#publishRunEvent(
-        session,
-        run,
-        "run.failed",
-        {
-          diagnostic: inputDiagnostic,
-          modelOutputProduced: false
-        },
-        knownSecrets
-      );
-      this.#auditEvent(
-        "agent.run_blocked",
-        {
-          sessionId,
-          runId: run.id,
-          userIntentSummary: summarizeUserIntent(content),
-          diagnostic: inputDiagnostic
-        },
-        { sessionId, runId: run.id, modelSlug: config.provider.modelSlug, knownSecrets }
-      );
+      this.#finishBlockedRun(session, run, "agent.run_blocked", inputDiagnostic, content, knownSecrets);
       return { message, run, diagnostics: [inputDiagnostic] };
     }
 
     const diagnostics = this.#configDiagnostics();
     const blockingDiagnostic = diagnostics.find((diagnostic) => diagnostic.severity === "error");
     if (blockingDiagnostic) {
-      run.status = "failed";
-      run.diagnostic = blockingDiagnostic;
-      run.completedAt = new Date().toISOString();
-      this.#publishRunEvent(session, run, "diagnostic", blockingDiagnostic, knownSecrets);
-      this.#publishRunEvent(
-        session,
-        run,
-        "run.failed",
-        {
-          diagnostic: blockingDiagnostic,
-          modelOutputProduced: false
-        },
-        knownSecrets
-      );
-      this.#auditEvent(
-        "agent.run_blocked",
-        {
-          sessionId,
-          runId: run.id,
-          userIntentSummary: summarizeUserIntent(content),
-          diagnostic: blockingDiagnostic
-        },
-        { sessionId, runId: run.id, modelSlug: config.provider.modelSlug, knownSecrets }
-      );
-
+      this.#finishBlockedRun(session, run, "agent.run_blocked", blockingDiagnostic, content, knownSecrets);
       return { message, run, diagnostics: [blockingDiagnostic] };
     }
 
     const budgetDiagnostic = this.#reserveBudget(config, sessionId, run.id);
     if (budgetDiagnostic) {
-      run.status = "failed";
-      run.diagnostic = budgetDiagnostic;
-      run.completedAt = new Date().toISOString();
-      this.#publishRunEvent(session, run, "diagnostic", budgetDiagnostic, knownSecrets);
-      this.#publishRunEvent(session, run, "blocked", { kind: "blocked", diagnostic: budgetDiagnostic }, knownSecrets);
-      this.#publishRunEvent(
-        session,
-        run,
-        "run.failed",
-        {
-          diagnostic: budgetDiagnostic,
-          modelOutputProduced: false
-        },
-        knownSecrets
-      );
-      this.#auditEvent(
-        "agent.budget_blocked",
-        {
-          sessionId,
-          runId: run.id,
-          userIntentSummary: summarizeUserIntent(content),
-          diagnostic: budgetDiagnostic
-        },
-        { sessionId, runId: run.id, modelSlug: config.provider.modelSlug, knownSecrets }
-      );
+      this.#finishBlockedRun(session, run, "agent.budget_blocked", budgetDiagnostic, content, knownSecrets);
       return { message, run, diagnostics: [budgetDiagnostic] };
     }
 
-    let result: Awaited<ReturnType<OperatorAgentRuntime["execute"]>>;
-    try {
-      this.#auditEvent(
-        "agent.run_requested",
-        {
-          sessionId,
-          runId: run.id,
-          userIntentSummary: summarizeUserIntent(content)
-        },
-        { sessionId, runId: run.id, modelSlug: config.provider.modelSlug, knownSecrets }
-      );
-
-      result = await this.#agentRuntime.execute({
-        relaybase: runtime,
+    const controller = new AbortController();
+    this.#executions.set(sessionId, { runId: run.id, controller, kind: "queued_model" });
+    this.#auditEvent(
+      "agent.run_queued",
+      {
+        sessionId,
+        runId: run.id,
+        userIntentSummary: summarizeUserIntent(content),
+        messageId,
+        retryOfRunId: options.retryOfRunId ?? null
+      },
+      { sessionId, runId: run.id, modelSlug: config.provider.modelSlug, knownSecrets }
+    );
+    setImmediate(() => {
+      void this.#executeQueuedRun({
+        runtime,
+        sessionId,
+        runId: run.id,
+        messageId: message.id,
+        context,
+        projectRootGrants,
         config,
+        knownSecrets,
+        retryOfRunId: options.retryOfRunId
+      });
+    });
+    return { message, run, diagnostics: [] };
+  }
+
+  listRuns(sessionId: string): AgentRun[] {
+    return this.getSession(sessionId).runs;
+  }
+
+  getRun(sessionId: string, runId: string): AgentRun {
+    const run = this.getSession(sessionId).runs.find((candidate) => candidate.id === runId);
+    if (!run) {
+      throw new AgentGatewayRequestError(404, "AGENT_RUN_NOT_FOUND", "Agent run was not found in this session.", {
+        retryable: false,
+        detail: { sessionId, runId },
+        userAction: "Refresh the session run list before inspecting, cancelling, or retrying a run."
+      });
+    }
+    return run;
+  }
+
+  activeRun(sessionId: string): AgentRun | undefined {
+    return activeRunForSession(this.getSession(sessionId));
+  }
+
+  cancelRun(sessionId: string, runId: string): AgentRun {
+    const run = this.getRun(sessionId, runId);
+    if (run.status === "cancelled") {
+      return run;
+    }
+    if (run.status === "completed" || run.status === "failed") {
+      throw new AgentGatewayRequestError(409, "AGENT_RUN_NOT_ACTIVE", "Only an active agent run can be cancelled.", {
+        retryable: false,
+        detail: { sessionId, runId, status: run.status },
+        userAction:
+          run.status === "failed" ? "Retry the failed run instead." : "Submit a new message if more work is needed."
+      });
+    }
+
+    const execution = this.#executions.get(sessionId);
+    if (execution?.runId === runId && execution.kind === "approved_tool") {
+      throw new AgentGatewayRequestError(
+        409,
+        "AGENT_APPROVED_TOOL_IN_PROGRESS",
+        "The approved daemon tool is already executing and cannot be cancelled safely through the agent run API.",
+        {
+          retryable: true,
+          detail: { sessionId, runId },
+          userAction: "Wait for the daemon tool result, then cancel any remaining agent workflow continuation."
+        }
+      );
+    }
+
+    execution?.controller.abort("user_cancelled");
+    this.#rejectPendingApprovalsForRun(sessionId, runId, "run_cancelled");
+    const session = this.getSession(sessionId);
+    const persistedRun = session.runs.find((candidate) => candidate.id === runId) ?? run;
+    const diagnostic = cancelledRunDiagnostic();
+    persistedRun.status = "cancelled";
+    persistedRun.completedAt = new Date().toISOString();
+    persistedRun.diagnostic = diagnostic;
+    this.#publishRunEvent(session, persistedRun, "diagnostic", diagnostic);
+    this.#publishRunEvent(session, persistedRun, "run.failed", {
+      diagnostic,
+      cancelled: true,
+      modelOutputProduced: false
+    });
+    this.#releaseBudget(runId);
+    if (execution?.runId === runId) {
+      this.#executions.delete(sessionId);
+    }
+    this.#auditEvent("agent.run_cancelled", { sessionId, runId }, { sessionId, runId, modelSlug: run.modelSlug });
+    return this.getRun(sessionId, runId);
+  }
+
+  async retryRun(
+    runtime: RelaybaseRuntime,
+    sessionId: string,
+    runId: string,
+    raw: { idempotencyKey?: unknown } = {}
+  ): Promise<{ message: AgentMessage; run: AgentRun; diagnostics: AgentDiagnostic[]; reused?: boolean }> {
+    const session = this.getSession(sessionId);
+    const run = this.getRun(sessionId, runId);
+    if (!retryableRun(run)) {
+      throw new AgentGatewayRequestError(
+        409,
+        "AGENT_RUN_NOT_RETRYABLE",
+        "Only failed or cancelled agent runs can be retried.",
+        {
+          retryable: false,
+          detail: { sessionId, runId, status: run.status },
+          userAction: "Wait for the active run or submit a new message after a completed run."
+        }
+      );
+    }
+    const message = originalUserMessage(session, runId);
+    if (!message) {
+      throw new AgentGatewayRequestError(
+        409,
+        "AGENT_RETRY_MESSAGE_UNAVAILABLE",
+        "The original user message for this run is unavailable.",
+        {
+          retryable: false,
+          detail: { sessionId, runId },
+          userAction: "Submit a new message instead of retrying this run."
+        }
+      );
+    }
+    const result = await this.addMessage(
+      runtime,
+      sessionId,
+      {
+        content: message.content,
+        context: message.context,
+        ...(raw.idempotencyKey !== undefined ? { idempotencyKey: String(raw.idempotencyKey) } : {})
+      },
+      { retryOfRunId: runId }
+    );
+    this.#auditEvent(
+      "agent.run_retry_queued",
+      { sessionId, originalRunId: runId, retryRunId: result.run.id, reused: result.reused === true },
+      { sessionId, runId: result.run.id, modelSlug: result.run.modelSlug }
+    );
+    return result;
+  }
+
+  async #executeQueuedRun(input: QueuedRunInput): Promise<void> {
+    const execution = this.#executions.get(input.sessionId);
+    if (!execution || execution.runId !== input.runId) {
+      return;
+    }
+
+    let session = this.getSession(input.sessionId);
+    let run = session.runs.find((candidate) => candidate.id === input.runId);
+    const message = session.messages.find((candidate) => candidate.id === input.messageId);
+    if (!run || !message || run.status !== "queued" || execution.controller.signal.aborted) {
+      this.#releaseBudget(input.runId);
+      if (this.#executions.get(input.sessionId)?.runId === input.runId) {
+        this.#executions.delete(input.sessionId);
+      }
+      return;
+    }
+
+    execution.kind = "model";
+    run.status = "running";
+    run.startedAt = new Date().toISOString();
+    this.#publishRunEvent(session, run, "run.started", {
+      runId: run.id,
+      provider: "openrouter",
+      modelSlug: input.config.provider.modelSlug ?? null,
+      messageId: message.id,
+      retryOfRunId: input.retryOfRunId ?? null
+    });
+    this.#auditEvent(
+      "agent.run_requested",
+      {
+        sessionId: input.sessionId,
+        runId: run.id,
+        userIntentSummary: summarizeUserIntent(message.content),
+        retryOfRunId: input.retryOfRunId ?? null
+      },
+      {
+        sessionId: input.sessionId,
+        runId: run.id,
+        modelSlug: input.config.provider.modelSlug,
+        knownSecrets: input.knownSecrets
+      }
+    );
+
+    let result: Awaited<ReturnType<OperatorAgentRuntime["execute"]>> | undefined;
+    let unexpectedDiagnostic: AgentDiagnostic | undefined;
+    try {
+      const threadContext = this.threadContextPreview(input.sessionId);
+      result = await this.#agentRuntime.execute({
+        relaybase: input.runtime,
+        config: input.config,
         session,
         message,
         run,
-        context,
+        context: input.context,
+        projectRootGrants: input.projectRootGrants,
         threadContext,
-        knownSecrets,
+        knownSecrets: input.knownSecrets,
+        signal: execution.controller.signal,
         emit: (event: AgentRuntimeEvent) => {
-          this.#publishRunEvent(session, run, event.type, event.data, knownSecrets);
+          if (!execution.controller.signal.aborted) {
+            this.#publishRunEvent(session, run as AgentRun, event.type, event.data, input.knownSecrets);
+          }
         }
       });
+    } catch (error) {
+      unexpectedDiagnostic = diagnosticFromRuntimeError(error, input.config.provider.modelSlug);
     } finally {
-      this.#releaseBudget(run.id);
+      this.#releaseBudget(input.runId);
+      if (this.#executions.get(input.sessionId)?.runId === input.runId) {
+        this.#executions.delete(input.sessionId);
+      }
+    }
+
+    const persistedRun = this.getRun(input.sessionId, input.runId);
+    if (persistedRun.status === "cancelled" || execution.controller.signal.aborted) {
+      return;
+    }
+    session = this.getSession(input.sessionId);
+    run = session.runs.find((candidate) => candidate.id === input.runId) ?? persistedRun;
+
+    if (!result || unexpectedDiagnostic) {
+      const diagnostic = unexpectedDiagnostic ?? {
+        id: "agent.runtime.unexpected_failure",
+        severity: "error" as const,
+        code: "AGENT_RUNTIME_UNEXPECTED_FAILURE",
+        message: "Operator Agent runtime ended without a result.",
+        checkedAt: new Date().toISOString(),
+        userAction: "Retry the run after inspecting Agent Gateway diagnostics."
+      };
+      this.#finishFailedRun(session, run, diagnostic, message.content, input.knownSecrets);
+      return;
     }
 
     if (result.status === "waiting_for_approval") {
-      run.status = "waiting_for_approval";
       const approvals: AgentApproval[] = [];
-      for (const pending of result.pendingApprovals ?? []) {
-        const approval = await this.#createPendingApproval(runtime, session, run, pending, context, knownSecrets);
-        approvals.push(approval);
+      try {
+        for (const pending of result.pendingApprovals ?? []) {
+          approvals.push(
+            await this.#createPendingApproval(input.runtime, session, run, pending, input.context, input.knownSecrets)
+          );
+        }
+      } catch (error) {
+        this.#finishFailedRun(
+          session,
+          run,
+          diagnosticFromRuntimeError(error, run.modelSlug),
+          message.content,
+          input.knownSecrets
+        );
+        return;
       }
+      if (!approvals.length) {
+        const diagnostic = {
+          id: "agent.runtime.approval_missing",
+          severity: "error" as const,
+          code: "AGENT_APPROVAL_REQUEST_MISSING",
+          message: "Operator Agent paused for approval without producing an approval request.",
+          checkedAt: new Date().toISOString(),
+          userAction: "Retry the run and inspect the model/tool interruption stream."
+        };
+        this.#finishFailedRun(session, run, diagnostic, message.content, input.knownSecrets);
+        return;
+      }
+      run.status = "waiting_for_approval";
+      this.#sessions.updateRun(session.id, run);
       this.#auditEvent(
         "agent.run_waiting_for_approval",
         {
-          sessionId,
+          sessionId: input.sessionId,
           runId: run.id,
-          userIntentSummary: summarizeUserIntent(content),
+          userIntentSummary: summarizeUserIntent(message.content),
           approvals
         },
-        { sessionId, runId: run.id, modelSlug: config.provider.modelSlug, knownSecrets }
+        {
+          sessionId: input.sessionId,
+          runId: run.id,
+          modelSlug: input.config.provider.modelSlug,
+          knownSecrets: input.knownSecrets
+        }
       );
-      return { message, run, diagnostics: result.diagnostics };
+      return;
     }
 
     if (result.status === "completed") {
@@ -562,70 +863,159 @@ export class AgentGatewayService {
       run.completedAt = new Date().toISOString();
       run.usage = result.usage;
       if (result.assistantContent) {
-        this.#sessions.appendMessage(sessionId, {
+        this.#sessions.appendMessage(input.sessionId, {
           id: randomUUID(),
-          sessionId,
+          sessionId: input.sessionId,
           runId: run.id,
           role: "assistant",
-          content: redactAgentText(result.assistantContent, knownSecrets),
+          content: redactAgentText(result.assistantContent, input.knownSecrets),
           createdAt: run.completedAt
         });
       }
       if (result.usage) {
-        this.#recordUsage(config, sessionId, run.id, result.usage, knownSecrets);
+        this.#recordUsage(input.config, input.sessionId, run.id, result.usage, input.knownSecrets);
       }
       this.#publishRunEvent(
         session,
         run,
         "run.completed",
-        {
-          modelOutputProduced: true,
-          toolNames: result.toolNames
-        },
-        knownSecrets
+        { modelOutputProduced: true, toolNames: result.toolNames },
+        input.knownSecrets
       );
       this.#auditEvent(
         "agent.run_completed",
         {
-          sessionId,
+          sessionId: input.sessionId,
           runId: run.id,
-          userIntentSummary: summarizeUserIntent(content),
-          modelSlug: config.provider.modelSlug,
+          userIntentSummary: summarizeUserIntent(message.content),
+          modelSlug: input.config.provider.modelSlug,
           toolNames: result.toolNames,
           usage: result.usage
         },
-        { sessionId, runId: run.id, modelSlug: config.provider.modelSlug, knownSecrets }
+        {
+          sessionId: input.sessionId,
+          runId: run.id,
+          modelSlug: input.config.provider.modelSlug,
+          knownSecrets: input.knownSecrets
+        }
       );
-      return { message, run, diagnostics: result.diagnostics };
+      return;
     }
 
-    const diagnostic = result.diagnostics[0];
+    this.#finishFailedRun(
+      session,
+      run,
+      result.diagnostics[0] ?? {
+        id: "agent.runtime.failed",
+        severity: "error",
+        code: "AGENT_RUN_FAILED",
+        message: "Operator Agent run failed without a structured diagnostic.",
+        checkedAt: new Date().toISOString(),
+        userAction: "Retry the run after inspecting Agent Gateway events."
+      },
+      message.content,
+      input.knownSecrets,
+      result.diagnostics
+    );
+  }
+
+  #finishBlockedRun(
+    session: AgentSession,
+    run: AgentRun,
+    auditType: string,
+    diagnostic: AgentDiagnostic,
+    content: string,
+    knownSecrets: string[]
+  ): void {
     run.status = "failed";
+    run.diagnostic = diagnostic;
     run.completedAt = new Date().toISOString();
-    if (diagnostic) {
-      run.diagnostic = diagnostic;
-    }
+    this.#publishRunEvent(session, run, "diagnostic", diagnostic, knownSecrets);
+    this.#publishRunEvent(session, run, "blocked", { kind: "blocked", diagnostic }, knownSecrets);
+    this.#publishRunEvent(session, run, "run.failed", { diagnostic, modelOutputProduced: false }, knownSecrets);
+    this.#auditEvent(
+      auditType,
+      {
+        sessionId: session.id,
+        runId: run.id,
+        userIntentSummary: summarizeUserIntent(content),
+        diagnostic
+      },
+      { sessionId: session.id, runId: run.id, modelSlug: run.modelSlug, knownSecrets }
+    );
+  }
+
+  #finishFailedRun(
+    session: AgentSession,
+    run: AgentRun,
+    diagnostic: AgentDiagnostic,
+    content: string,
+    knownSecrets: string[],
+    diagnostics: AgentDiagnostic[] = [diagnostic]
+  ): void {
+    run.status = diagnostic.code === "AGENT_RUN_CANCELLED" ? "cancelled" : "failed";
+    run.completedAt = new Date().toISOString();
+    run.diagnostic = diagnostic;
     this.#publishRunEvent(
       session,
       run,
       "run.failed",
       {
-        diagnostic: diagnostic ?? null,
+        diagnostic,
+        cancelled: run.status === "cancelled",
         modelOutputProduced: false
       },
       knownSecrets
     );
     this.#auditEvent(
-      "agent.run_failed",
+      run.status === "cancelled" ? "agent.run_cancelled" : "agent.run_failed",
       {
-        sessionId,
+        sessionId: session.id,
         runId: run.id,
         userIntentSummary: summarizeUserIntent(content),
-        diagnostics: result.diagnostics
+        diagnostics
       },
-      { sessionId, runId: run.id, modelSlug: config.provider.modelSlug, knownSecrets }
+      { sessionId: session.id, runId: run.id, modelSlug: run.modelSlug, knownSecrets }
     );
-    return { message, run, diagnostics: result.diagnostics };
+  }
+
+  #rejectPendingApprovalsForRun(sessionId: string, runId: string, reason: string): void {
+    const session = this.getSession(sessionId);
+    const run = session.runs.find((candidate) => candidate.id === runId);
+    for (const approval of this.#approvals.listPending().filter((candidate) => candidate.runId === runId)) {
+      const resolved = this.#approvals.resolve(approval.id, "rejected");
+      if (resolved && run) {
+        this.#publishRunEvent(session, run, "tool.rejected", { approval: resolved, reason });
+      }
+    }
+  }
+
+  #reconcileInterruptedRuns(recoveredApprovalRunIds: Set<string>): void {
+    for (const session of this.#sessions.list()) {
+      for (const run of session.runs) {
+        const interrupted = run.status === "queued" || run.status === "running";
+        const missingApproval = run.status === "waiting_for_approval" && !recoveredApprovalRunIds.has(run.id);
+        if (!interrupted && !missingApproval) {
+          continue;
+        }
+        const previousStatus = run.status;
+        const diagnostic = interruptedRunDiagnostic(run.status, missingApproval);
+        run.status = "failed";
+        run.completedAt = new Date().toISOString();
+        run.diagnostic = diagnostic;
+        this.#publishRunEvent(session, run, "diagnostic", diagnostic);
+        this.#publishRunEvent(session, run, "run.failed", {
+          diagnostic,
+          interrupted: true,
+          modelOutputProduced: false
+        });
+        this.#auditEvent(
+          "agent.run_interrupted",
+          { sessionId: session.id, runId: run.id, previousStatus },
+          { sessionId: session.id, runId: run.id, modelSlug: run.modelSlug }
+        );
+      }
+    }
   }
 
   getApproval(approvalId: string): AgentApproval {
@@ -686,9 +1076,12 @@ export class AgentGatewayService {
           }
         );
       }
+    }
+    if (status === "approved") {
       const savedArguments = this.#approvals.rawArguments(approval.id) ?? approval.arguments;
-      const decision = evaluateToolPolicy(approval.toolName ?? approval.action, savedArguments);
-      const configDiagnostic = this.#toolConfigDiagnostic(config, approval.toolName ?? approval.action, decision);
+      const toolName = approval.toolName ?? approval.action;
+      const decision = evaluateToolPolicy(toolName, savedArguments);
+      const configDiagnostic = this.#toolConfigDiagnostic(config, toolName, decision);
       if (configDiagnostic) {
         throw new AgentGatewayRequestError(409, configDiagnostic.code, configDiagnostic.message, {
           retryable: false,
@@ -703,9 +1096,19 @@ export class AgentGatewayService {
           userAction: decision.diagnostic.userAction
         });
       }
+      if (decision.status !== "approval_required") {
+        throw new AgentGatewayRequestError(
+          409,
+          "AGENT_APPROVAL_POLICY_CHANGED",
+          "The saved tool call is no longer approval-gated by the current Agent policy.",
+          {
+            retryable: false,
+            detail: { approvalId, toolName, policyStatus: decision.status },
+            userAction: "Refresh Agent configuration and create a new approval under the current policy."
+          }
+        );
+      }
       await ensureApprovalTargetStillExists(runtime, approval, savedArguments);
-    }
-    if (status === "approved") {
       const proposedArguments = raw.arguments;
       if (proposedArguments !== undefined) {
         if (!proposedArguments || typeof proposedArguments !== "object" || Array.isArray(proposedArguments)) {
@@ -738,9 +1141,46 @@ export class AgentGatewayService {
 
     const session = this.getSession(approval.sessionId);
     const run = session.runs.find((entry) => entry.id === approval.runId);
+    if (!run) {
+      throw new AgentGatewayRequestError(
+        409,
+        "AGENT_APPROVAL_RUN_MISSING",
+        "The approval's agent run is unavailable.",
+        {
+          retryable: false,
+          detail: { approvalId, sessionId: approval.sessionId, runId: approval.runId },
+          userAction: "Inspect the persisted Agent Gateway session before creating a fresh approval."
+        }
+      );
+    }
+    if (run.status !== "waiting_for_approval") {
+      throw new AgentGatewayRequestError(
+        409,
+        "AGENT_APPROVAL_RUN_NOT_WAITING",
+        "The approval's agent run is no longer waiting for approval.",
+        {
+          retryable: false,
+          detail: { approvalId, sessionId: approval.sessionId, runId: approval.runId, runStatus: run.status },
+          userAction: "Refresh the run and pending approval state before resolving another approval."
+        }
+      );
+    }
     const knownSecrets = [process.env[config.provider.apiKeySource.envVar] ?? "", runtime.token].filter(
       (secret) => secret.length > 0
     );
+    const existingExecution = this.#executions.get(session.id);
+    if (status === "approved" && existingExecution) {
+      throw new AgentGatewayRequestError(
+        409,
+        "AGENT_SESSION_RUN_ACTIVE",
+        "The agent run already has active execution work.",
+        {
+          retryable: true,
+          detail: { sessionId: session.id, runId: existingExecution.runId, kind: existingExecution.kind },
+          userAction: "Wait for the current agent execution step before resolving another approval."
+        }
+      );
+    }
     const resolved = this.#approvals.resolve(approvalId, status);
     if (!resolved) {
       throw new AgentGatewayRequestError(
@@ -767,41 +1207,32 @@ export class AgentGatewayService {
     }
 
     if (status === "rejected") {
-      if (run) {
-        const diagnostic = {
-          id: `agent.approval.${approvalId}.rejected`,
-          severity: "warning" as const,
-          code: "AGENT_APPROVAL_REJECTED",
-          message: "The user rejected the tool approval. The tool was not executed.",
-          checkedAt: new Date().toISOString(),
-          userAction: "Ask for a new approval if the action is still desired."
-        };
-        run.status = "cancelled";
-        run.completedAt = new Date().toISOString();
-        run.diagnostic = diagnostic;
-        this.#publishRunEvent(
-          session,
-          run,
-          "action_result",
-          {
-            kind: "action_result",
-            status: "rejected",
-            approvalId,
-            diagnostic
-          },
-          knownSecrets
-        );
-        this.#publishRunEvent(
-          session,
-          run,
-          "run.failed",
-          {
-            diagnostic,
-            modelOutputProduced: false
-          },
-          knownSecrets
-        );
-      }
+      const diagnostic = {
+        id: `agent.approval.${approvalId}.rejected`,
+        severity: "warning" as const,
+        code: "AGENT_APPROVAL_REJECTED",
+        message: "The user rejected the tool approval. The tool was not executed.",
+        checkedAt: new Date().toISOString(),
+        userAction: "Retry the run if the action is still desired."
+      };
+      this.#rejectPendingApprovalsForRun(session.id, run.id, "approval_rejected");
+      run.status = "cancelled";
+      run.completedAt = new Date().toISOString();
+      run.diagnostic = diagnostic;
+      this.#publishRunEvent(
+        session,
+        run,
+        "action_result",
+        { kind: "action_result", status: "rejected", approvalId, diagnostic },
+        knownSecrets
+      );
+      this.#publishRunEvent(
+        session,
+        run,
+        "run.failed",
+        { diagnostic, cancelled: true, modelOutputProduced: false },
+        knownSecrets
+      );
       this.#auditEvent(
         "agent.approval_rejected",
         { approval: resolved, reason: raw.reason },
@@ -810,8 +1241,16 @@ export class AgentGatewayService {
       return resolved;
     }
 
-    if (run) {
+    const controller = new AbortController();
+    this.#executions.set(session.id, { runId: run.id, controller, kind: "approved_tool" });
+    run.status = "running";
+    this.#sessions.updateRun(session.id, run);
+    try {
       await this.#executeApprovedTool(runtime, session, run, resolved, knownSecrets);
+    } finally {
+      if (this.#executions.get(session.id)?.runId === run.id) {
+        this.#executions.delete(session.id);
+      }
     }
     this.#auditEvent(
       "agent.approval_approved",
@@ -863,7 +1302,23 @@ export class AgentGatewayService {
     context: TuiAgentContext,
     knownSecrets: string[]
   ): Promise<AgentApproval> {
-    const decision = evaluateToolPolicy(pending.toolName, pending.arguments);
+    const projectRootGrants = await canonicalProjectRootGrants(context);
+    const scopeAuthorization = await authorizeAgentToolProjectScope(
+      pending.toolName,
+      pending.arguments,
+      context,
+      projectRootGrants
+    );
+    if (!scopeAuthorization.ok) {
+      throw new AgentRuntimeError(scopeAuthorization.code, scopeAuthorization.message, {
+        retryable: false,
+        userAction: scopeAuthorization.userAction,
+        detail: scopeAuthorization.detail
+      });
+    }
+    const preparedApproval = await prepareApprovalData(runtime, pending.toolName, pending.arguments, context);
+    const approvalArguments = preparedApproval.arguments;
+    const decision = evaluateToolPolicy(pending.toolName, approvalArguments);
     const configDiagnostic = this.#toolConfigDiagnostic(this.#safeConfig(), pending.toolName, decision);
     const blockingDiagnostic = configDiagnostic ?? (decision.status === "blocked" ? decision.diagnostic : undefined);
     if (blockingDiagnostic) {
@@ -890,8 +1345,8 @@ export class AgentGatewayService {
         action: pending.toolName,
         risk: pending.risk,
         expectedResult: pending.expectedResult,
-        arguments: sanitizeAgentPayload(pending.arguments, knownSecrets) as Record<string, unknown>,
-        argumentsHash: stableArgumentsHash(pending.arguments),
+        arguments: sanitizeAgentPayload(approvalArguments, knownSecrets) as Record<string, unknown>,
+        argumentsHash: stableArgumentsHash(approvalArguments),
         context,
         diagnostic: blockingDiagnostic
       });
@@ -906,11 +1361,11 @@ export class AgentGatewayService {
       category: "setup" as const
     };
     const approvalId = randomUUID();
-    const previewData = await previewDataForApproval(pending.toolName, pending.arguments, context);
+    const previewData = preparedApproval.previewData;
     const preview = await buildApprovalPreview({
       runtime,
       policy,
-      arguments: pending.arguments,
+      arguments: approvalArguments,
       tuiContext: context,
       approvalId,
       knownSecrets,
@@ -929,12 +1384,12 @@ export class AgentGatewayService {
         ...(preview.target ? { target: preview.target } : {}),
         risk: policy.risk,
         expectedResult: policy.expectedResult,
-        arguments: sanitizeAgentPayload(pending.arguments, knownSecrets) as Record<string, unknown>,
-        argumentsHash: stableArgumentsHash(pending.arguments),
+        arguments: sanitizeAgentPayload(approvalArguments, knownSecrets) as Record<string, unknown>,
+        argumentsHash: stableArgumentsHash(approvalArguments),
         context,
         preview
       },
-      pending.arguments
+      approvalArguments
     );
 
     this.#publishRunEvent(
@@ -994,14 +1449,37 @@ export class AgentGatewayService {
       },
       knownSecrets
     );
-    const result = await executeRelaybaseAgentTool(toolName, savedArguments, {
-      runtime,
-      tuiContext: approval.context ?? session.context ?? { daemonHasZeroApps: false, diagnostics: [] },
-      config: this.#safeConfig(),
-      approved: true,
-      correlationId: approval.id,
-      emit: (event) => this.#publishRunEvent(session, run, event.type, event.data, knownSecrets)
-    });
+    let result: Awaited<ReturnType<typeof executeRelaybaseAgentTool>>;
+    try {
+      const tuiContext = approval.context ?? session.context ?? { daemonHasZeroApps: false, diagnostics: [] };
+      const projectRootGrants = await canonicalProjectRootGrants(tuiContext);
+      result = await executeRelaybaseAgentTool(toolName, savedArguments, {
+        runtime,
+        tuiContext,
+        projectRootGrants,
+        config: this.#safeConfig(),
+        approved: true,
+        correlationId: approval.id,
+        emit: (event) => this.#publishRunEvent(session, run, event.type, event.data, knownSecrets)
+      });
+    } catch (error) {
+      const diagnostic = diagnosticFromRuntimeError(error, run.modelSlug);
+      this.#publishRunEvent(
+        session,
+        run,
+        "tool.failed",
+        { approvalId: approval.id, toolName, diagnostic },
+        knownSecrets
+      );
+      this.#finishFailedRun(
+        session,
+        run,
+        diagnostic,
+        originalUserMessage(session, run.id)?.content ?? "",
+        knownSecrets
+      );
+      return;
+    }
     this.#publishRunEvent(
       session,
       run,
@@ -1025,8 +1503,6 @@ export class AgentGatewayService {
       },
       knownSecrets
     );
-    run.status = result.status === "succeeded" ? "completed" : "failed";
-    run.completedAt = new Date().toISOString();
     if (result.diagnostic) {
       run.diagnostic = {
         id: `agent.tool.${approval.id}.${result.diagnostic.code.toLowerCase()}`,
@@ -1038,18 +1514,6 @@ export class AgentGatewayService {
         detail: result.diagnostic.detail
       };
     }
-    this.#publishRunEvent(
-      session,
-      run,
-      result.status === "succeeded" ? "run.completed" : "run.failed",
-      {
-        approvalId: approval.id,
-        toolName,
-        toolResultProduced: true,
-        result
-      },
-      knownSecrets
-    );
     this.#auditEvent(
       result.status === "succeeded" ? "agent.tool_completed" : "agent.tool_failed",
       {
@@ -1058,6 +1522,101 @@ export class AgentGatewayService {
         result: summarizeToolResult(result)
       },
       { sessionId: session.id, runId: run.id, modelSlug: run.modelSlug, knownSecrets }
+    );
+
+    if (result.status !== "succeeded") {
+      const diagnostic =
+        run.diagnostic ??
+        ({
+          id: `agent.tool.${approval.id}.failed`,
+          severity: "error",
+          code: "AGENT_APPROVED_TOOL_FAILED",
+          message: `Approved Relaybase tool ${toolName} failed.`,
+          checkedAt: new Date().toISOString(),
+          userAction: "Inspect the tool result and retry the agent run when the underlying issue is resolved."
+        } satisfies AgentDiagnostic);
+      this.#finishFailedRun(
+        session,
+        run,
+        diagnostic,
+        originalUserMessage(session, run.id)?.content ?? "",
+        knownSecrets
+      );
+      return;
+    }
+
+    const continuation = workflowContinuationForApprovedTool(toolName, result, approval);
+    if (continuation) {
+      const decision = evaluateToolPolicy(continuation.toolName, continuation.arguments);
+      const configDiagnostic = this.#toolConfigDiagnostic(this.#safeConfig(), continuation.toolName, decision);
+      if (configDiagnostic || decision.status !== "approval_required" || !decision.policy) {
+        const diagnostic =
+          configDiagnostic ??
+          ({
+            id: "agent.workflow.next_step_invalid",
+            severity: "error",
+            code: "AGENT_WORKFLOW_NEXT_STEP_INVALID",
+            message: "The approved tool returned a continuation that is not an approval-gated Relaybase tool.",
+            checkedAt: new Date().toISOString(),
+            userAction: "Inspect the structured tool result before retrying the workflow."
+          } satisfies AgentDiagnostic);
+        this.#finishFailedRun(
+          session,
+          run,
+          diagnostic,
+          originalUserMessage(session, run.id)?.content ?? "",
+          knownSecrets
+        );
+        return;
+      }
+
+      delete run.completedAt;
+      delete run.diagnostic;
+      const nextApproval = await this.#createPendingApproval(
+        runtime,
+        session,
+        run,
+        {
+          toolName: continuation.toolName,
+          arguments: continuation.arguments,
+          expectedResult: decision.policy.expectedResult,
+          risk: decision.policy.risk
+        },
+        approval.context ?? session.context ?? { daemonHasZeroApps: false, diagnostics: [] },
+        knownSecrets
+      );
+      run.status = "waiting_for_approval";
+      this.#sessions.updateRun(session.id, run);
+      this.#auditEvent(
+        "agent.workflow_continued",
+        {
+          sessionId: session.id,
+          runId: run.id,
+          completedToolName: toolName,
+          nextToolName: continuation.toolName,
+          nextApprovalId: nextApproval.id
+        },
+        { sessionId: session.id, runId: run.id, modelSlug: run.modelSlug, knownSecrets }
+      );
+      return;
+    }
+
+    const otherPendingApprovals = this.#approvals.listPending().filter((candidate) => candidate.runId === run.id);
+    if (otherPendingApprovals.length) {
+      run.status = "waiting_for_approval";
+      this.#sessions.updateRun(session.id, run);
+      return;
+    }
+
+    run.status = "completed";
+    run.completedAt = new Date().toISOString();
+    delete run.diagnostic;
+    this.#publishRunEvent(
+      session,
+      run,
+      "run.completed",
+      { approvalId: approval.id, toolName, toolResultProduced: true, result },
+      knownSecrets
     );
   }
 
@@ -1186,7 +1745,8 @@ export class AgentGatewayService {
   }
 
   #safeConfig(): AgentConfig {
-    const configured = Boolean(process.env[this.#config.provider.apiKeySource.envVar]);
+    const providerActive = this.#config.enabled && this.#config.provider.remoteModelEnabled;
+    const configured = providerActive && Boolean(process.env[this.#config.provider.apiKeySource.envVar]);
     return {
       ...this.#config,
       provider: {
@@ -1203,6 +1763,34 @@ export class AgentGatewayService {
     return diagnosticsForAgentConfig(this.#safeConfig());
   }
 
+  #persistConfig(): void {
+    if (!this.#configPath) {
+      return;
+    }
+    const directory = path.dirname(this.#configPath);
+    fs.mkdirSync(directory, { recursive: true });
+    const persisted = {
+      schemaVersion: 1,
+      enabled: this.#config.enabled,
+      provider: {
+        modelSlug: this.#config.provider.modelSlug,
+        apiKeyEnvVar: this.#config.provider.apiKeySource.envVar,
+        remoteModelEnabled: this.#config.provider.remoteModelEnabled,
+        httpRefererEnvVar: this.#config.provider.httpRefererEnvVar,
+        titleEnvVar: this.#config.provider.titleEnvVar
+      },
+      toolAllowlist: this.#config.toolAllowlist,
+      approvalPolicy: this.#config.approvalPolicy,
+      allowBrowserOpen: this.#config.allowBrowserOpen,
+      allowCopyRoute: this.#config.allowCopyRoute,
+      budgets: this.#config.budgets,
+      updatedAt: this.#config.updatedAt
+    };
+    const temporaryPath = `${this.#configPath}.${process.pid}.tmp`;
+    fs.writeFileSync(temporaryPath, JSON.stringify(persisted, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(temporaryPath, this.#configPath);
+  }
+
   #publishRunEvent(
     session: AgentSession,
     run: AgentRun,
@@ -1210,9 +1798,10 @@ export class AgentGatewayService {
     data: unknown,
     knownSecrets: string[] = []
   ): AgentRunEvent {
+    const sequence = ++this.#sequence;
     const event: AgentRunEvent = {
-      id: randomUUID(),
-      sequence: ++this.#sequence,
+      id: String(sequence),
+      sequence,
       sessionId: session.id,
       runId: run.id,
       type,
@@ -1259,6 +1848,54 @@ export class AgentGatewayService {
       knownSecrets: options.knownSecrets
     });
   }
+}
+
+async function prepareApprovalData(
+  runtime: RelaybaseRuntime,
+  toolName: string,
+  args: Record<string, unknown>,
+  context: TuiAgentContext
+): Promise<{ arguments: Record<string, unknown>; previewData: unknown }> {
+  let boundArguments: Record<string, unknown>;
+  try {
+    boundArguments = await bindAgentToolApprovalState(toolName, args, runtime, context);
+  } catch (error) {
+    throw new AgentRuntimeError(
+      "AGENT_APPROVAL_STATE_UNAVAILABLE",
+      "Relaybase could not bind the current manifest revision required for approval.",
+      {
+        retryable: true,
+        userAction: "Inspect the manifest target, then request a fresh approval preview.",
+        detail: error
+      }
+    );
+  }
+  if (toolName === "apply_setup_plan" || (toolName === "setup_and_start_project" && args.phase === "apply_setup")) {
+    try {
+      const preview = await previewSetup({
+        ...boundArguments,
+        cwd: boundArguments.cwd ?? boundArguments.currentDirectory ?? context.currentCwd
+      });
+      return {
+        arguments: { ...boundArguments, previewBinding: createSetupPreviewBinding(preview) },
+        previewData: preview
+      };
+    } catch (error) {
+      throw new AgentRuntimeError(
+        "AGENT_APPROVAL_PREVIEW_UNAVAILABLE",
+        "Relaybase could not create the exact setup preview required for approval.",
+        {
+          retryable: true,
+          userAction: "Resolve setup detection diagnostics, then request a fresh approval preview.",
+          detail: error
+        }
+      );
+    }
+  }
+  return {
+    arguments: boundArguments,
+    previewData: await previewDataForApproval(toolName, boundArguments, context)
+  };
 }
 
 async function previewDataForApproval(
@@ -1385,6 +2022,7 @@ export async function normalizeTuiContext(
   const diagnostics = (raw?.diagnostics ?? []).map((diagnostic) => sanitizeAgentPayload(diagnostic)) as Array<
     Diagnostic | AgentDiagnostic
   >;
+  const authorizedProjectRoots = normalizeAuthorizedProjectRoots(raw?.authorizedProjectRoots);
   return {
     ...(raw?.selectedPaneId ? { selectedPaneId: String(raw.selectedPaneId) } : {}),
     ...(raw?.selectedAppId ? { selectedAppId: String(raw.selectedAppId) } : {}),
@@ -1393,6 +2031,7 @@ export async function normalizeTuiContext(
     ...(raw?.currentRoute ? { currentRoute: String(raw.currentRoute) } : {}),
     ...(Number.isInteger(raw?.currentPage) ? { currentPage: Number(raw?.currentPage) } : {}),
     ...(raw?.currentCwd ? { currentCwd: String(raw.currentCwd) } : {}),
+    ...(authorizedProjectRoots.length ? { authorizedProjectRoots } : {}),
     daemonHasZeroApps: raw?.daemonHasZeroApps ?? apps.length === 0,
     ...(raw?.setupWizardState ? { setupWizardState: raw.setupWizardState } : {}),
     ...(raw?.currentSetupPlanId ? { currentSetupPlanId: String(raw.currentSetupPlanId) } : {}),
@@ -1407,11 +2046,66 @@ export async function normalizeTuiContext(
   };
 }
 
+export async function canonicalProjectRootGrants(
+  context: Pick<TuiAgentContext, "currentCwd" | "authorizedProjectRoots">
+): Promise<AgentProjectRootGrant[]> {
+  const candidates = [
+    ...(validProjectRoot(context.currentCwd) ? [{ root: context.currentCwd, source: "tui_current_cwd" as const }] : []),
+    ...normalizeAuthorizedProjectRoots(context.authorizedProjectRoots).map((root) => ({
+      root,
+      source: "user_selected_folder" as const
+    }))
+  ];
+  const grants: AgentProjectRootGrant[] = [];
+  const canonicalRoots = new Set<string>();
+  for (const candidate of candidates) {
+    try {
+      const grant = await createCanonicalProjectRootGrant(candidate.root, candidate.source);
+      const identity = process.platform === "win32" ? grant.canonicalRoot.toLowerCase() : grant.canonicalRoot;
+      if (!canonicalRoots.has(identity)) {
+        canonicalRoots.add(identity);
+        grants.push(grant);
+      }
+    } catch {
+      // Missing, stale, or non-directory roots never become inspection grants.
+    }
+  }
+  return grants;
+}
+
+function normalizeAuthorizedProjectRoots(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const roots: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of value) {
+    if (typeof candidate !== "string") {
+      continue;
+    }
+    const root = candidate.trim();
+    if (!validProjectRoot(root) || seen.has(root)) {
+      continue;
+    }
+    seen.add(root);
+    roots.push(root);
+    if (roots.length === MAX_AUTHORIZED_PROJECT_ROOTS) {
+      break;
+    }
+  }
+  return roots;
+}
+
+function validProjectRoot(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= MAX_PROJECT_ROOT_LENGTH;
+}
+
 export function defaultAgentConfig(env: NodeJS.ProcessEnv = process.env): AgentConfig {
   const now = new Date().toISOString();
+  const enabled = envBoolean(env[AGENT_ENABLED_ENV]);
   return {
-    enabled: envBoolean(env[AGENT_ENABLED_ENV]),
-    provider: defaultProviderConfig(env),
+    enabled,
+    provider: defaultProviderConfig(env, enabled),
     toolAllowlist: [...DEFAULT_TOOL_ALLOWLIST],
     approvalPolicy: "always_for_mutations",
     setupFileWritePolicy: "approval_required",
@@ -1421,19 +2115,120 @@ export function defaultAgentConfig(env: NodeJS.ProcessEnv = process.env): AgentC
   };
 }
 
-function defaultProviderConfig(env: NodeJS.ProcessEnv = process.env): AgentProviderConfig {
+function loadPersistedAgentConfig(defaults: AgentConfig, configPath: string | undefined): AgentConfig {
+  if (!configPath || !fs.existsSync(configPath)) {
+    return defaults;
+  }
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(fs.readFileSync(configPath, "utf8")) as unknown;
+  } catch {
+    return defaults;
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return defaults;
+  }
+
+  const persisted = raw as Record<string, unknown>;
+  const provider =
+    persisted.provider && typeof persisted.provider === "object" && !Array.isArray(persisted.provider)
+      ? (persisted.provider as Record<string, unknown>)
+      : {};
+  const persistedAllowlist = Array.isArray(persisted.toolAllowlist)
+    ? persisted.toolAllowlist
+        .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+        .map((entry) => entry.trim())
+        .slice(0, DEFAULT_TOOL_ALLOWLIST.length)
+    : undefined;
+  const persistedBudgets = normalizedPersistedBudgets(persisted.budgets);
+
+  const merged: AgentConfig = {
+    ...defaults,
+    ...(typeof persisted.enabled === "boolean" ? { enabled: persisted.enabled } : {}),
+    ...(persistedAllowlist ? { toolAllowlist: persistedAllowlist } : {}),
+    ...(persisted.approvalPolicy === "always_for_mutations" || persisted.approvalPolicy === "read_only_only"
+      ? { approvalPolicy: persisted.approvalPolicy }
+      : {}),
+    ...(typeof persisted.allowBrowserOpen === "boolean" ? { allowBrowserOpen: persisted.allowBrowserOpen } : {}),
+    ...(typeof persisted.allowCopyRoute === "boolean" ? { allowCopyRoute: persisted.allowCopyRoute } : {}),
+    ...(persistedBudgets ? { budgets: persistedBudgets } : {}),
+    ...(typeof persisted.updatedAt === "string" && persisted.updatedAt.trim()
+      ? { updatedAt: persisted.updatedAt }
+      : {}),
+    provider: {
+      ...defaults.provider,
+      ...(typeof provider.modelSlug === "string" && provider.modelSlug.trim()
+        ? { modelSlug: provider.modelSlug.trim() }
+        : {}),
+      ...(typeof provider.remoteModelEnabled === "boolean" ? { remoteModelEnabled: provider.remoteModelEnabled } : {}),
+      ...(typeof provider.httpRefererEnvVar === "string" && provider.httpRefererEnvVar.trim()
+        ? { httpRefererEnvVar: provider.httpRefererEnvVar.trim() }
+        : {}),
+      ...(typeof provider.titleEnvVar === "string" && provider.titleEnvVar.trim()
+        ? { titleEnvVar: provider.titleEnvVar.trim() }
+        : {}),
+      apiKeySource: {
+        type: "environment",
+        envVar:
+          typeof provider.apiKeyEnvVar === "string" && provider.apiKeyEnvVar.trim()
+            ? provider.apiKeyEnvVar.trim()
+            : defaults.provider.apiKeySource.envVar,
+        configured: false
+      }
+    }
+  };
+
+  // Explicit shell or .env values are authoritative over the persisted control-plane defaults.
+  if (Object.prototype.hasOwnProperty.call(process.env, AGENT_ENABLED_ENV)) {
+    merged.enabled = defaults.enabled;
+  }
+  if (Object.prototype.hasOwnProperty.call(process.env, AGENT_REMOTE_MODEL_ENABLED_ENV)) {
+    merged.provider.remoteModelEnabled = defaults.provider.remoteModelEnabled;
+  }
+  if (Object.prototype.hasOwnProperty.call(process.env, AGENT_MODEL_ENV)) {
+    if (defaults.provider.modelSlug) {
+      merged.provider.modelSlug = defaults.provider.modelSlug;
+    } else {
+      delete merged.provider.modelSlug;
+    }
+  }
+  return merged;
+}
+
+function normalizedPersistedBudgets(value: unknown): AgentConfig["budgets"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const input = value as Record<string, unknown>;
+  const output: NonNullable<AgentConfig["budgets"]> = {};
+  for (const key of ["dailyLimitUsd", "monthlyLimitUsd", "sessionLimitUsd"] as const) {
+    const amount = input[key];
+    if (typeof amount === "number" && Number.isFinite(amount) && amount >= 0) {
+      output[key] = amount;
+    }
+  }
+  return Object.keys(output).length ? output : undefined;
+}
+
+function defaultProviderConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  agentEnabled = envBoolean(env[AGENT_ENABLED_ENV])
+): AgentProviderConfig {
   const modelSlug = nonEmptyString(env[AGENT_MODEL_ENV], "");
+  const remoteModelEnabled = envBoolean(env[AGENT_REMOTE_MODEL_ENABLED_ENV]);
+  const envProviderActive = agentEnabled && remoteModelEnabled;
   return {
     provider: "openrouter",
-    ...(modelSlug ? { modelSlug } : {}),
+    ...(envProviderActive && modelSlug ? { modelSlug } : {}),
     apiKeySource: {
       type: "environment",
       envVar: DEFAULT_OPENROUTER_KEY_ENV,
-      configured: Boolean(env[DEFAULT_OPENROUTER_KEY_ENV])
+      configured: envProviderActive && Boolean(env[DEFAULT_OPENROUTER_KEY_ENV])
     },
     httpRefererEnvVar: "OPENROUTER_HTTP_REFERER",
     titleEnvVar: "OPENROUTER_TITLE",
-    remoteModelEnabled: envBoolean(env[AGENT_REMOTE_MODEL_ENABLED_ENV])
+    remoteModelEnabled
   };
 }
 
@@ -1470,6 +2265,65 @@ function containsRawApiKey(value: unknown): boolean {
     }
   }
   return false;
+}
+
+function normalizeIdempotencyKey(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new AgentGatewayRequestError(
+      400,
+      "AGENT_IDEMPOTENCY_KEY_INVALID",
+      "Agent submission idempotency keys must be strings.",
+      { retryable: false, userAction: "Send a stable string idempotency key no longer than 200 characters." }
+    );
+  }
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 200 || hasControlCharacter(normalized)) {
+    throw new AgentGatewayRequestError(
+      400,
+      "AGENT_IDEMPOTENCY_KEY_INVALID",
+      "Agent submission idempotency key is empty, too long, or contains control characters.",
+      { retryable: false, userAction: "Send a stable printable idempotency key no longer than 200 characters." }
+    );
+  }
+  return normalized;
+}
+
+function hasControlCharacter(value: string): boolean {
+  return Array.from(value).some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 0x1f || code === 0x7f;
+  });
+}
+
+function submissionFingerprint(content: string, context: TuiAgentContext | undefined): string {
+  return stableArgumentsHash({ content, context: sanitizeAgentPayload(context ?? {}) });
+}
+
+function cancelledRunDiagnostic(): AgentDiagnostic {
+  return {
+    id: "agent.run.cancelled",
+    severity: "warning",
+    code: "AGENT_RUN_CANCELLED",
+    message: "Operator Agent run was cancelled before completion.",
+    checkedAt: new Date().toISOString(),
+    userAction: "Retry the run if the request is still needed."
+  };
+}
+
+function interruptedRunDiagnostic(status: AgentRun["status"], missingApproval: boolean): AgentDiagnostic {
+  return {
+    id: `agent.run.interrupted.${status}`,
+    severity: "error",
+    code: missingApproval ? "AGENT_APPROVAL_STATE_MISSING" : "AGENT_RUN_INTERRUPTED",
+    message: missingApproval
+      ? "Agent run was waiting for approval, but no recoverable pending approval remains."
+      : `Agent run was ${status} when the Agent Gateway restarted and cannot be resumed safely.`,
+    checkedAt: new Date().toISOString(),
+    userAction: "Retry the run to create a fresh provider request and approval state."
+  };
 }
 
 function nonEmptyString(value: unknown, fallback: string): string {

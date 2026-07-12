@@ -7,11 +7,21 @@ import test from "node:test";
 import type { AgentFileWriteApproval, AgentManifestPatchApproval, TuiAgentContext } from "../src/apiTypes.ts";
 import { createRelaybaseServer } from "../src/server.ts";
 
+const AGENT_ENV_NAMES = [
+  "OPENROUTER_API_KEY",
+  "RELAYBASE_AGENT_MODEL",
+  "RELAYBASE_AGENT_ENABLED",
+  "RELAYBASE_AGENT_REMOTE_MODEL_ENABLED"
+];
+
 test("Agent Gateway config GET/PUT is token gated and never serializes raw OpenRouter key", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-config-"));
-  const hub = await createRelaybaseServer({ port: 0, stateDir });
-  const previousKey = process.env.OPENROUTER_API_KEY;
+  const previous = saveEnv(AGENT_ENV_NAMES);
   process.env.OPENROUTER_API_KEY = "sk-test-secret-value";
+  delete process.env.RELAYBASE_AGENT_MODEL;
+  delete process.env.RELAYBASE_AGENT_ENABLED;
+  delete process.env.RELAYBASE_AGENT_REMOTE_MODEL_ENABLED;
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
 
   try {
     await hub.listen();
@@ -23,7 +33,9 @@ test("Agent Gateway config GET/PUT is token gated and never serializes raw OpenR
     const config = await apiRequest(port, "GET", "/__hub/api/agent/config", undefined, tokenHeaders(hub.runtime.token));
     assert.equal(config.statusCode, 200);
     assert.equal(config.json.agent.config.provider.provider, "openrouter");
-    assert.equal(config.json.agent.config.provider.apiKeySource.configured, true);
+    assert.equal(config.json.agent.config.enabled, false);
+    assert.equal(config.json.agent.config.provider.apiKeySource.configured, false);
+    assert.equal(config.json.agent.config.provider.modelSlug, undefined);
     assert.doesNotMatch(config.body, /sk-test-secret-value/);
 
     const diagnostics = await apiRequest(
@@ -34,10 +46,9 @@ test("Agent Gateway config GET/PUT is token gated and never serializes raw OpenR
       tokenHeaders(hub.runtime.token)
     );
     assert.equal(diagnostics.statusCode, 200);
-    assert.ok(
-      diagnostics.json.agent.diagnostics.some(
-        (diagnostic: { code: string }) => diagnostic.code === "AGENT_MODEL_MISSING"
-      )
+    assert.deepEqual(
+      diagnostics.json.agent.diagnostics.map((diagnostic: { code: string }) => diagnostic.code),
+      ["AGENT_DISABLED"]
     );
 
     const updated = await apiRequest(
@@ -72,11 +83,7 @@ test("Agent Gateway config GET/PUT is token gated and never serializes raw OpenR
     assert.equal(rawKey.json.code, "AGENT_RAW_API_KEY_NOT_ALLOWED");
     assert.doesNotMatch(rawKey.body, /sk-should-not-be-accepted/);
   } finally {
-    if (previousKey === undefined) {
-      delete process.env.OPENROUTER_API_KEY;
-    } else {
-      process.env.OPENROUTER_API_KEY = previousKey;
-    }
+    restoreEnvValues(previous);
     await hub.close();
   }
 });
@@ -111,8 +118,91 @@ test("Agent Gateway daemon config starts ready from explicit env opt-in flags", 
     assert.equal(config.json.agent.config.provider.modelSlug, "google/gemini-3.1-flash-lite");
     assert.equal(config.json.agent.config.provider.apiKeySource.configured, true);
     assert.doesNotMatch(config.body, /sk-or-daemon-env-secret/);
+
+    const diagnostics = await apiRequest(
+      hub.address().port,
+      "GET",
+      "/__hub/api/agent/diagnostics",
+      undefined,
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.deepEqual(
+      diagnostics.json.agent.diagnostics.map((diagnostic: { code: string }) => diagnostic.code),
+      ["AGENT_RUNTIME_READY", "AGENT_DAEMON_READY"]
+    );
+    assert.match(diagnostics.body, /enabled and configured for model requests/);
   } finally {
     await hub.close();
+    restoreEnvValues(previous);
+  }
+});
+
+test("Agent Gateway persists non-secret config across restart while explicit env remains authoritative", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-persisted-config-"));
+  const previous = saveEnv(AGENT_ENV_NAMES);
+  for (const name of AGENT_ENV_NAMES) {
+    delete process.env[name];
+  }
+
+  let hub = await createRelaybaseServer({ port: 0, stateDir });
+  try {
+    await hub.listen();
+    const updated = await apiRequest(
+      hub.address().port,
+      "PUT",
+      "/__hub/api/agent/config",
+      {
+        enabled: true,
+        provider: {
+          modelSlug: "openai/gpt-5.4",
+          remoteModelEnabled: true,
+          apiKeyEnvVar: "RELAYBASE_PERSISTED_TEST_KEY"
+        },
+        approvalPolicy: "read_only_only",
+        budgets: { sessionLimitUsd: 0.25 }
+      },
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(updated.json.agent.config.enabled, true);
+    await hub.close();
+
+    hub = await createRelaybaseServer({ port: 0, stateDir });
+    await hub.listen();
+    const persisted = await apiRequest(
+      hub.address().port,
+      "GET",
+      "/__hub/api/agent/config",
+      undefined,
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(persisted.json.agent.config.enabled, true);
+    assert.equal(persisted.json.agent.config.provider.modelSlug, "openai/gpt-5.4");
+    assert.equal(persisted.json.agent.config.provider.remoteModelEnabled, true);
+    assert.equal(persisted.json.agent.config.provider.apiKeySource.envVar, "RELAYBASE_PERSISTED_TEST_KEY");
+    assert.equal(persisted.json.agent.config.provider.apiKeySource.configured, false);
+    assert.equal(persisted.json.agent.config.approvalPolicy, "read_only_only");
+    assert.equal(persisted.json.agent.config.budgets.sessionLimitUsd, 0.25);
+
+    const persistedDocument = JSON.parse(await fs.readFile(path.join(stateDir, "agent", "config.json"), "utf8")) as {
+      provider?: Record<string, unknown>;
+    };
+    assert.equal(persistedDocument.provider?.apiKey, undefined);
+    assert.equal(persistedDocument.provider?.configured, undefined);
+    await hub.close();
+
+    process.env.RELAYBASE_AGENT_ENABLED = "0";
+    hub = await createRelaybaseServer({ port: 0, stateDir });
+    await hub.listen();
+    const envOverridden = await apiRequest(
+      hub.address().port,
+      "GET",
+      "/__hub/api/agent/config",
+      undefined,
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(envOverridden.json.agent.config.enabled, false);
+  } finally {
+    await hub.close().catch(() => undefined);
     restoreEnvValues(previous);
   }
 });
@@ -280,6 +370,11 @@ test("OA-THREADS-002 Agent Gateway exposes active thread, patch, context preview
 
 test("Agent Gateway message returns diagnostics for disabled and missing-config agent without fake output", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-message-"));
+  const previous = saveEnv(AGENT_ENV_NAMES);
+  delete process.env.OPENROUTER_API_KEY;
+  delete process.env.RELAYBASE_AGENT_MODEL;
+  delete process.env.RELAYBASE_AGENT_ENABLED;
+  delete process.env.RELAYBASE_AGENT_REMOTE_MODEL_ENABLED;
   const hub = await createRelaybaseServer({ port: 0, stateDir });
 
   try {
@@ -293,17 +388,87 @@ test("Agent Gateway message returns diagnostics for disabled and missing-config 
     );
     const sessionId = session.json.agent.session.id;
 
+    const idempotentHeaders = {
+      ...tokenHeaders(hub.runtime.token),
+      "Idempotency-Key": "disabled-message-1"
+    };
     const disabled = await apiRequest(
       hub.address().port,
       "POST",
       `/__hub/api/agent/sessions/${sessionId}/messages`,
       { content: "start notes", context: { selectedAppId: "notes" } },
-      tokenHeaders(hub.runtime.token)
+      idempotentHeaders
     );
     assert.equal(disabled.statusCode, 202);
     assert.equal(disabled.json.agent.run.status, "failed");
     assert.equal(disabled.json.agent.diagnostics[0].code, "AGENT_DISABLED");
     assert.doesNotMatch(disabled.body, /model\.delta/);
+
+    const duplicate = await apiRequest(
+      hub.address().port,
+      "POST",
+      `/__hub/api/agent/sessions/${sessionId}/messages`,
+      { content: "start notes", context: { selectedAppId: "notes" } },
+      idempotentHeaders
+    );
+    assert.equal(duplicate.statusCode, 202);
+    assert.equal(duplicate.json.agent.run.id, disabled.json.agent.run.id);
+    assert.equal(duplicate.json.agent.reused, true);
+
+    const runs = await apiRequest(
+      hub.address().port,
+      "GET",
+      `/__hub/api/agent/sessions/${sessionId}/runs`,
+      undefined,
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(runs.statusCode, 200);
+    assert.deepEqual(
+      runs.json.agent.runs.map((run: { id: string }) => run.id),
+      [disabled.json.agent.run.id]
+    );
+    const run = await apiRequest(
+      hub.address().port,
+      "GET",
+      `/__hub/api/agent/sessions/${sessionId}/runs/${disabled.json.agent.run.id}`,
+      undefined,
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(run.statusCode, 200);
+    assert.equal(run.json.agent.run.status, "failed");
+    const active = await apiRequest(
+      hub.address().port,
+      "GET",
+      `/__hub/api/agent/sessions/${sessionId}/runs/active`,
+      undefined,
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(active.statusCode, 200);
+    assert.equal(active.json.agent.run, null);
+
+    const retryHeaders = {
+      ...tokenHeaders(hub.runtime.token),
+      "Idempotency-Key": "disabled-message-retry-1"
+    };
+    const retried = await apiRequest(
+      hub.address().port,
+      "POST",
+      `/__hub/api/agent/sessions/${sessionId}/runs/${disabled.json.agent.run.id}/retry`,
+      {},
+      retryHeaders
+    );
+    assert.equal(retried.statusCode, 202);
+    assert.notEqual(retried.json.agent.run.id, disabled.json.agent.run.id);
+    assert.equal(retried.json.agent.run.status, "failed");
+    const duplicateRetry = await apiRequest(
+      hub.address().port,
+      "POST",
+      `/__hub/api/agent/sessions/${sessionId}/runs/${disabled.json.agent.run.id}/retry`,
+      {},
+      retryHeaders
+    );
+    assert.equal(duplicateRetry.json.agent.run.id, retried.json.agent.run.id);
+    assert.equal(duplicateRetry.json.agent.reused, true);
 
     await apiRequest(
       hub.address().port,
@@ -330,6 +495,7 @@ test("Agent Gateway message returns diagnostics for disabled and missing-config 
     assert.equal(missingKey.json.agent.diagnostics[0].code, "OPENROUTER_API_KEY_MISSING");
     assert.doesNotMatch(missingKey.body, /fake|pretend/i);
   } finally {
+    restoreEnvValues(previous);
     await hub.close();
   }
 });
@@ -362,7 +528,7 @@ test("Agent Gateway session event stream connects and replays run events", async
       tokenHeaders(hub.runtime.token)
     );
     assert.match(stream, /event: diagnostic/);
-    assert.match(stream, /requiresSessionRefresh/);
+    assert.match(stream, /"requiresSessionRefresh":false/);
   } finally {
     await hub.close();
   }

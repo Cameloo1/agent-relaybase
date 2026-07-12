@@ -11,20 +11,27 @@ import (
 )
 
 const (
-	KindLaunch       = "launch"
-	KindStop         = "stop"
-	KindRestart      = "restart"
-	KindLogsExport   = "logs_export"
-	KindPage         = "page"
-	KindPaneColor    = "pane_color"
-	KindPin          = "pin"
-	KindUnpin        = "unpin"
-	KindTheme        = "theme"
-	KindHelp         = "help"
-	KindConfirm      = "confirm"
-	KindCancel       = "cancel"
-	KindDaemonStatus = "daemon_status"
-	KindDaemonRepair = "daemon_repair"
+	KindLaunch          = "launch"
+	KindStop            = "stop"
+	KindRestart         = "restart"
+	KindLogsExport      = "logs_export"
+	KindPage            = "page"
+	KindPaneColor       = "pane_color"
+	KindPin             = "pin"
+	KindUnpin           = "unpin"
+	KindTheme           = "theme"
+	KindHelp            = "help"
+	KindUsage           = "usage"
+	KindConfirm         = "confirm"
+	KindCancel          = "cancel"
+	KindDaemonStatus    = "daemon_status"
+	KindDaemonRepair    = "daemon_repair"
+	KindCreatePackage   = "create_package"
+	KindPackages        = "packages"
+	KindLaunchPackage   = "launch_package"
+	KindDeletePackage   = "delete_package"
+	KindPackageRunRetry = "package_run_retry"
+	KindPackageRunAbort = "package_run_abort"
 
 	KindThreadList    = "thread_list"
 	KindThreadNew     = "thread_new"
@@ -59,23 +66,26 @@ const (
 )
 
 type ParsedCommand struct {
-	Raw        string
-	Kind       string
-	Target     string
-	Scope      string
-	Color      string
-	Theme      string
-	Page       string
-	PageNumber int
-	Confirm    bool
-	DryRun     bool
-	Path       string
-	Command    string
-	Field      string
-	Value      string
-	Route      string
-	Port       int
-	Format     string
+	Raw         string
+	Kind        string
+	Target      string
+	Scope       string
+	Color       string
+	Theme       string
+	Page        string
+	PageNumber  int
+	Confirm     bool
+	DryRun      bool
+	Path        string
+	Command     string
+	Field       string
+	Value       string
+	Route       string
+	Port        int
+	Format      string
+	PackageName string
+	Members     []string
+	RunID       string
 }
 
 type ParseError struct {
@@ -96,6 +106,9 @@ func Parse(input string) (ParsedCommand, error) {
 	}
 
 	content := strings.TrimSpace(strings.TrimPrefix(raw, "/"))
+	if commandRootIs(content, "create-package") {
+		return parseCreatePackageCommand(raw, content)
+	}
 	fields, err := splitCommandFields(content)
 	if err != nil {
 		return ParsedCommand{}, err
@@ -113,11 +126,42 @@ func Parse(input string) (ParsedCommand, error) {
 	args := fields[1:]
 
 	switch command {
-	case "add":
-		if len(args) == 0 || strings.ToLower(args[0]) != "app" {
-			return ParsedCommand{}, ParseError{Message: "Use /add app or /add app <path> using <command>."}
+	case "packages":
+		if len(args) != 0 {
+			return ParsedCommand{}, ParseError{Message: "Use /packages."}
 		}
-		pathValue, commandValue, err := parseAddAppArgs(args[1:])
+		parsed.Kind = KindPackages
+	case "launch-package":
+		if len(args) != 1 {
+			return ParsedCommand{}, ParseError{Message: "Use /launch-package <package-name>."}
+		}
+		parsed.Kind = KindLaunchPackage
+		parsed.PackageName = args[0]
+	case "delete-package":
+		if len(args) != 1 {
+			return ParsedCommand{}, ParseError{Message: "Use /delete-package <package-name>."}
+		}
+		parsed.Kind = KindDeletePackage
+		parsed.PackageName = args[0]
+	case "package-run":
+		if len(args) != 2 || (strings.ToLower(args[0]) != "retry" && strings.ToLower(args[0]) != "abort") {
+			return ParsedCommand{}, ParseError{Message: "Use /package-run <retry|abort> <run-id>."}
+		}
+		parsed.RunID = args[1]
+		if strings.EqualFold(args[0], "retry") {
+			parsed.Kind = KindPackageRunRetry
+		} else {
+			parsed.Kind = KindPackageRunAbort
+		}
+	case "add":
+		addArgs := args
+		if len(addArgs) > 0 && strings.EqualFold(addArgs[0], "app") {
+			addArgs = addArgs[1:]
+		}
+		if len(args) == 0 {
+			return ParsedCommand{}, ParseError{Message: "Use /add <path> or /add <path> using <command>."}
+		}
+		pathValue, commandValue, err := parseAddAppArgs(addArgs)
 		if err != nil {
 			return ParsedCommand{}, err
 		}
@@ -239,6 +283,14 @@ func Parse(input string) (ParsedCommand, error) {
 			return ParsedCommand{}, ParseError{Message: "Use /help."}
 		}
 		parsed.Kind = KindHelp
+	case "usage":
+		if err := rejectUnexpectedFlags(args, "/usage"); err != nil {
+			return ParsedCommand{}, err
+		}
+		if len(args) != 0 {
+			return ParsedCommand{}, ParseError{Message: "Use /usage."}
+		}
+		parsed.Kind = KindUsage
 	case "confirm":
 		if err := rejectUnexpectedFlags(args, "/confirm"); err != nil {
 			return ParsedCommand{}, err
@@ -482,7 +534,8 @@ func Parse(input string) (ParsedCommand, error) {
 
 func RequiresConfirmation(command ParsedCommand) bool {
 	switch command.Kind {
-	case KindLaunch, KindStop, KindRestart, KindLogsExport,
+	case KindLaunch, KindStop, KindRestart, KindLogsExport, KindLaunchPackage, KindDeletePackage,
+		KindPackageRunRetry, KindPackageRunAbort,
 		KindAddApp, KindRegister, KindConfigure, KindOpen, KindProve, KindHealthProve,
 		KindManifestEdit, KindHealthRoute, KindPortPinned, KindComponentRole, KindComponentGroup, KindComponentLabel,
 		KindDaemonRepair:
@@ -583,7 +636,7 @@ func ResolveLifecycleTarget(ctx ResolutionContext, target string) (ResolvedTarge
 			}
 		}
 		if len(directCandidates) > 0 {
-			return singleCandidate(directCandidates, target)
+			return singleEquivalentCandidate(directCandidates, target)
 		}
 	}
 
@@ -903,10 +956,10 @@ func parseAddAppArgs(args []string) (string, string, error) {
 		pathArgs = args[:delimiterIndex]
 		commandArgs = args[delimiterIndex+1:]
 		if len(commandArgs) == 0 {
-			return "", "", ParseError{Message: "Use /add app <path> using <command>."}
+			return "", "", ParseError{Message: "Use /add <path> using <command>."}
 		}
 	}
-	if err := rejectUnexpectedFlags(pathArgs, "/add app <path> using <command>"); err != nil {
+	if err := rejectUnexpectedFlags(pathArgs, "/add <path> using <command>"); err != nil {
 		return "", "", err
 	}
 	return strings.TrimSpace(strings.Join(pathArgs, " ")), strings.TrimSpace(strings.Join(commandArgs, " ")), nil
@@ -1015,6 +1068,35 @@ func singleCandidate(candidates map[string]ResolvedTarget, rawTarget string) (Re
 		return candidate, nil
 	}
 	return ResolvedTarget{}, ResolutionError{Kind: "unknown", Message: "Unknown target."}
+}
+
+func singleEquivalentCandidate(candidates map[string]ResolvedTarget, rawTarget string) (ResolvedTarget, error) {
+	if len(candidates) <= 1 {
+		return singleCandidate(candidates, rawTarget)
+	}
+	for _, candidate := range candidates {
+		if len(candidate.AppIDs) != 1 {
+			return singleCandidate(candidates, rawTarget)
+		}
+	}
+
+	appID := ""
+	var appCandidate ResolvedTarget
+	for key, candidate := range candidates {
+		if appID == "" {
+			appID = candidate.AppIDs[0]
+		}
+		if candidate.AppIDs[0] != appID {
+			return singleCandidate(candidates, rawTarget)
+		}
+		if strings.HasPrefix(key, "app:") {
+			appCandidate = candidate
+		}
+	}
+	if len(appCandidate.AppIDs) == 1 {
+		return appCandidate, nil
+	}
+	return singleCandidate(candidates, rawTarget)
 }
 
 func paneTarget(pane PaneRef) ResolvedTarget {

@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/cameloo/relaybase/tui/internal/bootstrap"
 	"github.com/cameloo/relaybase/tui/internal/config"
@@ -20,13 +22,21 @@ import (
 	"github.com/cameloo/relaybase/tui/internal/preferences"
 	"github.com/cameloo/relaybase/tui/internal/relaybaseclient"
 	"github.com/cameloo/relaybase/tui/internal/tui/assistant"
+	"github.com/cameloo/relaybase/tui/internal/tui/commandpalette"
 	"github.com/cameloo/relaybase/tui/internal/tui/commands"
+	"github.com/cameloo/relaybase/tui/internal/tui/components"
+	"github.com/cameloo/relaybase/tui/internal/tui/composer"
 	"github.com/cameloo/relaybase/tui/internal/tui/contextmenu"
+	"github.com/cameloo/relaybase/tui/internal/tui/interaction"
+	"github.com/cameloo/relaybase/tui/internal/tui/inventory"
 	"github.com/cameloo/relaybase/tui/internal/tui/keymap"
+	"github.com/cameloo/relaybase/tui/internal/tui/layout"
 	"github.com/cameloo/relaybase/tui/internal/tui/panes"
+	"github.com/cameloo/relaybase/tui/internal/tui/response"
 	"github.com/cameloo/relaybase/tui/internal/tui/setupwizard"
 	"github.com/cameloo/relaybase/tui/internal/tui/slash"
 	"github.com/cameloo/relaybase/tui/internal/tui/styles"
+	usagecomponent "github.com/cameloo/relaybase/tui/internal/tui/usage"
 	"github.com/cameloo/relaybase/tui/internal/tui/views"
 )
 
@@ -34,6 +44,26 @@ type Diagnostic struct {
 	Code     string
 	Severity string
 	Message  string
+}
+
+type clipboardPasteLoadedMsg struct {
+	Text string
+	Err  error
+}
+
+type clipboardCopyFinishedMsg struct {
+	Err       error
+	PaneID    string
+	PaneTitle string
+	LineCount int
+	Target    string
+}
+
+type pasteReadyMsg struct {
+	Generation uint64
+	Text       string
+	Bytes      int
+	Lines      int
 }
 
 const supportedAPIVersion = "v1"
@@ -58,50 +88,94 @@ type daemonRetryMsg struct{}
 type eventRetryMsg struct{}
 
 type RootModel struct {
-	cfg                  config.Config
-	client               *relaybaseclient.Client
-	bootstrapClient      *bootstrap.Client
-	ctx                  context.Context
-	cancel               context.CancelFunc
-	state                *relaybaseclient.RelaybaseState
-	stream               *relaybaseclient.EventStream
-	connectionStatus     string
-	eventStatus          string
-	eventCount           int
-	diagnostics          []Diagnostic
-	theme                styles.Theme
-	styles               styles.Styles
-	keymap               keymap.KeyMap
-	paneManager          panes.Manager
-	contextMenu          contextmenu.Menu
-	preferences          preferences.Preferences
-	preferenceStore      preferences.Store
-	commandInput         string
-	commandActive        bool
-	assistantHistory     []string
-	naturalHistory       []assistant.HistoryEntry
-	lastAssistantLine    string
-	historyExpanded      bool
-	setupSession         setupwizard.State
-	pendingConfirm       *confirmationRequest
-	agentConfig          *relaybaseclient.AgentConfig
-	agentStatus          string
-	agentDiagnostics     []relaybaseclient.AgentDiagnostic
-	agentSession         *relaybaseclient.AgentSession
-	agentSessions        []relaybaseclient.AgentSession
-	agentStream          *relaybaseclient.AgentEventStream
-	agentPendingInput    string
-	pendingAgentApproval *relaybaseclient.AgentApproval
-	lastNaturalAction    string
-	helpVisible          bool
-	width                int
-	height               int
-	bodyScrollOffset     int
-	daemonRetryAttempt   int
-	eventRetryAttempt    int
-	lastBootstrapResult  *bootstrap.DaemonResult
-	assistantPrompt      string
-	now                  func() time.Time
+	cfg                    config.Config
+	client                 *relaybaseclient.Client
+	bootstrapClient        *bootstrap.Client
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	state                  *relaybaseclient.RelaybaseState
+	stream                 *relaybaseclient.EventStream
+	connectionStatus       string
+	eventStatus            string
+	eventCount             int
+	diagnostics            []Diagnostic
+	theme                  styles.Theme
+	styles                 styles.Styles
+	keymap                 keymap.KeyMap
+	paneManager            panes.Manager
+	appInventory           inventory.Manager
+	contextMenu            contextmenu.Menu
+	preferences            preferences.Preferences
+	preferenceStore        preferences.Store
+	commandInput           string
+	commandActive          bool
+	composer               composer.Model
+	paste                  *pendingPaste
+	pasteGeneration        uint64
+	interaction            interaction.State
+	responseOffset         int
+	responseFollow         bool
+	responseNewOutput      int
+	assistantHistory       []string
+	assistantTimeline      []string
+	naturalHistory         []assistant.HistoryEntry
+	agentDelta             string
+	lastAssistantLine      string
+	historyExpanded        bool
+	setupSession           setupwizard.State
+	pendingConfirm         *confirmationRequest
+	quitConfirmation       bool
+	agentConfig            *relaybaseclient.AgentConfig
+	agentStatus            string
+	agentDiagnostics       []relaybaseclient.AgentDiagnostic
+	agentSession           *relaybaseclient.AgentSession
+	agentSessions          []relaybaseclient.AgentSession
+	threadDrafts           map[string]threadDraftState
+	threadResponses        map[string]threadResponseState
+	agentStream            *relaybaseclient.AgentEventStream
+	agentStreamSessionID   string
+	agentStreamGeneration  uint64
+	agentInitialReplay     bool
+	agentPendingInput      string
+	agentPendingGeneration uint64
+	agentMessageGeneration uint64
+	pendingSubmissionDraft *submissionDraftState
+	authorizedProjectRoots []string
+	pendingAgentApproval   *relaybaseclient.AgentApproval
+	lastNaturalAction      string
+	helpVisible            bool
+	helpSearch             textinput.Model
+	helpMatches            []slash.CommandMatch
+	helpSelected           int
+	helpDetailOffset       int
+	usage                  usagecomponent.Model
+	usageRequestGeneration uint64
+	threadSwitcherVisible  bool
+	threadSwitcherLoading  bool
+	threadSwitcherSelected int
+	codePickerVisible      bool
+	codePickerSelected     int
+	commandPalette         commandpalette.Model
+	clipboardWriteReady    bool
+	appPackages            []relaybaseclient.AppPackageDefinition
+	activePackageRun       *relaybaseclient.AppPackageRun
+	packageListRequested   bool
+	packageRunProgress     string
+	packageRunPolling      map[string]bool
+	packageRunPollFailures map[string]int
+	packageRunReported     map[string]bool
+	logFetchPending        map[string]string
+	diagnosticsExpanded    bool
+	width                  int
+	height                 int
+	bodyScrollOffset       int
+	daemonRetryAttempt     int
+	eventRetryAttempt      int
+	lastBootstrapResult    *bootstrap.DaemonResult
+	assistantPrompt        string
+	localThreadGeneration  uint64
+	composerHistoryID      uint64
+	now                    func() time.Time
 }
 
 type confirmationRequest struct {
@@ -115,6 +189,46 @@ type confirmationRequest struct {
 	SetupCommand    *slash.ParsedCommand
 	AssistantInput  string
 	DaemonRepair    bool
+	PackageAction   string
+	PackageID       string
+	PackageRunID    string
+	Details         []string
+}
+
+type threadDraftState struct {
+	Snapshot composer.Snapshot
+	Active   bool
+}
+
+// threadResponseState keeps every response-surface cursor and transcript tied
+// to the daemon thread that produced it. It is process-memory only, just like
+// composer drafts, and prevents a late replay or thread switch from blending
+// two operator conversations in the same panel.
+type threadResponseState struct {
+	AssistantHistory  []string
+	AssistantTimeline []string
+	NaturalHistory    []assistant.HistoryEntry
+	AgentDelta        string
+	LastAssistantLine string
+	HistoryExpanded   bool
+	ResponseOffset    int
+	ResponseFollow    bool
+	ResponseNewOutput int
+}
+
+type pendingPaste struct {
+	Generation uint64
+	Snapshot   composer.Snapshot
+	Active     bool
+	Focus      interaction.PrimaryFocus
+}
+
+type submissionDraftState struct {
+	Snapshot                composer.Snapshot
+	Focus                   interaction.PrimaryFocus
+	AwaitingAgentAcceptance bool
+	SessionID               string
+	Generation              uint64
 }
 
 var paneColorPalette = []string{"default", "#216869", "#8a5a00", "#9b1c31", "#6d4c3d"}
@@ -192,35 +306,120 @@ func NewRoot(cfg config.Config, client *relaybaseclient.Client) RootModel {
 		loadedPreferences.Panes.Colors,
 		loadedPreferences.Layout.LastPage,
 	)
+	helpSearch := textinput.New()
+	helpSearch.Prompt = ""
+	helpSearch.Placeholder = "command or keyword"
+	helpSearch.CharLimit = 80
+	helpSearch.SetWidth(48)
+	applyTextInputTheme(&helpSearch, theme)
+	composerModel := composer.New(76)
+	composerModel.ApplyTheme(theme, loadedPreferences.Assistant.BarColor)
+	composerModel.SetHistoryScope("local:1")
 
 	return RootModel{
-		cfg:                 cfg,
-		client:              client,
-		bootstrapClient:     bootstrapClient,
-		ctx:                 ctx,
-		cancel:              cancel,
-		connectionStatus:    "connecting",
-		eventStatus:         "connecting",
-		agentStatus:         "checking",
-		diagnostics:         diagnostics,
-		theme:               theme,
-		styles:              tuiStyles,
-		keymap:              keymap.WithContextMenu(loadedPreferences.Keymap.ContextMenu),
-		paneManager:         paneManager,
-		preferences:         loadedPreferences,
-		preferenceStore:     preferenceStore,
-		assistantHistory:    []string{},
-		naturalHistory:      []assistant.HistoryEntry{},
-		width:               80,
-		height:              24,
-		lastBootstrapResult: bootstrapReport,
-		assistantPrompt:     assistant.PromptPlaceholder(),
-		now:                 time.Now,
+		cfg:                    cfg,
+		client:                 client,
+		bootstrapClient:        bootstrapClient,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		connectionStatus:       "connecting",
+		eventStatus:            "connecting",
+		agentStatus:            "checking",
+		diagnostics:            diagnostics,
+		theme:                  theme,
+		styles:                 tuiStyles,
+		keymap:                 keymap.WithContextMenu(loadedPreferences.Keymap.ContextMenu),
+		paneManager:            paneManager,
+		preferences:            loadedPreferences,
+		preferenceStore:        preferenceStore,
+		assistantHistory:       []string{},
+		naturalHistory:         []assistant.HistoryEntry{},
+		width:                  80,
+		height:                 24,
+		lastBootstrapResult:    bootstrapReport,
+		assistantPrompt:        assistant.PromptPlaceholder(),
+		helpSearch:             helpSearch,
+		helpMatches:            slash.SearchCatalog(""),
+		commandPalette:         commandpalette.New(commandpalette.DefaultMaxRows),
+		composer:               composerModel,
+		interaction:            interaction.New(),
+		responseFollow:         true,
+		localThreadGeneration:  1,
+		threadDrafts:           map[string]threadDraftState{},
+		threadResponses:        map[string]threadResponseState{},
+		clipboardWriteReady:    clipboardWriteAvailable(),
+		packageRunPolling:      map[string]bool{},
+		packageRunPollFailures: map[string]int{},
+		packageRunReported:     map[string]bool{},
+		logFetchPending:        map[string]string{},
+		now:                    time.Now,
 	}
 }
 
 func (m RootModel) Init() tea.Cmd {
 	return commands.FetchStateCmd(m.ctx, m.client)
+}
+
+const packageRunPollWarningThreshold = 3
+
+func (m *RootModel) beginPackageRunPolling(runID string) tea.Cmd {
+	if runID == "" {
+		return nil
+	}
+	if m.packageRunPolling == nil {
+		m.packageRunPolling = map[string]bool{}
+	}
+	if m.packageRunPollFailures == nil {
+		m.packageRunPollFailures = map[string]int{}
+	}
+	if m.packageRunReported == nil {
+		m.packageRunReported = map[string]bool{}
+	}
+	if m.packageRunPolling[runID] {
+		return nil
+	}
+	m.packageRunPolling[runID] = true
+	m.packageRunPollFailures[runID] = 0
+	delete(m.packageRunReported, runID)
+	m.clearDiagnostics("app_package_run_poll_retry", "app_package_run_poll_failed")
+	return commands.PollAppPackageRunCmd(m.ctx, m.client, runID, 0)
+}
+
+func (m *RootModel) continuePackageRunPolling(runID string, attempt int) tea.Cmd {
+	if !m.packageRunPolling[runID] {
+		return nil
+	}
+	return commands.PollAppPackageRunCmd(m.ctx, m.client, runID, attempt)
+}
+
+func (m *RootModel) finishPackageRun(run relaybaseclient.AppPackageRun) tea.Cmd {
+	if m.packageRunReported == nil {
+		m.packageRunReported = map[string]bool{}
+	}
+	delete(m.packageRunPolling, run.ID)
+	delete(m.packageRunPollFailures, run.ID)
+	m.clearDiagnostics("app_package_run_poll_retry", "app_package_run_poll_failed")
+	if m.packageRunReported[run.ID] {
+		return nil
+	}
+	m.packageRunReported[run.ID] = true
+	m.packageRunProgress = ""
+	m.addAssistantMessage(packageRunResultMessage(run))
+	return commands.ListAppPackagesCmd(m.ctx, m.client)
+}
+
+func (m *RootModel) recoverPackageRunPoll(runID string, attempt int, err error) tea.Cmd {
+	if errors.Is(err, context.Canceled) || m.ctx.Err() != nil {
+		delete(m.packageRunPolling, runID)
+		delete(m.packageRunPollFailures, runID)
+		return nil
+	}
+	failures := m.packageRunPollFailures[runID] + 1
+	m.packageRunPollFailures[runID] = failures
+	if failures >= packageRunPollWarningThreshold {
+		m.addOrReplaceDiagnostic("app_package_run_poll_retry", "warning", "Could not refresh app package run status; retrying with bounded backoff.")
+	}
+	return m.continuePackageRunPolling(runID, failures)
 }
 
 func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -240,22 +439,281 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.paneManager.Resize(msg.Width, dashboardHeight(msg.Height))
+		// Width can reflow a multiline draft and therefore change DynamicHeight.
+		// Size the composer first, then project every dependent region once.
+		m.composer.SetWidth(maxInt(8, msg.Width-4))
+		m.syncOperatorLayout()
+		m.helpSearch.SetWidth(maxInt(16, minInt(48, msg.Width-12)))
+		m.commandPalette.SetMaxRows(commandPaletteRows(msg.Height))
 		m.clampBodyScroll()
 		return m, nil
 	case tea.MouseWheelMsg:
 		mouse := msg.Mouse()
-		if !m.mouseInBody(mouse.Y) {
+		frame := views.BuildShell(m.styles, m.shellData())
+		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.diagnosticsExpanded || strings.TrimSpace(m.setupPanelForView()) != "" {
+			if region, ok := frame.HitMap.Hit(mouse.X, mouse.Y); ok && region.Kind == components.HitModal {
+				switch mouse.Button {
+				case tea.MouseWheelUp:
+					m.scrollBody(-3)
+				case tea.MouseWheelDown:
+					m.scrollBody(3)
+				}
+			}
 			return m, nil
 		}
-		switch mouse.Button {
-		case tea.MouseWheelUp:
-			m.scrollBody(-3)
-		case tea.MouseWheelDown:
-			m.scrollBody(3)
+		if m.quitConfirmation || m.contextMenu.IsOpen() {
+			return m, nil
+		}
+		if m.helpVisible {
+			if region, ok := frame.HitMap.Hit(mouse.X, mouse.Y); ok {
+				switch region.Kind {
+				case components.HitHelpResult:
+					switch mouse.Button {
+					case tea.MouseWheelUp:
+						m.moveHelpSelection(-1)
+					case tea.MouseWheelDown:
+						m.moveHelpSelection(1)
+					}
+				case components.HitHelpDetail:
+					switch mouse.Button {
+					case tea.MouseWheelUp:
+						m.scrollHelpDetail(-3)
+					case tea.MouseWheelDown:
+						m.scrollHelpDetail(3)
+					}
+				}
+			}
+			return m, nil
+		}
+		if m.usage.IsOpen() {
+			return m, nil
+		}
+		if m.codePickerVisible {
+			if region, ok := frame.HitMap.Hit(mouse.X, mouse.Y); ok && region.Kind == components.HitCodePickerRow {
+				switch mouse.Button {
+				case tea.MouseWheelUp:
+					m.moveCodePicker(-1)
+				case tea.MouseWheelDown:
+					m.moveCodePicker(1)
+				}
+			}
+			return m, nil
+		}
+		if m.threadSwitcherVisible {
+			if region, ok := frame.HitMap.Hit(mouse.X, mouse.Y); ok && region.Kind == components.HitThreadSwitcherRow {
+				switch mouse.Button {
+				case tea.MouseWheelUp:
+					m.moveThreadSwitcher(-1)
+				case tea.MouseWheelDown:
+					m.moveThreadSwitcher(1)
+				}
+			}
+			return m, nil
+		}
+		if m.inventoryVisible() {
+			metrics := layout.Compute(maxInt(m.width, 1), maxInt(m.height, 1), m.composer.Rows())
+			if metrics.Panes.Contains(mouse.X, mouse.Y) {
+				switch mouse.Button {
+				case tea.MouseWheelUp:
+					m.scrollBody(-3)
+				case tea.MouseWheelDown:
+					m.scrollBody(3)
+				}
+				return m, nil
+			}
+		}
+		if region, ok := frame.HitMap.Hit(mouse.X, mouse.Y); ok {
+			switch region.Kind {
+			case components.HitPaneSurface:
+				return m, nil
+			case components.HitPaneLogs:
+				return m, m.scrollPaneByWheel(region.PaneID, mouse.Button)
+			case components.HitResponse:
+				m.setPrimaryFocus(interaction.FocusResponse)
+				switch mouse.Button {
+				case tea.MouseWheelUp:
+					m.scrollResponse(-3)
+				case tea.MouseWheelDown:
+					m.scrollResponse(3)
+				}
+				return m, nil
+			case components.HitComposer:
+				m.setPrimaryFocus(interaction.FocusComposer)
+				return m, nil
+			case components.HitCommandPaletteRow:
+				if mouse.Button == tea.MouseWheelUp {
+					m.commandPalette.Move(-1)
+				} else if mouse.Button == tea.MouseWheelDown {
+					m.commandPalette.Move(1)
+				}
+				return m, nil
+			case components.HitCommandPalette:
+				return m, nil
+			}
+		}
+		return m, nil
+	case tea.MouseClickMsg:
+		mouse := msg.Mouse()
+		if mouse.Button != tea.MouseLeft || m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.contextMenu.IsOpen() || m.usage.IsOpen() {
+			return m, nil
+		}
+		frame := views.BuildShell(m.styles, m.shellData())
+		region, ok := frame.HitMap.Hit(mouse.X, mouse.Y)
+		if m.codePickerVisible {
+			if !ok || (region.Kind != components.HitModal && region.Kind != components.HitCodePickerRow) {
+				m.closeCodePicker()
+				return m, nil
+			}
+			if region.Kind == components.HitCodePickerRow {
+				if region.Index == m.codePickerSelected {
+					return m.copySelectedCodeBlock()
+				}
+				m.codePickerSelected = region.Index
+			}
+			return m, nil
+		}
+		if m.threadSwitcherVisible {
+			if !ok || (region.Kind != components.HitModal && region.Kind != components.HitThreadSwitcherRow) {
+				m.closeThreadSwitcher()
+				return m, nil
+			}
+			if region.Kind == components.HitThreadSwitcherRow {
+				if region.Index == m.threadSwitcherSelected && !m.threadSwitcherLoading {
+					return m.activateSelectedThread()
+				}
+				m.threadSwitcherSelected = region.Index
+			}
+			return m, nil
+		}
+		if m.helpVisible {
+			if ok && region.Kind == components.HitHelpResult {
+				m.helpSelected = region.Index
+				m.clampHelpSelection()
+				m.helpDetailOffset = 0
+			}
+			// Help is a transient owner. A click outside its interactive rows is
+			// inert and never falls through to the dashboard behind the overlay.
+			return m, nil
+		}
+		if m.diagnosticsExpanded || strings.TrimSpace(m.setupPanelForView()) != "" {
+			return m, nil
+		}
+		if m.commandPaletteVisible() {
+			if ok && region.Kind == components.HitCommandPaletteRow && m.commandPalette.SelectVisibleRow(region.Index) {
+				m.completeCommandPalette()
+			}
+			return m, nil
+		}
+		if !ok {
+			return m, nil
+		}
+		switch region.Kind {
+		case components.HitHelpResult:
+			if m.helpVisible {
+				m.helpSelected = region.Index
+				m.clampHelpSelection()
+				m.helpDetailOffset = 0
+			}
+			return m, nil
+		case components.HitHelpDetail:
+			return m, nil
+		case components.HitPaneCopyLogs:
+			m.paneManager.SelectPane(region.PaneID)
+			return m, m.copyPaneLogsCmd(region.PaneID)
+		case components.HitPaneLogs:
+			m.setPrimaryFocus(interaction.FocusPanes)
+			if m.paneManager.SelectedPaneID() == region.PaneID {
+				m.paneManager.FocusSelected()
+			} else {
+				m.paneManager.SelectPane(region.PaneID)
+			}
+			return m, nil
+		case components.HitResponse:
+			m.setPrimaryFocus(interaction.FocusResponse)
+			return m, nil
+		case components.HitComposer:
+			m.setPrimaryFocus(interaction.FocusComposer)
+			return m, nil
+		case components.HitCommandPaletteRow:
+			if m.commandPalette.SelectVisibleRow(region.Index) {
+				m.completeCommandPalette()
+			}
+			return m, nil
+		}
+		return m, nil
+	case tea.PasteMsg:
+		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() {
+			return m, nil
+		}
+		if m.threadSwitcherVisible || m.codePickerVisible {
+			return m, nil
+		}
+		if m.helpVisible {
+			before := m.helpSearch.Value()
+			clean := strings.Join(strings.Fields(composer.SanitizePaste(msg.Content)), " ")
+			updated, cmd := m.helpSearch.Update(tea.PasteMsg{Content: clean})
+			m.helpSearch = updated
+			if m.helpSearch.Value() != before {
+				m.syncHelpMatches()
+			}
+			return m, cmd
+		}
+		return m.beginPaste(msg.Content)
+	case pasteReadyMsg:
+		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() || m.threadSwitcherVisible || m.codePickerVisible || m.helpVisible {
+			return m.cancelPendingPaste(), nil
+		}
+		return m.completePaste(msg), nil
+	case clipboardPasteLoadedMsg:
+		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() || m.threadSwitcherVisible || m.codePickerVisible || m.helpVisible {
+			return m, nil
+		}
+		if msg.Err != nil {
+			m.addDiagnostic("clipboard_paste_failed", "warning", "Could not read from the system clipboard.")
+			return m, nil
+		}
+		if strings.TrimSpace(msg.Text) == "" {
+			m.addDiagnostic("clipboard_paste_empty", "info", "Clipboard is empty.")
+			return m, nil
+		}
+		return m.beginPaste(msg.Text)
+	case clipboardCopyFinishedMsg:
+		if msg.Err != nil {
+			if msg.PaneID != "" {
+				m.clipboardWriteReady = false
+				m.addDiagnostic("clipboard_copy_failed", "warning", "Could not copy pane logs to the system clipboard.")
+			} else {
+				m.addDiagnostic("clipboard_copy_failed", "warning", "Could not write the current input to the system clipboard.")
+			}
+			return m, nil
+		}
+		if msg.PaneID != "" {
+			m.addAssistantMessage(fmt.Sprintf("Copied %d log lines from %s.", msg.LineCount, msg.PaneTitle))
+		} else if msg.Target != "" {
+			m.addAssistantMessage("Copied " + msg.Target + " to clipboard.")
+		} else {
+			m.addAssistantMessage("Copied current input to clipboard.")
 		}
 		return m, nil
 	case tea.KeyPressMsg:
+		if m.quitConfirmation {
+			return m.handleQuitConfirmationKey(msg)
+		}
+		if m.pendingAgentApproval != nil || m.pendingConfirm != nil {
+			return m.handleBlockingModalKey(msg)
+		}
+		if m.usage.IsOpen() {
+			return m.handleUsageKey(msg)
+		}
+		if m.codePickerVisible {
+			return m.handleCodePickerKey(msg)
+		}
+		if m.threadSwitcherVisible {
+			return m.handleThreadSwitcherKey(msg)
+		}
+		if isThreadSwitcherShortcut(msg) {
+			return m.openThreadSwitcher()
+		}
 		if keymap.Matches(msg, m.keymap.ContextualMenu) || keymap.Matches(msg, m.keymap.ContextFallback) || isContextMenuKey(msg) {
 			m.openContextMenu()
 			return m, nil
@@ -278,79 +736,131 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.helpVisible {
+			return m.handleHelpKey(msg)
+		}
 		if m.commandActive {
 			return m.handleCommandInput(msg)
 		}
-		if m.pendingAgentApproval != nil {
+		if m.interaction.Owner() == interaction.OwnerResponse {
+			// Global console bindings remain global even while the response owns
+			// navigation. Resolve them before adopting printable text as a draft.
+			if keymap.Matches(msg, m.keymap.Quit) {
+				if strings.TrimSpace(m.commandInput) != "" {
+					m.quitConfirmation = true
+					m.interaction.OpenModal(interaction.ModalQuitConfirmation)
+					m.refreshAssistantPrompt()
+					return m, nil
+				}
+				m.close()
+				return m, tea.Quit
+			}
+			if keymap.Matches(msg, m.keymap.Help) {
+				cmd := m.openHelp()
+				m.diagnosticsExpanded = false
+				return m, cmd
+			}
+			if keymap.Matches(msg, m.keymap.Diagnostics) {
+				m.toggleDiagnostics()
+				return m, nil
+			}
+			if msg.Text == "b" || msg.Keystroke() == "b" {
+				return m.openCodePicker()
+			}
+			if isCopyShortcut(msg) || keymap.Matches(msg, m.keymap.CopyLogs) {
+				payload := response.SanitizeTerminalText(strings.Join(m.assistantHistoryForView(), "\n\n"))
+				if strings.TrimSpace(payload) == "" {
+					m.addDiagnostic("response_copy_empty", "info", "There is no Agent response to copy.")
+					return m, nil
+				}
+				return m, writeClipboardCmd(payload)
+			}
+			switch {
+			case keymap.Matches(msg, m.keymap.Up):
+				m.scrollResponse(-1)
+				return m, nil
+			case keymap.Matches(msg, m.keymap.Down):
+				m.scrollResponse(1)
+				return m, nil
+			case keymap.Matches(msg, m.keymap.PageUp):
+				m.scrollResponse(-maxInt(1, m.height/4))
+				return m, nil
+			case keymap.Matches(msg, m.keymap.PageDown):
+				m.scrollResponse(maxInt(1, m.height/4))
+				return m, nil
+			case keymap.Matches(msg, m.keymap.Home):
+				m.gotoResponseTop()
+				return m, nil
+			case keymap.Matches(msg, m.keymap.End), keymap.Matches(msg, m.keymap.Follow):
+				m.gotoResponseBottom()
+				return m, nil
+			case keymap.Matches(msg, m.keymap.Escape):
+				m.setPrimaryFocus(interaction.FocusPanes)
+				return m, nil
+			}
 			if updated, ok := m.startCommandInput(msg); ok {
 				return updated, nil
 			}
-			if keymap.Matches(msg, m.keymap.Escape) {
-				approvalID := m.pendingAgentApproval.ID
-				m.pendingAgentApproval = nil
-				m.addAssistantMessage("Rejecting Operator Agent approval " + approvalID + ".")
-				return m, commands.RejectAgentApprovalCmd(m.ctx, m.client, approvalID, "Rejected from Relaybase TUI with Esc")
-			}
-			if keymap.Matches(msg, m.keymap.Enter) {
-				approval := *m.pendingAgentApproval
-				approvalID := approval.ID
-				m.pendingAgentApproval = nil
-				if approval.Status == "recovered_pending" {
-					m.addAssistantMessage("Reconfirming recovered Operator Agent approval " + approvalID + ".")
-					return m, commands.ApproveAgentApprovalCmd(m.ctx, m.client, approvalID, relaybaseclient.AgentApprovalResolutionRequest{
-						Reconfirm: true,
-						Resume:    true,
-					})
-				}
-				m.addAssistantMessage("Approving Operator Agent approval " + approvalID + ".")
-				return m, commands.ApproveAgentApprovalCmd(m.ctx, m.client, approvalID)
-			}
-			if keymap.Matches(msg, m.keymap.Slash) {
-				m.commandActive = true
-				m.commandInput = "/"
-				m.refreshAssistantPrompt()
-				return m, nil
-			}
+			// Response owns all remaining keys. In particular, Enter is inert
+			// here and must not fall through to pane focus.
 			return m, nil
 		}
-		if m.pendingConfirm != nil {
-			if updated, ok := m.startCommandInput(msg); ok {
-				return updated, nil
-			}
-			if keymap.Matches(msg, m.keymap.Escape) {
-				m.pendingConfirm = nil
-				m.addAssistantMessage("Confirmation cancelled.")
-				return m, nil
-			}
-			if keymap.Matches(msg, m.keymap.Enter) {
-				return m, m.executePendingConfirmation()
-			}
-			if keymap.Matches(msg, m.keymap.Slash) {
-				m.commandActive = true
-				m.commandInput = "/"
-				m.refreshAssistantPrompt()
-				return m, nil
-			}
+		if isPasteShortcut(msg) {
+			return m, readClipboardCmd()
+		}
+		if keymap.Matches(msg, m.keymap.Diagnostics) {
+			m.toggleDiagnostics()
 			return m, nil
 		}
 		if keymap.Matches(msg, m.keymap.Quit) {
+			if strings.TrimSpace(m.commandInput) != "" {
+				m.quitConfirmation = true
+				m.interaction.OpenModal(interaction.ModalQuitConfirmation)
+				m.refreshAssistantPrompt()
+				return m, nil
+			}
 			m.close()
 			return m, tea.Quit
 		}
 		if keymap.Matches(msg, m.keymap.Help) {
-			m.helpVisible = !m.helpVisible
-			m.resetBodyScroll()
-			return m, nil
+			cmd := m.openHelp()
+			m.diagnosticsExpanded = false
+			return m, cmd
 		}
 		if keymap.Matches(msg, m.keymap.Escape) {
-			if m.paneManager.Focused() {
+			if m.diagnosticsExpanded {
+				m.diagnosticsExpanded = false
+				m.resetBodyScroll()
+			} else if m.paneManager.Focused() {
 				m.paneManager.BlurFocus()
 				m.resetBodyScroll()
 			} else {
-				m.helpVisible = false
+				m.closeHelp()
 				m.resetBodyScroll()
 			}
 			return m, nil
+		}
+		if m.inventoryVisible() {
+			if keymap.Matches(msg, m.keymap.Up) {
+				m.appInventory.Move(-1)
+				m.followInventorySelection()
+				return m, nil
+			}
+			if keymap.Matches(msg, m.keymap.Down) {
+				m.appInventory.Move(1)
+				m.followInventorySelection()
+				return m, nil
+			}
+			if keymap.Matches(msg, m.keymap.Enter) {
+				cmd := m.requestSelectedInventoryStart()
+				return m, cmd
+			}
+		}
+		if m.handleBodyScrollKey(msg) {
+			return m, nil
+		}
+		if m.paneManager.Focused() && keymap.Matches(msg, m.keymap.CopyLogs) {
+			return m, m.copyPaneLogsCmd(m.paneManager.SelectedPaneID())
 		}
 		if keymap.Matches(msg, m.keymap.Enter) {
 			m.paneManager.FocusSelected()
@@ -362,8 +872,9 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if keymap.Matches(msg, m.keymap.Slash) {
-			m.commandActive = true
 			m.commandInput = "/"
+			m.setPrimaryFocus(interaction.FocusComposer)
+			m.syncCommandPalette()
 			m.refreshAssistantPrompt()
 			return m, nil
 		}
@@ -372,6 +883,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.paneManager.ScrollSelected(1)
 			} else {
 				m.paneManager.MoveSelection(0, -1)
+				m.followPaneSelection(-1)
 			}
 			return m, nil
 		}
@@ -380,6 +892,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.paneManager.ScrollSelected(-1)
 			} else {
 				m.paneManager.MoveSelection(0, 1)
+				m.followPaneSelection(1)
 			}
 			return m, nil
 		}
@@ -394,7 +907,13 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if keymap.Matches(msg, m.keymap.PageUp) {
 			if m.paneManager.Focused() {
 				m.paneManager.ScrollSelected(m.paneManager.Layout().PaneHeight)
-				if target := m.paneManager.OlderLogTarget(); target != nil {
+				paneID := m.paneManager.SelectedPaneID()
+				if m.paneManager.IsPaneAtOldestLogBoundary(paneID) {
+					target := m.paneManager.OlderLogTarget()
+					if target == nil || m.logFetchPending[paneID] == target.Before {
+						return m, nil
+					}
+					m.logFetchPending[paneID] = target.Before
 					return m, commands.FetchLogsCmd(m.ctx, m.client, *target)
 				}
 			} else {
@@ -432,6 +951,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		)
 		m.clearDiagnosticsByPrefix("daemon_bootstrap_")
 		m.paneManager.ApplyState(msg.State)
+		m.appInventory.ApplyState(msg.State)
 		if m.hasNoRegisteredApps() && !m.setupSession.Active() {
 			m.setupSession = setupwizard.NoApps(m.cfg.CurrentDirectory)
 		}
@@ -447,6 +967,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds := []tea.Cmd{
 			commands.FetchLogsBatchCmd(m.ctx, m.client, m.paneManager.RefreshLogTargets()),
+			commands.ListAppPackagesCmd(m.ctx, m.client),
 		}
 		if m.stream == nil || m.eventStatus != "connected" {
 			m.eventStatus = "connecting"
@@ -469,13 +990,83 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.addOrReplaceDiagnostic(daemonUnavailableDiagnosticCode, "error", m.daemonUnavailableMessage())
 		return m, m.scheduleDaemonRetryCmd()
 	case commands.LogsLoadedMsg:
+		delete(m.logFetchPending, msg.Target.PaneID)
 		m.paneManager.MergeSnapshot(msg.Target, msg.Snapshot)
 		return m, nil
 	case commands.LogsFailedMsg:
+		delete(m.logFetchPending, msg.Target.PaneID)
 		safeErr := safeLogErrorMessage(msg.Err)
 		m.paneManager.MarkLogFetchFailed(msg.Target, safeErr)
 		m.addDiagnostic("pane_logs_unavailable", "warning", fmt.Sprintf("Could not fetch logs for %s: %s", msg.Target.AppID, safeErr))
 		return m, nil
+	case commands.AppPackagesLoadedMsg:
+		m.appPackages = append([]relaybaseclient.AppPackageDefinition(nil), msg.Packages...)
+		m.clearDiagnostics("app_packages_unavailable")
+		if m.packageListRequested {
+			m.packageListRequested = false
+			m.addAssistantMessage(appPackageListMessage(m.appPackages, m.state))
+		}
+		return m, nil
+	case commands.AppPackagesFailedMsg:
+		if m.packageListRequested {
+			m.packageListRequested = false
+			m.addAssistantMessage("Could not list app packages: " + safePackageErrorMessage(msg.Err))
+		} else {
+			m.addOrReplaceDiagnostic("app_packages_unavailable", "warning", "Saved app packages are temporarily unavailable from the daemon.")
+		}
+		return m, nil
+	case commands.AppPackageCreatedMsg:
+		if msg.Package != nil {
+			m.upsertAppPackage(*msg.Package)
+			m.addAssistantMessage(fmt.Sprintf("Created package %s with %d app(s).", msg.Package.Name, len(msg.Package.MemberAppIDs)))
+		}
+		return m, nil
+	case commands.AppPackageCreateFailedMsg:
+		m.addAssistantMessage("Could not create app package: " + safePackageErrorMessage(msg.Err))
+		return m, nil
+	case commands.AppPackageDeletedMsg:
+		if msg.Package != nil {
+			m.removeAppPackage(msg.Package.ID)
+			m.addAssistantMessage("Deleted package " + msg.Package.Name + ". Running apps were not stopped.")
+		}
+		return m, nil
+	case commands.AppPackageDeleteFailedMsg:
+		m.addAssistantMessage("Could not delete app package: " + safePackageErrorMessage(msg.Err))
+		return m, nil
+	case commands.AppPackageRunStartedMsg:
+		if msg.Run == nil {
+			return m, nil
+		}
+		m.activePackageRun = msg.Run
+		m.packageRunProgress = ""
+		m.addAssistantMessage(packageRunAcceptedMessage(*msg.Run, msg.Action))
+		if msg.Run.Terminal() {
+			return m, m.finishPackageRun(*msg.Run)
+		}
+		return m, m.beginPackageRunPolling(msg.Run.ID)
+	case commands.AppPackageRunStartFailedMsg:
+		m.addAssistantMessage(fmt.Sprintf("Package %s failed: %s", msg.Action, safePackageErrorMessage(msg.Err)))
+		return m, nil
+	case commands.AppPackageRunLoadedMsg:
+		if msg.Run == nil {
+			return m, nil
+		}
+		if m.packageRunReported[msg.Run.ID] {
+			return m, nil
+		}
+		m.activePackageRun = msg.Run
+		if msg.Run.Terminal() {
+			return m, m.finishPackageRun(*msg.Run)
+		}
+		m.packageRunPollFailures[msg.Run.ID] = 0
+		m.clearDiagnostics("app_package_run_poll_retry", "app_package_run_poll_failed")
+		if progress := packageRunProgressMessage(*msg.Run); progress != m.packageRunProgress {
+			m.packageRunProgress = progress
+			m.addAssistantMessage(progress)
+		}
+		return m, m.continuePackageRunPolling(msg.Run.ID, 0)
+	case commands.AppPackageRunLoadFailedMsg:
+		return m, m.recoverPackageRunPoll(msg.RunID, msg.Attempt, msg.Err)
 	case commands.PreferencesSavedMsg:
 		return m, nil
 	case commands.PreferencesSaveFailedMsg:
@@ -629,35 +1220,79 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearAgentDiagnostics()
 		m.addOrReplaceDiagnostic(agentDiagnosticsUnavailableCode, "warning", "Could not read Agent Gateway diagnostics from the connected daemon.")
 		return m, nil
+	case commands.AgentUsageLoadedMsg:
+		if msg.Generation == 0 || msg.Generation != m.usageRequestGeneration || !m.usage.IsOpen() {
+			return m, nil
+		}
+		m.usage.Loaded(msg.Usage)
+		return m, nil
+	case commands.AgentUsageFailedMsg:
+		if msg.Generation == 0 || msg.Generation != m.usageRequestGeneration || !m.usage.IsOpen() {
+			return m, nil
+		}
+		m.usage.Failed(msg.Err)
+		return m, nil
 	case commands.AgentSessionCreatedMsg:
 		m.closeAgentStream()
 		m.agentSession = msg.Session
+		m.syncComposerHistoryScope()
 		m.agentStatus = "session"
 		if msg.Session != nil {
+			m.restoreThreadResponse(msg.Session.ID)
+			m.restoreThreadDraft(msg.Session.ID)
 			m.agentSessions = upsertAgentSession(m.agentSessions, *msg.Session)
 			m.addAssistantMessage("New Operator Agent thread active: " + agentSessionLabel(*msg.Session) + ".")
 		}
 		pending := m.agentPendingInput
+		pendingGeneration := m.agentPendingGeneration
 		m.agentPendingInput = ""
+		m.agentPendingGeneration = 0
 		cmds := []tea.Cmd{}
 		if msg.Session != nil && msg.Session.ID != "" {
-			cmds = append(cmds, commands.ConnectAgentEventsCmd(m.ctx, m.client, msg.Session.ID))
+			cmds = append(cmds, m.connectAgentEventsCmd(msg.Session.ID))
 			if pending != "" {
+				if pendingGeneration == 0 {
+					pendingGeneration = m.nextAgentMessageGeneration()
+				}
+				m.bindPendingSubmission(msg.Session.ID, pendingGeneration)
 				cmds = append(cmds, commands.SendAgentMessageCmd(m.ctx, m.client, msg.Session.ID, relaybaseclient.AgentMessageRequest{
 					Content: pending,
 					Context: m.agentContext(),
-				}))
+				}, pendingGeneration))
 			}
+		} else if pending != "" {
+			m.restorePendingSubmissionDraft()
 		}
 		return m, tea.Batch(cmds...)
 	case commands.AgentSessionCreateFailedMsg:
 		m.agentPendingInput = ""
+		m.agentPendingGeneration = 0
+		m.authorizedProjectRoots = nil
 		m.agentStatus = "unavailable"
+		m.restorePendingSubmissionDraft()
 		m.addDiagnostic("agent_session_create_failed", "error", fmt.Sprintf("Could not create Operator Agent session: %v", msg.Err))
 		m.addAssistantMessage("Operator Agent session could not be created: " + fmt.Sprint(msg.Err))
 		return m, nil
 	case commands.AgentActiveSessionLoadedMsg:
+		previousSessionID := m.agentSessionID()
+		nextSessionID := ""
+		if msg.Session != nil {
+			nextSessionID = strings.TrimSpace(msg.Session.ID)
+		}
+		if previousSessionID != nextSessionID && previousSessionID != "" {
+			m.captureThreadDraft()
+			m.captureThreadResponse()
+		}
 		m.agentSession = msg.Session
+		if nextSessionID == "" && previousSessionID != "" {
+			m.advanceLocalThreadIdentity()
+		} else {
+			m.syncComposerHistoryScope()
+		}
+		if previousSessionID != nextSessionID {
+			m.restoreThreadResponse(nextSessionID)
+			m.restoreThreadDraft(nextSessionID)
+		}
 		if msg.Session == nil || msg.Session.ID == "" {
 			m.agentStatus = "ready_no_thread"
 			return m, nil
@@ -665,7 +1300,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.agentStatus = "session"
 		m.agentSessions = upsertAgentSession(m.agentSessions, *msg.Session)
 		m.addAssistantMessage("Active Operator Agent thread: " + agentSessionLabel(*msg.Session) + ".")
-		return m, commands.ConnectAgentEventsCmd(m.ctx, m.client, msg.Session.ID)
+		return m, m.connectAgentEventsCmd(msg.Session.ID)
 	case commands.AgentActiveSessionFailedMsg:
 		if m.connectionStatus == "connected" {
 			m.addDiagnostic("agent_active_thread_unavailable", "warning", fmt.Sprintf("Could not read active Operator Agent thread: %v", msg.Err))
@@ -673,25 +1308,38 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case commands.AgentSessionsListedMsg:
 		m.agentSessions = append([]relaybaseclient.AgentSession(nil), msg.Sessions...)
-		m.addAssistantMessage(agentSessionListMessage(msg.Sessions, m.agentSessionID()))
+		if m.threadSwitcherVisible {
+			m.threadSwitcherLoading = false
+			m.syncThreadSwitcherSelection()
+		} else {
+			m.addAssistantMessage(agentSessionListMessage(msg.Sessions, m.agentSessionID()))
+		}
 		return m, nil
 	case commands.AgentSessionsListFailedMsg:
+		m.threadSwitcherLoading = false
 		m.addDiagnostic("agent_thread_list_failed", "warning", fmt.Sprintf("Could not list Operator Agent threads: %v", msg.Err))
 		m.addAssistantMessage("Could not list Operator Agent threads: " + fmt.Sprint(msg.Err))
 		return m, nil
 	case commands.AgentSessionActivatedMsg:
+		m.threadSwitcherLoading = false
+		m.closeThreadSwitcher()
 		m.closeAgentStream()
 		m.agentSession = msg.Session
+		m.syncComposerHistoryScope()
 		if msg.Session != nil {
+			m.restoreThreadResponse(msg.Session.ID)
+			m.restoreThreadDraft(msg.Session.ID)
 			m.agentSessions = upsertAgentSession(m.agentSessions, *msg.Session)
 			m.addAssistantMessage("Switched Operator Agent thread to " + agentSessionLabel(*msg.Session) + ".")
 			m.agentStatus = "session"
-			return m, commands.ConnectAgentEventsCmd(m.ctx, m.client, msg.Session.ID)
+			return m, m.connectAgentEventsCmd(msg.Session.ID)
 		}
 		m.agentStatus = "ready_no_thread"
+		m.restoreThreadResponse("")
 		m.addAssistantMessage("No Operator Agent thread is active.")
 		return m, nil
 	case commands.AgentSessionActivateFailedMsg:
+		m.threadSwitcherLoading = false
 		m.addDiagnostic("agent_thread_switch_failed", "warning", fmt.Sprintf("Could not switch Operator Agent thread %s: %v", msg.SessionID, msg.Err))
 		m.addAssistantMessage("Could not switch Operator Agent thread " + msg.SessionID + ": " + fmt.Sprint(msg.Err))
 		return m, nil
@@ -714,10 +1362,15 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if clearedID == "" || clearedID == m.agentSessionID() {
 			m.closeAgentStream()
 			m.agentSession = nil
+			m.advanceLocalThreadIdentity()
 		}
 		m.agentSessions = removeAgentSession(m.agentSessions, clearedID)
+		delete(m.threadDrafts, clearedID)
+		delete(m.threadResponses, clearedID)
 		m.assistantHistory = nil
+		m.assistantTimeline = nil
 		m.naturalHistory = nil
+		m.agentDelta = ""
 		m.lastAssistantLine = ""
 		m.agentStatus = "ready_no_thread"
 		m.addAssistantMessage("Operator Agent thread cleared" + optionalThreadSuffix(clearedID) + ".")
@@ -741,22 +1394,57 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.addAssistantMessage("Could not preview Operator Agent thread context " + msg.SessionID + ": " + fmt.Sprint(msg.Err))
 		return m, nil
 	case commands.AgentEventsConnectedMsg:
+		if !m.agentEventLifecycleCurrent(msg.SessionID, msg.Generation) {
+			if msg.Stream != nil {
+				_ = msg.Stream.Close()
+			}
+			return m, nil
+		}
 		m.agentStream = msg.Stream
+		m.agentInitialReplay = true
 		m.agentStatus = "streaming"
 		m.clearDiagnostics(agentEventDisconnectedCode)
-		return m, commands.NextAgentEventCmd(m.ctx, msg.Stream)
+		return m, commands.NextAgentEventCmd(m.ctx, msg.Stream, msg.SessionID, msg.Generation)
 	case commands.AgentEventMsg:
+		if !m.agentEventLifecycleCurrent(msg.SessionID, msg.Generation) ||
+			(msg.Event.SessionID != "" && msg.Event.SessionID != msg.SessionID) {
+			// A closed stream can still deliver one queued replay event. Do not
+			// let that stale thread mutate the active response surface.
+			if msg.Stream != nil {
+				_ = msg.Stream.Close()
+			}
+			return m, nil
+		}
 		m.agentStream = msg.Stream
+		if msg.Event.Type != "stream.reconnecting" {
+			m.agentStatus = "streaming"
+			m.clearDiagnostics(agentEventDisconnectedCode)
+		}
 		m.applyAgentRunEvent(msg.Event)
-		return m, commands.NextAgentEventCmd(m.ctx, msg.Stream)
+		return m, commands.NextAgentEventCmd(m.ctx, msg.Stream, msg.SessionID, msg.Generation)
 	case commands.AgentEventsDisconnectedMsg:
+		if !m.agentEventLifecycleCurrent(msg.SessionID, msg.Generation) {
+			return m, nil
+		}
 		m.agentStream = nil
+		m.agentStreamSessionID = ""
+		m.agentStreamGeneration++
+		m.agentInitialReplay = false
 		if m.agentSession != nil {
 			m.agentStatus = "disconnected"
 			m.addDiagnostic(agentEventDisconnectedCode, "warning", fmt.Sprintf("Operator Agent event stream disconnected: %v", msg.Err))
 		}
 		return m, nil
 	case commands.AgentMessageSentMsg:
+		completionSessionID := strings.TrimSpace(msg.SessionID)
+		if completionSessionID == "" && msg.Result != nil {
+			completionSessionID = strings.TrimSpace(msg.Result.Run.SessionID)
+		}
+		if !m.agentMessageCompletionCurrent(completionSessionID, msg.Generation) {
+			return m, nil
+		}
+		m.authorizedProjectRoots = nil
+		m.pendingSubmissionDraft = nil
 		if msg.Result != nil {
 			m.agentStatus = "idle"
 			for _, diagnostic := range msg.Result.Diagnostics {
@@ -770,7 +1458,12 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case commands.AgentMessageSendFailedMsg:
+		if !m.agentMessageCompletionCurrent(msg.SessionID, msg.Generation) {
+			return m, nil
+		}
+		m.authorizedProjectRoots = nil
 		m.agentStatus = "failed"
+		m.restorePendingSubmissionDraft()
 		m.addDiagnostic("agent_message_failed", "error", fmt.Sprintf("Operator Agent message failed: %v", msg.Err))
 		m.addAssistantMessage("Operator Agent message failed: " + fmt.Sprint(msg.Err))
 		return m, nil
@@ -826,6 +1519,96 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m RootModel) handleBlockingModalKey(msg tea.KeyPressMsg) (RootModel, tea.Cmd) {
+	if m.pendingAgentApproval != nil {
+		m.interaction.OpenModal(interaction.ModalAgentApproval)
+		if m.handleBodyScrollKey(msg) {
+			return m, nil
+		}
+		if keymap.Matches(msg, m.keymap.Escape) {
+			approvalID := m.pendingAgentApproval.ID
+			m.pendingAgentApproval = nil
+			m.interaction.CloseModal()
+			m.resetBodyScroll()
+			m.addAssistantMessage("Rejecting Operator Agent approval " + approvalID + ".")
+			return m, commands.RejectAgentApprovalCmd(m.ctx, m.client, approvalID, "Rejected from Relaybase TUI with Esc")
+		}
+		if keymap.Matches(msg, m.keymap.Enter) {
+			approval := *m.pendingAgentApproval
+			m.pendingAgentApproval = nil
+			m.interaction.CloseModal()
+			m.resetBodyScroll()
+			if approval.Status == "recovered_pending" {
+				m.addAssistantMessage("Reconfirming recovered Operator Agent approval " + approval.ID + ".")
+				return m, commands.ApproveAgentApprovalCmd(m.ctx, m.client, approval.ID, relaybaseclient.AgentApprovalResolutionRequest{Reconfirm: true, Resume: true})
+			}
+			m.addAssistantMessage("Approving Operator Agent approval " + approval.ID + ".")
+			return m, commands.ApproveAgentApprovalCmd(m.ctx, m.client, approval.ID)
+		}
+		return m, nil
+	}
+	if m.pendingConfirm == nil {
+		return m, nil
+	}
+	m.interaction.OpenModal(interaction.ModalConfirmation)
+	if m.handleBodyScrollKey(msg) {
+		return m, nil
+	}
+	if keymap.Matches(msg, m.keymap.Escape) {
+		m.pendingConfirm = nil
+		m.interaction.CloseModal()
+		m.resetBodyScroll()
+		m.addAssistantMessage("Confirmation cancelled.")
+		return m, nil
+	}
+	if keymap.Matches(msg, m.keymap.Enter) {
+		m.interaction.CloseModal()
+		m.resetBodyScroll()
+		return m, m.executePendingConfirmation()
+	}
+	return m, nil
+}
+
+func (m RootModel) handleUsageKey(msg tea.KeyPressMsg) (RootModel, tea.Cmd) {
+	if keymap.Matches(msg, m.keymap.Escape) {
+		m.usage.Close()
+		m.invalidateUsageRequest()
+		m.interaction.CloseModal()
+		return m, nil
+	}
+	if strings.EqualFold(msg.Text, "r") || strings.EqualFold(msg.Keystroke(), "r") {
+		m.usage.Loading()
+		generation := m.nextUsageRequestGeneration()
+		return m, commands.FetchAgentUsageCmd(m.ctx, m.client, generation)
+	}
+	return m, nil
+}
+
+func (m *RootModel) nextUsageRequestGeneration() uint64 {
+	m.usageRequestGeneration = incrementGeneration(m.usageRequestGeneration)
+	return m.usageRequestGeneration
+}
+
+func (m *RootModel) invalidateUsageRequest() {
+	m.usageRequestGeneration = incrementGeneration(m.usageRequestGeneration)
+}
+
+func (m RootModel) handleQuitConfirmationKey(msg tea.KeyPressMsg) (RootModel, tea.Cmd) {
+	if keymap.Matches(msg, m.keymap.Escape) {
+		m.quitConfirmation = false
+		m.interaction.CloseModal()
+		m.refreshAssistantPrompt()
+		return m, nil
+	}
+	if keymap.Matches(msg, m.keymap.Enter) {
+		m.quitConfirmation = false
+		m.interaction.CloseModal()
+		m.close()
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
 func (m RootModel) View() tea.View {
 	view := tea.NewView(m.Render())
 	view.AltScreen = true
@@ -836,31 +1619,72 @@ func (m RootModel) View() tea.View {
 }
 
 func (m RootModel) Render() string {
-	data := views.ShellData{
-		Width:            m.width,
-		Height:           m.height,
-		BodyScrollOffset: m.bodyScrollOffset,
-		ConnectionStatus: m.connectionStatus,
-		EventStatus:      m.eventStatus,
-		EventCount:       m.eventCount,
-		AgentThreadLabel: m.agentThreadStatusLabel(),
-		AppCount:         len(m.apps()),
-		GroupCount:       len(m.groups()),
-		Diagnostics:      m.viewDiagnostics(),
-		ShowHelp:         m.helpVisible,
-		KeyMap:           m.keymap,
-		AssistantPrompt:  m.assistantPrompt,
-		AssistantHistory: m.assistantHistoryForView(),
-		SetupPanel:       m.setupPanelForView(),
-		ContextMenu:      m.contextMenuSnapshot(),
-		Confirmation:     m.confirmationForView(),
-		Panes:            m.paneManager.CurrentPagePanes(),
-		FocusedPane:      m.paneManager.FocusedPane(),
-		PaneLayout:       m.paneManager.Layout(),
-		Page:             m.paneManager.Page(),
-		PageCount:        m.paneManager.PageCount(),
+	return views.RenderShell(m.styles, m.shellData())
+}
+
+func (m RootModel) shellData() views.ShellData {
+	composerView := m.composer
+	if composerView.Value() != m.commandInput {
+		composerView.SetValue(m.commandInput)
 	}
-	return views.RenderShell(m.styles, data)
+	composerView.SetWidth(maxInt(8, m.width-4))
+	if m.commandActive {
+		_ = composerView.Focus()
+	}
+	responseEntries := m.assistantHistoryForView()
+	responseSource := strings.Join(responseEntries, "\n\n")
+	data := views.ShellData{
+		OperatorConsole:     true,
+		Width:               m.width,
+		Height:              m.height,
+		BodyScrollOffset:    m.bodyScrollOffset,
+		ConnectionStatus:    m.connectionStatus,
+		EventStatus:         m.eventStatus,
+		EventCount:          m.eventCount,
+		AgentStatus:         m.agentStatus,
+		AgentThreadLabel:    m.agentThreadStatusLabel(),
+		StateKnown:          m.state != nil,
+		AppCount:            m.registeredAppCount(),
+		ActiveAppCount:      m.activeAppCount(),
+		RegisteredAppCount:  m.registeredAppCount(),
+		GroupCount:          len(m.groups()),
+		Diagnostics:         m.viewDiagnostics(),
+		DiagnosticsOpen:     m.diagnosticsExpanded,
+		ShowHelp:            m.helpVisible,
+		Help:                m.helpDataForView(),
+		Usage:               m.usage.Snapshot(),
+		ThreadSwitcher:      m.threadSwitcherDataForView(),
+		CodePicker:          m.codePickerDataForView(),
+		KeyMap:              m.keymap,
+		AssistantPrompt:     m.assistantPrompt,
+		AssistantHistory:    m.assistantHistoryForView(),
+		SetupPanel:          m.setupPanelForView(),
+		ContextMenu:         m.contextMenuSnapshot(),
+		Confirmation:        m.confirmationForView(),
+		Panes:               m.paneManager.CurrentPagePanes(),
+		Inventory:           m.appInventory.Items(),
+		FocusedPane:         m.paneManager.FocusedPane(),
+		PaneLayout:          m.paneManager.Layout(),
+		Page:                m.paneManager.Page(),
+		PageCount:           m.paneManager.PageCount(),
+		ClipboardWriteReady: m.clipboardWriteReady,
+		CommandPalette:      m.commandPaletteDataForView(),
+		ComposerView:        composerView.View(),
+		ComposerRows:        composerView.Rows(),
+		ComposerPasting:     m.paste != nil,
+		ResponseSource:      responseSource,
+		ResponseState:       m.agentStatus,
+		ResponseFollow:      m.responseFollow,
+		ResponseNewOutput:   m.responseNewOutput,
+		ResponseOffset:      m.responseOffset,
+		PrimaryFocus:        string(m.interaction.Focus),
+	}
+	if data.ResponseFollow {
+		data.ResponseOffset = views.ResponseBottomOffset(data)
+	} else {
+		data.ResponseOffset = minInt(maxInt(0, data.ResponseOffset), views.ResponseScrollMax(data))
+	}
+	return data
 }
 
 func (m RootModel) Diagnostics() []Diagnostic {
@@ -991,11 +1815,26 @@ func (m *RootModel) addAssistantMessage(message string) {
 		return
 	}
 	m.assistantHistory = append(m.assistantHistory, message)
+	m.assistantTimeline = append(m.assistantTimeline, message)
+	if !m.responseFollow {
+		m.responseNewOutput++
+	}
 	m.lastAssistantLine = message
 	m.refreshAssistantPrompt()
 }
 
 func (m *RootModel) refreshAssistantPrompt() {
+	// Composer DynamicHeight can change after typing, paste, history adoption,
+	// and thread restoration without a WindowSizeMsg. Every prompt refresh is
+	// therefore also a cheap synchronization point for pane projection.
+	defer m.syncOperatorLayout()
+	if m.pendingAgentApproval != nil && m.interaction.Modal == interaction.ModalNone {
+		m.resetBodyScroll()
+		m.interaction.OpenModal(interaction.ModalAgentApproval)
+	} else if m.pendingConfirm != nil && m.interaction.Modal == interaction.ModalNone {
+		m.resetBodyScroll()
+		m.interaction.OpenModal(interaction.ModalConfirmation)
+	}
 	if m.commandActive {
 		m.assistantPrompt = m.commandInput
 		return
@@ -1020,55 +1859,282 @@ func (m *RootModel) refreshAssistantPrompt() {
 }
 
 func (m RootModel) handleCommandInput(msg tea.KeyPressMsg) (RootModel, tea.Cmd) {
+	m.syncComposer()
+	if m.paste != nil {
+		if keymap.Matches(msg, m.keymap.Escape) {
+			return m.cancelPendingPaste(), nil
+		}
+		return m, nil
+	}
+	if isPasteShortcut(msg) {
+		return m, readClipboardCmd()
+	}
+	if isCopyShortcut(msg) {
+		payload := m.composer.SelectedText()
+		if payload == "" {
+			payload = m.composer.Value()
+		}
+		if strings.TrimSpace(payload) == "" {
+			m.addDiagnostic("clipboard_copy_empty", "info", "There is no current input to copy.")
+			return m, nil
+		}
+		return m, writeClipboardCmd(payload)
+	}
+	if m.commandPaletteVisible() {
+		switch {
+		case keymap.Matches(msg, m.keymap.Tab):
+			m.completeCommandPalette()
+			return m, nil
+		case keymap.Matches(msg, m.keymap.Up):
+			m.commandPalette.Move(-1)
+			return m, nil
+		case keymap.Matches(msg, m.keymap.Down):
+			m.commandPalette.Move(1)
+			return m, nil
+		case keymap.Matches(msg, m.keymap.PageUp):
+			m.commandPalette.Page(-1)
+			return m, nil
+		case keymap.Matches(msg, m.keymap.PageDown):
+			m.commandPalette.Page(1)
+			return m, nil
+		case keymap.Matches(msg, m.keymap.Home):
+			m.commandPalette.Home()
+			return m, nil
+		case keymap.Matches(msg, m.keymap.End):
+			m.commandPalette.End()
+			return m, nil
+		}
+	}
+	if keymap.Matches(msg, m.keymap.Up) && m.composer.AtVisualTop() {
+		if m.composer.PreviousHistory() {
+			m.commandInput = m.composer.Value()
+			m.syncCommandPalette()
+			m.refreshAssistantPrompt()
+		}
+		return m, nil
+	}
+	if keymap.Matches(msg, m.keymap.Down) && m.composer.AtVisualBottom() {
+		if m.composer.NextHistory() {
+			m.commandInput = m.composer.Value()
+			m.syncCommandPalette()
+			m.refreshAssistantPrompt()
+		}
+		return m, nil
+	}
 	if keymap.Matches(msg, m.keymap.Escape) {
-		m.commandActive = false
-		m.commandInput = ""
+		m.setPrimaryFocus(interaction.FocusPanes)
+		m.syncCommandPalette()
 		m.refreshAssistantPrompt()
 		return m, nil
 	}
 	if keymap.Matches(msg, m.keymap.Enter) {
+		if m.shouldCompleteCommandOnEnter() {
+			m.completeCommandPalette()
+			return m, nil
+		}
 		input := m.commandInput
+		m.pendingSubmissionDraft = &submissionDraftState{Snapshot: m.composer.Snapshot(), Focus: m.interaction.Focus}
 		m.commandActive = false
 		m.commandInput = ""
+		m.composer.Clear()
+		m.setPrimaryFocus(interaction.FocusPanes)
+		m.syncCommandPalette()
 		m.refreshAssistantPrompt()
-		return m.submitAssistantInput(input)
+		updated, command := m.submitAssistantInput(input)
+		if updated.pendingSubmissionDraft == nil {
+			return updated, command
+		}
+		updated.composerHistoryID++
+		historyScope := updated.composerHistoryScopeID()
+		updated.composer.AddHistory(composer.HistoryEntry{
+			ID:        fmt.Sprintf("%s:%d", historyScope, updated.composerHistoryID),
+			Value:     input,
+			Source:    "tui",
+			ThreadID:  historyScope,
+			CreatedAt: updated.now(),
+		})
+		if !updated.pendingSubmissionDraft.AwaitingAgentAcceptance || command == nil {
+			updated.pendingSubmissionDraft = nil
+		}
+		return updated, command
 	}
 	if isClearInput(msg) {
-		m.commandActive = false
-		m.commandInput = ""
+		m.composer.DeleteBeforeCursor()
+		m.commandInput = m.composer.Value()
+		if m.commandInput == "" {
+			m.setPrimaryFocus(interaction.FocusPanes)
+		}
+		m.syncCommandPalette()
 		m.refreshAssistantPrompt()
 		return m, nil
 	}
 	if isBackspace(msg) {
-		runes := []rune(m.commandInput)
-		if len(runes) > 0 {
-			m.commandInput = string(runes[:len(runes)-1])
-		}
+		m.composer.Backspace()
+		m.commandInput = m.composer.Value()
 		if m.commandInput == "" {
-			m.commandActive = false
+			m.setPrimaryFocus(interaction.FocusPanes)
 		}
+		m.syncCommandPalette()
 		m.refreshAssistantPrompt()
 		return m, nil
 	}
 	if isDelete(msg) {
+		m.composer.DeleteForward()
+		m.commandInput = m.composer.Value()
+		m.syncCommandPalette()
+		m.refreshAssistantPrompt()
 		return m, nil
 	}
-	if msg.Text != "" {
-		m.commandInput += normalizeCommandInputText(msg.Text)
-		m.refreshAssistantPrompt()
+	command := m.composer.Update(msg)
+	m.commandInput = m.composer.Value()
+	if m.commandInput == "" && isClearInput(msg) {
+		m.commandActive = false
 	}
-	return m, nil
+	m.syncCommandPalette()
+	m.refreshAssistantPrompt()
+	return m, command
+}
+
+func (m RootModel) beginPaste(text string) (RootModel, tea.Cmd) {
+	if text == "" {
+		return m, nil
+	}
+	m.syncComposer()
+	m.pasteGeneration++
+	m.paste = &pendingPaste{Generation: m.pasteGeneration, Snapshot: m.composer.Snapshot(), Active: m.commandActive, Focus: m.interaction.Focus}
+	m.setPrimaryFocus(interaction.FocusComposer)
+	m.refreshAssistantPrompt()
+	return m, normalizePasteCmd(m.pasteGeneration, text)
+}
+
+func (m RootModel) completePaste(msg pasteReadyMsg) RootModel {
+	if m.paste == nil || m.paste.Generation != msg.Generation {
+		return m
+	}
+	pending := *m.paste
+	m.paste = nil
+	if err := m.composer.Paste(msg.Text); err != nil {
+		m.composer.Restore(pending.Snapshot)
+		m.commandInput = pending.Snapshot.Value
+		m.commandActive = pending.Active
+		if pending.Active {
+			m.setPrimaryFocus(interaction.FocusComposer)
+		} else {
+			m.setPrimaryFocus(valueOrFocus(pending.Focus, interaction.FocusPanes))
+		}
+		m.addDiagnostic("composer_paste_rejected", "warning", fmt.Sprintf("Paste of %d bytes and %d lines exceeds the composer limit; the existing draft was preserved.", msg.Bytes, msg.Lines))
+		m.syncCommandPalette()
+		m.refreshAssistantPrompt()
+		return m
+	}
+	m.commandInput = m.composer.Value()
+	m.setPrimaryFocus(interaction.FocusComposer)
+	m.syncCommandPalette()
+	m.refreshAssistantPrompt()
+	return m
+}
+
+func (m RootModel) cancelPendingPaste() RootModel {
+	if m.paste == nil {
+		return m
+	}
+	pending := *m.paste
+	m.paste = nil
+	m.pasteGeneration++
+	m.composer.Restore(pending.Snapshot)
+	m.commandInput = pending.Snapshot.Value
+	m.commandActive = pending.Active
+	if pending.Active {
+		m.setPrimaryFocus(interaction.FocusComposer)
+	} else {
+		m.setPrimaryFocus(valueOrFocus(pending.Focus, interaction.FocusPanes))
+	}
+	m.syncCommandPalette()
+	m.refreshAssistantPrompt()
+	return m
+}
+
+func valueOrFocus(value interaction.PrimaryFocus, fallback interaction.PrimaryFocus) interaction.PrimaryFocus {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func normalizePasteCmd(generation uint64, text string) tea.Cmd {
+	return func() tea.Msg {
+		clean := composer.SanitizePaste(text)
+		lines := 0
+		if clean != "" {
+			lines = strings.Count(clean, "\n") + 1
+		}
+		return pasteReadyMsg{Generation: generation, Text: clean, Bytes: len([]byte(clean)), Lines: lines}
+	}
 }
 
 func (m RootModel) startCommandInput(msg tea.KeyPressMsg) (RootModel, bool) {
-	text := normalizeCommandInputText(msg.Text)
+	if isPasteShortcut(msg) || isCopyShortcut(msg) {
+		return m, false
+	}
+	text := msg.Text
 	if text == "" {
 		return m, false
 	}
-	m.commandActive = true
-	m.commandInput = text
+	m.syncComposer()
+	m.composer.Insert(text)
+	m.commandInput = m.composer.Value()
+	m.setPrimaryFocus(interaction.FocusComposer)
+	m.syncCommandPalette()
 	m.refreshAssistantPrompt()
 	return m, true
+}
+
+func (m *RootModel) syncComposer() {
+	if m.composer.Value() != m.commandInput {
+		m.composer.SetValue(m.commandInput)
+	}
+	if m.commandActive && !m.composer.Focused() {
+		_ = m.composer.Focus()
+	}
+}
+
+func (m *RootModel) setPrimaryFocus(focus interaction.PrimaryFocus) {
+	m.interaction.SetFocus(focus)
+	if m.interaction.Focus != focus {
+		return
+	}
+	if focus == interaction.FocusComposer {
+		m.commandActive = true
+		m.syncComposer()
+		_ = m.composer.Focus()
+	} else {
+		m.commandActive = false
+		m.composer.Blur()
+	}
+	m.refreshAssistantPrompt()
+}
+
+func (m *RootModel) restorePendingSubmissionDraft() {
+	if m.pendingSubmissionDraft == nil {
+		return
+	}
+	pending := *m.pendingSubmissionDraft
+	m.pendingSubmissionDraft = nil
+	// Never overwrite text the operator typed after an asynchronous send began.
+	// The attempted value remains in scoped history in that case.
+	if m.commandInput != "" {
+		return
+	}
+	m.composer.Restore(pending.Snapshot)
+	m.commandInput = pending.Snapshot.Value
+	m.setPrimaryFocus(interaction.FocusComposer)
+	m.syncCommandPalette()
+	m.refreshAssistantPrompt()
+}
+
+func (m *RootModel) syncOperatorLayout() {
+	metrics := layout.Compute(m.width, m.height, m.composer.Rows())
+	m.paneManager.Resize(metrics.Panes.Width, metrics.Panes.Height)
 }
 
 func (m RootModel) submitAssistantInput(input string) (RootModel, tea.Cmd) {
@@ -1117,18 +2183,28 @@ func (m RootModel) submitFolderAgentInput(parsed assistant.ParsedInput) (RootMod
 	if m.connectionStatus == "offline" {
 		message := "Relaybase daemon is unavailable. Start it with: " + m.relaybaseServeCommand() + ". Then retry this message or use Slash fallback: " + parsed.SuggestedSlash + "."
 		m.recordAssistantInteraction(assistant.ResponseBlocked, parsed.Raw, message)
+		m.restorePendingSubmissionDraft()
 		m.refreshAssistantPrompt()
 		return m, nil
 	}
 	if m.agentConfig == nil {
 		message := "Agent Gateway config is unavailable, so folder setup cannot use the Operator Agent yet. Start or retry the daemon with: " + m.relaybaseServeCommand() + ". Slash fallback: " + parsed.SuggestedSlash + "."
 		m.recordAssistantInteraction(assistant.ResponseBlocked, parsed.Raw, message)
+		m.restorePendingSubmissionDraft()
 		m.refreshAssistantPrompt()
 		return m, nil
 	}
 	if !m.agentConfig.Enabled {
 		message := "Operator Agent is disabled for natural-language folder setup. Enable it in daemon config for model-backed setup. Slash fallback: " + parsed.SuggestedSlash + ". Daemon start command if needed: " + m.relaybaseServeCommand() + "."
 		m.recordAssistantInteraction(assistant.ResponseBlocked, parsed.Raw, message)
+		m.restorePendingSubmissionDraft()
+		m.refreshAssistantPrompt()
+		return m, nil
+	}
+	if !agentGatewayConfigured(m.agentConfig) {
+		message := "Operator Agent is not fully configured for model-backed folder setup. Complete the daemon Agent configuration, then retry. Deterministic Slash fallback: " + parsed.SuggestedSlash + "."
+		m.recordAssistantInteraction(assistant.ResponseBlocked, parsed.Raw, message)
+		m.restorePendingSubmissionDraft()
 		m.refreshAssistantPrompt()
 		return m, nil
 	}
@@ -1139,6 +2215,7 @@ func (m RootModel) submitSlashCommand(input string) (RootModel, tea.Cmd) {
 	command, err := slash.Parse(input)
 	if err != nil {
 		m.addAssistantMessage(err.Error())
+		m.restorePendingSubmissionDraft()
 		return m, nil
 	}
 
@@ -1146,17 +2223,47 @@ func (m RootModel) submitSlashCommand(input string) (RootModel, tea.Cmd) {
 	case slash.KindConfirm:
 		if m.pendingConfirm == nil {
 			m.addAssistantMessage("No pending action to confirm.")
+			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
 		return m, m.executePendingConfirmation()
 	case slash.KindCancel:
 		m.pendingConfirm = nil
+		m.interaction.CloseModal()
+		m.resetBodyScroll()
 		m.addAssistantMessage("Confirmation cancelled.")
 		return m, nil
 	}
 
+	if parsed, ok := m.agentManagedSlashInput(command); ok {
+		if m.shouldUseAgentGateway() {
+			root, err := m.authorizedProjectRootForCommand(command)
+			if err != nil {
+				m.addAssistantMessage(err.Error())
+				m.restorePendingSubmissionDraft()
+				return m, nil
+			}
+			m.authorizedProjectRoots = boundedAuthorizedProjectRoots([]string{root})
+			return m.submitFolderAgentInput(parsed)
+		}
+		if command.Kind == slash.KindAddApp && strings.TrimSpace(command.Command) == "" && m.connectionStatus == "connected" {
+			cmd, err := m.setupCmdForCommand(command, false)
+			if err != nil {
+				m.addAssistantMessage(err.Error())
+				m.restorePendingSubmissionDraft()
+				return m, nil
+			}
+			m.addAssistantMessage("Operator Agent is unavailable or not configured; requesting a deterministic daemon setup preview instead.")
+			return m, cmd
+		}
+		if command.Kind == slash.KindAddApp && strings.TrimSpace(command.Command) == "" {
+			return m.submitFolderAgentInput(parsed)
+		}
+	}
+
 	if slash.RequiresConfirmation(command) && (m.pendingConfirm != nil || m.pendingAgentApproval != nil) {
 		m.addAssistantMessage("Finish or cancel the pending approval before starting another destructive action.")
+		m.restorePendingSubmissionDraft()
 		return m, nil
 	}
 
@@ -1164,6 +2271,7 @@ func (m RootModel) submitSlashCommand(input string) (RootModel, tea.Cmd) {
 		confirmation, err := m.prepareConfirmation(command)
 		if err != nil {
 			m.addAssistantMessage(err.Error())
+			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
 		m.pendingConfirm = confirmation
@@ -1211,38 +2319,183 @@ func (m RootModel) submitAgentInput(input string) (RootModel, tea.Cmd) {
 	content := strings.TrimSpace(input)
 	if content == "" {
 		m.addAssistantMessage("Enter an Operator Agent message.")
+		m.restorePendingSubmissionDraft()
 		return m, nil
 	}
 	if m.agentConfig != nil && !m.agentConfig.Enabled {
 		m.addAssistantMessage("Operator Agent is disabled; slash commands and deterministic local commands remain available.")
+		m.restorePendingSubmissionDraft()
 		return m, nil
+	}
+	if m.pendingSubmissionDraft != nil {
+		m.pendingSubmissionDraft.AwaitingAgentAcceptance = true
 	}
 
 	m.addAssistantMessage("You: " + content)
 	m.agentStatus = "sending"
 	context := m.agentContext()
+	generation := m.nextAgentMessageGeneration()
 	if m.agentSession == nil || m.agentSession.ID == "" {
 		m.agentPendingInput = content
+		m.agentPendingGeneration = generation
+		m.bindPendingSubmission("", generation)
 		return m, commands.CreateAgentSessionCmd(m.ctx, m.client, relaybaseclient.AgentSessionCreateRequest{
 			Title:   "Relaybase TUI",
 			Context: context,
 		})
 	}
 
+	sessionID := m.agentSession.ID
+	m.bindPendingSubmission(sessionID, generation)
 	cmds := []tea.Cmd{
-		commands.SendAgentMessageCmd(m.ctx, m.client, m.agentSession.ID, relaybaseclient.AgentMessageRequest{
+		commands.SendAgentMessageCmd(m.ctx, m.client, sessionID, relaybaseclient.AgentMessageRequest{
 			Content: content,
 			Context: context,
-		}),
+		}, generation),
 	}
 	if m.agentStream == nil {
-		cmds = append(cmds, commands.ConnectAgentEventsCmd(m.ctx, m.client, m.agentSession.ID))
+		cmds = append(cmds, m.connectAgentEventsCmd(sessionID))
 	}
 	return m, tea.Batch(cmds...)
 }
 
+func (m *RootModel) nextAgentMessageGeneration() uint64 {
+	m.agentMessageGeneration = incrementGeneration(m.agentMessageGeneration)
+	return m.agentMessageGeneration
+}
+
+func (m *RootModel) bindPendingSubmission(sessionID string, generation uint64) {
+	if m.pendingSubmissionDraft == nil {
+		return
+	}
+	m.pendingSubmissionDraft.SessionID = strings.TrimSpace(sessionID)
+	m.pendingSubmissionDraft.Generation = generation
+}
+
+func (m RootModel) agentMessageCompletionCurrent(sessionID string, generation uint64) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if generation == 0 {
+		// The smoke renderer injects daemon-owned historical runs directly and
+		// predates request generations. Keep that read-only compatibility path
+		// only when this model has never started an interactive message request.
+		return m.agentMessageGeneration == 0 && (sessionID == "" || sessionID == m.agentSessionID())
+	}
+	return generation == m.agentMessageGeneration && sessionID != "" && sessionID == m.agentSessionID()
+}
+
 func (m RootModel) shouldUseAgentGateway() bool {
-	return m.agentConfig != nil && m.agentConfig.Enabled
+	return agentGatewayConfigured(m.agentConfig)
+}
+
+func (m RootModel) agentManagedSlashInput(command slash.ParsedCommand) (assistant.ParsedInput, bool) {
+	if command.Confirm {
+		return assistant.ParsedInput{}, false
+	}
+	switch command.Kind {
+	case slash.KindAddApp:
+		pathValue := strings.TrimSpace(command.Path)
+		if pathValue == "" || strings.TrimSpace(command.Command) != "" {
+			return assistant.ParsedInput{}, false
+		}
+		return agentManagedSetupInput(command, "add "+pathValue, pathValue, "/configure "+quoteSetupPath(pathValue)+" --dry-run"), true
+	case slash.KindConfigure:
+		if command.DryRun {
+			return assistant.ParsedInput{}, false
+		}
+		pathValue := strings.TrimSpace(command.Path)
+		if pathValue == "" {
+			pathValue = "current folder"
+		}
+		return agentManagedSetupInput(command, "configure "+pathValue, pathValue, "/configure "+quoteSetupPath(pathValue)+" --dry-run"), true
+	case slash.KindRegister:
+		pathValue := strings.TrimSpace(firstNonEmpty(command.Path, command.Target))
+		if pathValue == "" || looksLikeManifestFile(pathValue) {
+			return assistant.ParsedInput{}, false
+		}
+		return agentManagedSetupInput(command, "register "+pathValue, pathValue, "/register "+quoteSetupPath(filepath.Join(pathValue, "relaybase.app.json"))), true
+	default:
+		return assistant.ParsedInput{}, false
+	}
+}
+
+func agentManagedSetupInput(command slash.ParsedCommand, agentInput string, pathValue string, fallback string) assistant.ParsedInput {
+	return assistant.ParsedInput{
+		Raw:            command.Raw,
+		Normalized:     strings.ToLower(strings.TrimSpace(agentInput)),
+		Source:         assistant.SourceSlash,
+		Intent:         assistant.IntentAgentGateway,
+		Command:        command,
+		Target:         pathValue,
+		Path:           pathValue,
+		AgentInput:     agentInput,
+		SuggestedSlash: fallback,
+		ResponseType:   assistant.ResponseActionPreview,
+	}
+}
+
+const maxAuthorizedProjectRoots = 8
+
+func (m RootModel) authorizedProjectRootForCommand(command slash.ParsedCommand) (string, error) {
+	var root string
+	var err error
+	switch command.Kind {
+	case slash.KindAddApp, slash.KindConfigure:
+		root, err = m.cwdForSetupTarget(command.Path)
+	case slash.KindRegister:
+		var request relaybaseclient.RegisterManifestRequest
+		request, err = m.registerManifestRequest(firstNonEmpty(command.Path, command.Target))
+		root = request.CWD
+	default:
+		return "", fmt.Errorf("Command does not provide an authorized project root.")
+	}
+	if err != nil {
+		return "", err
+	}
+	return m.canonicalProjectRoot(root)
+}
+
+func (m RootModel) canonicalProjectRoot(root string) (string, error) {
+	trimmed := strings.TrimSpace(root)
+	if trimmed == "" {
+		return "", fmt.Errorf("Project root is unavailable; provide an explicit project path.")
+	}
+	if !filepath.IsAbs(trimmed) {
+		base := strings.TrimSpace(m.cfg.CurrentDirectory)
+		if base == "" {
+			return "", fmt.Errorf("Relative project path %q cannot be authorized without current-directory context.", trimmed)
+		}
+		trimmed = filepath.Join(base, trimmed)
+	}
+	canonical := filepath.Clean(trimmed)
+	if evaluated, evalErr := filepath.EvalSymlinks(canonical); evalErr == nil {
+		canonical = filepath.Clean(evaluated)
+	}
+	return canonical, nil
+}
+
+func boundedAuthorizedProjectRoots(roots []string) []string {
+	result := make([]string, 0, min(len(roots), maxAuthorizedProjectRoots))
+	for _, root := range roots {
+		root = filepath.Clean(strings.TrimSpace(root))
+		if root == "" || root == "." {
+			continue
+		}
+		duplicate := false
+		for _, existing := range result {
+			if strings.EqualFold(existing, root) {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		result = append(result, root)
+		if len(result) == maxAuthorizedProjectRoots {
+			break
+		}
+	}
+	return result
 }
 
 func (m RootModel) validateNaturalCommand(command slash.ParsedCommand) error {
@@ -1257,6 +2510,51 @@ func (m RootModel) validateNaturalCommand(command slash.ParsedCommand) error {
 
 func (m RootModel) prepareConfirmation(command slash.ParsedCommand) (*confirmationRequest, error) {
 	switch command.Kind {
+	case slash.KindLaunchPackage, slash.KindDeletePackage:
+		definition, err := m.resolveAppPackage(command.PackageName)
+		if err != nil {
+			return nil, err
+		}
+		action := "launch package"
+		risk := "Starts each eligible app through daemon lifecycle operations. Partial success is retained and Relaybase will not roll back apps that started."
+		expected := fmt.Sprintf("Daemon creates one inspectable package run for %d ordered app member(s).", len(definition.MemberAppIDs))
+		if command.Kind == slash.KindDeletePackage {
+			action = "delete package"
+			risk = "Deletes only the saved package definition. It does not stop or restart any app."
+			expected = "Daemon deletes the package definition while preserving historical run records."
+		}
+		details := make([]string, 0, len(definition.MemberAppIDs))
+		for _, appID := range definition.MemberAppIDs {
+			details = append(details, appNameForPackage(m.state, appID)+" ("+appID+")")
+		}
+		return &confirmationRequest{
+			Action:        action,
+			Target:        slash.ResolvedTarget{Description: "package " + definition.Name},
+			Risk:          risk,
+			Expected:      expected,
+			Command:       command,
+			PackageAction: action,
+			PackageID:     definition.ID,
+			Details:       details,
+		}, nil
+	case slash.KindPackageRunRetry, slash.KindPackageRunAbort:
+		action := "retry package run"
+		risk := "Starts only failed, skipped, or interrupted members from the selected terminal package run. Successful apps are not rolled back."
+		expected := "Daemon creates a linked retry run with inspectable per-app outcomes."
+		if command.Kind == slash.KindPackageRunAbort {
+			action = "abort package run"
+			risk = "Prevents package members not yet enqueued from starting. It does not stop apps already started by the run."
+			expected = "Daemon records an abort request and preserves every completed member outcome."
+		}
+		return &confirmationRequest{
+			Action:        action,
+			Target:        slash.ResolvedTarget{Description: "package run " + command.RunID},
+			Risk:          risk,
+			Expected:      expected,
+			Command:       command,
+			PackageAction: action,
+			PackageRunID:  command.RunID,
+		}, nil
 	case slash.KindLaunch, slash.KindStop, slash.KindRestart:
 		target, err := slash.ResolveLifecycleTarget(m.slashContext(), command.Target)
 		if err != nil {
@@ -1323,6 +2621,8 @@ func (m *RootModel) executePendingConfirmation() tea.Cmd {
 		return nil
 	}
 	m.pendingConfirm = nil
+	m.interaction.CloseModal()
+	m.resetBodyScroll()
 	message := fmt.Sprintf("Confirmed %s for %s.", confirmation.Action, confirmation.Target.Description)
 	if confirmation.AssistantInput != "" {
 		m.recordAssistantInteraction(assistant.ResponseActionResult, confirmation.AssistantInput, message)
@@ -1345,15 +2645,54 @@ func (m *RootModel) executePendingConfirmation() tea.Cmd {
 	if confirmation.DaemonRepair {
 		return commands.DaemonBootstrapEnsureCmd(m.ctx, m.bootstrapClient)
 	}
+	if confirmation.PackageAction != "" {
+		switch confirmation.Command.Kind {
+		case slash.KindLaunchPackage:
+			return commands.LaunchAppPackageCmd(m.ctx, m.client, confirmation.PackageID)
+		case slash.KindDeletePackage:
+			return commands.DeleteAppPackageCmd(m.ctx, m.client, confirmation.PackageID)
+		case slash.KindPackageRunRetry:
+			return commands.RetryAppPackageRunCmd(m.ctx, m.client, confirmation.PackageRunID)
+		case slash.KindPackageRunAbort:
+			return commands.AbortAppPackageRunCmd(m.ctx, m.client, confirmation.PackageRunID)
+		}
+	}
 	return commands.LifecycleRequestBatchCmd(m.ctx, m.client, confirmation.Target.AppIDs, confirmation.LifecycleAction)
 }
 
 func (m RootModel) executeSlashCommand(command slash.ParsedCommand) (RootModel, tea.Cmd) {
 	switch command.Kind {
+	case slash.KindCreatePackage:
+		m.addAssistantMessage(fmt.Sprintf("Creating package %s with %d registered app reference(s).", command.PackageName, len(command.Members)))
+		return m, commands.CreateAppPackageCmd(m.ctx, m.client, command.PackageName, command.Members)
+	case slash.KindPackages:
+		m.packageListRequested = true
+		m.addAssistantMessage("Refreshing saved app packages.")
+		return m, commands.ListAppPackagesCmd(m.ctx, m.client)
+	case slash.KindLaunchPackage, slash.KindDeletePackage:
+		definition, err := m.resolveAppPackage(command.PackageName)
+		if err != nil {
+			m.addAssistantMessage(err.Error())
+			m.restorePendingSubmissionDraft()
+			return m, nil
+		}
+		if command.Kind == slash.KindLaunchPackage {
+			m.addAssistantMessage("Requesting package launch for " + definition.Name + ".")
+			return m, commands.LaunchAppPackageCmd(m.ctx, m.client, definition.ID)
+		}
+		m.addAssistantMessage("Requesting package deletion for " + definition.Name + ".")
+		return m, commands.DeleteAppPackageCmd(m.ctx, m.client, definition.ID)
+	case slash.KindPackageRunRetry:
+		m.addAssistantMessage("Requesting retry for package run " + command.RunID + ".")
+		return m, commands.RetryAppPackageRunCmd(m.ctx, m.client, command.RunID)
+	case slash.KindPackageRunAbort:
+		m.addAssistantMessage("Requesting abort for package run " + command.RunID + ".")
+		return m, commands.AbortAppPackageRunCmd(m.ctx, m.client, command.RunID)
 	case slash.KindLaunch, slash.KindStop, slash.KindRestart:
 		target, err := slash.ResolveLifecycleTarget(m.slashContext(), command.Target)
 		if err != nil {
 			m.addAssistantMessage(err.Error())
+			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
 		action := lifecycleActionForCommand(command)
@@ -1363,6 +2702,7 @@ func (m RootModel) executeSlashCommand(command slash.ParsedCommand) (RootModel, 
 		target, err := slash.ResolveExportTarget(m.slashContext(), command)
 		if err != nil {
 			m.addAssistantMessage(err.Error())
+			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
 		request := exportRequestForTarget(command.Scope, target)
@@ -1383,10 +2723,12 @@ func (m RootModel) executeSlashCommand(command slash.ParsedCommand) (RootModel, 
 		target, err := slash.ResolvePaneTarget(m.slashContext(), command.Target)
 		if err != nil {
 			m.addAssistantMessage(err.Error())
+			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
 		if !m.paneManager.SetPaneColor(target.PaneID, command.Color) {
 			m.addAssistantMessage("Could not change pane color for " + target.Description + ".")
+			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
 		m.addAssistantMessage(fmt.Sprintf("Pane color set to %s for %s.", command.Color, target.Description))
@@ -1395,11 +2737,13 @@ func (m RootModel) executeSlashCommand(command slash.ParsedCommand) (RootModel, 
 		target, err := slash.ResolvePaneTarget(m.slashContext(), command.Target)
 		if err != nil {
 			m.addAssistantMessage(err.Error())
+			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
 		pinned := command.Kind == slash.KindPin
 		if !m.paneManager.SetPanePinned(target.PaneID, pinned) {
 			m.addAssistantMessage("Could not update pin for " + target.Description + ".")
+			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
 		if pinned {
@@ -1413,12 +2757,18 @@ func (m RootModel) executeSlashCommand(command slash.ParsedCommand) (RootModel, 
 		m.addAssistantMessage("Theme set to " + command.Theme + ".")
 		return m, m.persistPreferencesCmd()
 	case slash.KindHelp:
-		m.helpVisible = true
 		m.addAssistantMessage("Showing command help.")
-		return m, nil
+		return m, m.openHelp()
+	case slash.KindUsage:
+		m.usage.Open()
+		m.interaction.OpenModal(interaction.ModalUsage)
+		m.addAssistantMessage("Loading recorded model usage.")
+		generation := m.nextUsageRequestGeneration()
+		return m, commands.FetchAgentUsageCmd(m.ctx, m.client, generation)
 	case slash.KindDaemonStatus:
 		if !m.daemonBootstrapAvailable() {
 			m.addAssistantMessage(m.daemonBridgeUnavailableMessage("status"))
+			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
 		m.addAssistantMessage("Checking Relaybase daemon through the local launch bridge.")
@@ -1426,6 +2776,7 @@ func (m RootModel) executeSlashCommand(command slash.ParsedCommand) (RootModel, 
 	case slash.KindDaemonRepair:
 		if !m.daemonBootstrapAvailable() {
 			m.addAssistantMessage(m.daemonBridgeUnavailableMessage("repair"))
+			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
 		m.addAssistantMessage("Requesting Relaybase daemon repair through the local launch bridge.")
@@ -1433,6 +2784,7 @@ func (m RootModel) executeSlashCommand(command slash.ParsedCommand) (RootModel, 
 	case slash.KindThreadList:
 		if !m.agentThreadGatewayAvailable() {
 			m.addAssistantMessage(m.threadGatewayUnavailableMessage())
+			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
 		m.addAssistantMessage("Listing daemon-backed Operator Agent threads.")
@@ -1442,23 +2794,29 @@ func (m RootModel) executeSlashCommand(command slash.ParsedCommand) (RootModel, 
 	case slash.KindThreadSwitch:
 		if !m.agentThreadGatewayAvailable() {
 			m.addAssistantMessage(m.threadGatewayUnavailableMessage())
+			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
 		sessionID, err := m.resolveAgentSessionTarget(command.Target)
 		if err != nil {
 			m.addAssistantMessage(err.Error())
+			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
 		m.addAssistantMessage("Switching Operator Agent thread to " + sessionID + ".")
+		m.captureThreadDraft()
+		m.captureThreadResponse()
 		return m, commands.ActivateAgentSessionCmd(m.ctx, m.client, sessionID)
 	case slash.KindThreadRename:
 		if !m.agentThreadGatewayAvailable() {
 			m.addAssistantMessage(m.threadGatewayUnavailableMessage())
+			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
 		sessionID := m.agentSessionID()
 		if sessionID == "" {
 			m.addAssistantMessage("No daemon-backed Operator Agent thread is active. Use /thread new <title> first.")
+			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
 		m.addAssistantMessage("Renaming active Operator Agent thread.")
@@ -1654,7 +3012,8 @@ func (m RootModel) setupConfirmationText(command slash.ParsedCommand) (slash.Res
 func (m RootModel) cwdForSetupTarget(target string) (string, error) {
 	trimmed := strings.TrimSpace(target)
 	if trimmed == "" || strings.EqualFold(trimmed, "current") || strings.EqualFold(trimmed, "cwd") ||
-		strings.EqualFold(trimmed, "current folder") || strings.EqualFold(trimmed, "current directory") {
+		strings.EqualFold(trimmed, "current folder") || strings.EqualFold(trimmed, "current directory") ||
+		strings.EqualFold(trimmed, "this folder") || strings.EqualFold(trimmed, "this directory") {
 		if strings.TrimSpace(m.cfg.CurrentDirectory) == "" {
 			return "", fmt.Errorf("Current-directory context is unavailable. Use /configure <path> --dry-run.")
 		}
@@ -1676,6 +3035,15 @@ func (m RootModel) cwdForSetupTarget(target string) (string, error) {
 
 func (m RootModel) registerManifestRequest(target string) (relaybaseclient.RegisterManifestRequest, error) {
 	trimmed := strings.TrimSpace(target)
+	if strings.EqualFold(trimmed, "cwd") || strings.EqualFold(trimmed, "current folder") ||
+		strings.EqualFold(trimmed, "current directory") || strings.EqualFold(trimmed, "this folder") ||
+		strings.EqualFold(trimmed, "this directory") || trimmed == "." {
+		cwd, err := m.cwdForSetupTarget(trimmed)
+		if err != nil {
+			return relaybaseclient.RegisterManifestRequest{}, err
+		}
+		return relaybaseclient.RegisterManifestRequest{ManifestPath: filepath.Join(cwd, "relaybase.app.json"), CWD: cwd}, nil
+	}
 	if trimmed == "" || strings.EqualFold(trimmed, "current") {
 		app := m.paneManager.SelectedPane()
 		if app == nil || app.AppID == "" {
@@ -1683,8 +3051,11 @@ func (m RootModel) registerManifestRequest(target string) (relaybaseclient.Regis
 		}
 		trimmed = app.AppID
 	}
-	if looksLikeManifestPath(trimmed) {
+	if looksLikeManifestFile(trimmed) {
 		return relaybaseclient.RegisterManifestRequest{ManifestPath: trimmed, CWD: maybeDir(trimmed)}, nil
+	}
+	if looksLikePath(trimmed) {
+		return relaybaseclient.RegisterManifestRequest{ManifestPath: filepath.Join(trimmed, "relaybase.app.json"), CWD: trimmed}, nil
 	}
 	app, err := m.appForTarget(trimmed)
 	if err != nil {
@@ -1944,7 +3315,13 @@ func setupRepairChoiceCount(result *relaybaseclient.RepairSetupResult) int {
 
 func looksLikeManifestPath(value string) bool {
 	trimmed := strings.TrimSpace(value)
-	return looksLikePath(trimmed) || strings.HasSuffix(strings.ToLower(trimmed), ".json")
+	return looksLikeManifestFile(trimmed)
+}
+
+func looksLikeManifestFile(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	lower := strings.ToLower(trimmed)
+	return strings.HasSuffix(lower, ".json")
 }
 
 func looksLikePath(value string) bool {
@@ -1957,6 +3334,14 @@ func maybeDir(pathValue string) string {
 		return ""
 	}
 	return filepath.Dir(pathValue)
+}
+
+func quoteSetupPath(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if !strings.ContainsAny(trimmed, " \t") {
+		return trimmed
+	}
+	return `"` + strings.ReplaceAll(trimmed, `"`, `\"`) + `"`
 }
 
 func (m *RootModel) openContextMenu() {
@@ -2048,7 +3433,9 @@ func (m *RootModel) executeContextMenuSelection() tea.Cmd {
 		return m.startNewAssistantThread("")
 	case contextmenu.ActionAssistantClearInput:
 		m.commandInput = ""
-		m.commandActive = false
+		m.composer.Clear()
+		m.setPrimaryFocus(interaction.FocusPanes)
+		m.syncCommandPalette()
 		m.addAssistantMessage("Assistant input cleared.")
 		return nil
 	case contextmenu.ActionAssistantBarColor:
@@ -2065,9 +3452,8 @@ func (m *RootModel) executeContextMenuSelection() tea.Cmd {
 		m.addAssistantMessage("Requesting redacted Operator Agent thread export.")
 		return commands.ExportAgentSessionCmd(m.ctx, m.client, sessionID, relaybaseclient.AgentSessionExportRequest{Format: "markdown"})
 	case contextmenu.ActionAssistantCommandHelp:
-		m.helpVisible = true
 		m.addAssistantMessage("Showing command help.")
-		return nil
+		return m.openHelp()
 	case contextmenu.ActionAssistantLLMMode:
 		m.reportAssistantProviderStatus()
 		return nil
@@ -2127,9 +3513,32 @@ func (m *RootModel) applyTheme(mode string) {
 	m.styles = styles.NewWithOptions(theme, styles.Options{
 		AssistantBarColor: m.preferences.Assistant.BarColor,
 	})
+	m.composer.ApplyTheme(theme, m.preferences.Assistant.BarColor)
+	applyTextInputTheme(&m.helpSearch, theme)
 	for _, diagnostic := range diagnostics {
 		m.addDiagnostic(diagnostic.Code, diagnostic.Severity, diagnostic.Message)
 	}
+}
+
+func applyTextInputTheme(input *textinput.Model, theme styles.Theme) {
+	base := lipgloss.NewStyle().Foreground(theme.Text).Background(theme.Background)
+	focused := textinput.StyleState{
+		Text:        base,
+		Placeholder: lipgloss.NewStyle().Foreground(theme.Muted).Background(theme.Background),
+		Suggestion:  lipgloss.NewStyle().Foreground(theme.Muted).Background(theme.Background),
+		Prompt:      lipgloss.NewStyle().Foreground(theme.Accent).Background(theme.Background).Bold(true),
+	}
+	blurred := focused
+	blurred.Prompt = lipgloss.NewStyle().Foreground(theme.Muted).Background(theme.Background)
+	input.SetStyles(textinput.Styles{
+		Focused: focused,
+		Blurred: blurred,
+		Cursor: textinput.CursorStyle{
+			Color: theme.Accent,
+			Shape: tea.CursorBar,
+			Blink: true,
+		},
+	})
 }
 
 func (m *RootModel) cycleAssistantBarColor() string {
@@ -2143,6 +3552,7 @@ func (m *RootModel) cycleAssistantBarColor() string {
 	}
 	m.preferences.Assistant.BarColor = next
 	m.styles = styles.NewWithOptions(m.theme, styles.Options{AssistantBarColor: next})
+	m.composer.ApplyTheme(m.theme, next)
 	return next
 }
 
@@ -2164,12 +3574,13 @@ func (m *RootModel) reportAssistantProviderStatus() {
 func (m RootModel) agentContext() *relaybaseclient.TuiAgentContext {
 	selected := m.paneManager.SelectedPane()
 	context := &relaybaseclient.TuiAgentContext{
-		CurrentPage:        m.paneManager.Page(),
-		CurrentCWD:         strings.TrimSpace(m.cfg.CurrentDirectory),
-		DaemonHasZeroApps:  m.hasNoRegisteredApps(),
-		SetupWizardState:   agentSetupWizardState(m.setupSession),
-		CurrentSetupPlanID: currentSetupPlanID(m.setupSession),
-		Diagnostics:        m.agentDiagnosticsForContext(),
+		CurrentPage:            m.paneManager.Page(),
+		CurrentCWD:             strings.TrimSpace(m.cfg.CurrentDirectory),
+		AuthorizedProjectRoots: append([]string(nil), m.authorizedProjectRoots...),
+		DaemonHasZeroApps:      m.hasNoRegisteredApps(),
+		SetupWizardState:       agentSetupWizardState(m.setupSession),
+		CurrentSetupPlanID:     currentSetupPlanID(m.setupSession),
+		Diagnostics:            m.agentDiagnosticsForContext(),
 		TerminalCapabilities: &relaybaseclient.TerminalCapabilities{
 			Clipboard:   "unavailable",
 			BrowserOpen: "unavailable",
@@ -2235,21 +3646,35 @@ func currentSetupPlanID(state setupwizard.State) string {
 
 func (m *RootModel) applyAgentRunEvent(event relaybaseclient.AgentRunEvent) {
 	switch event.Type {
+	case "stream.reconnecting":
+		m.agentStatus = "reconnecting"
+		m.addOrReplaceDiagnostic(
+			agentEventDisconnectedCode,
+			"warning",
+			fmt.Sprintf("Operator Agent event stream reconnecting from sequence %d (attempt %d).", int64Field(event.Data, "afterSequence"), intField(event.Data, "attempt")),
+		)
 	case "model.delta":
 		if delta := stringField(event.Data, "delta"); delta != "" {
-			m.addAssistantMessage("Agent: " + delta)
+			m.agentDelta += delta
+			m.lastAssistantLine = "Agent: " + assistant.SanitizeText(m.agentDelta)
+			m.refreshAssistantPrompt()
 		}
 	case "answer":
 		if content := stringField(event.Data, "content"); content != "" {
+			m.agentDelta = ""
 			m.recordAssistantInteraction(assistant.ResponseAnswer, "agent", content)
 			m.refreshAssistantPrompt()
 		}
 	case "diagnostic":
 		if diagnostic, ok := agentDiagnosticFromData(event.Data); ok {
-			m.addDiagnostic(agentDiagnosticCode(diagnostic), valueOr(diagnostic.Severity, "info"), agentDiagnosticMessage(diagnostic))
+			if !m.agentInitialReplay {
+				m.addDiagnostic(agentDiagnosticCode(diagnostic), valueOr(diagnostic.Severity, "info"), agentDiagnosticMessage(diagnostic))
+			}
 			m.recordAssistantInteraction(assistant.ResponseDiagnostic, "agent", diagnostic.Message)
 			m.refreshAssistantPrompt()
 		}
+	case "stream.replay_completed":
+		m.agentInitialReplay = false
 	case "blocked":
 		m.addAssistantMessage(firstNonEmpty(stringField(event.Data, "content"), diagnosticMessageFromData(event.Data), "Operator Agent request was blocked."))
 	case "clarification_needed":
@@ -2257,16 +3682,24 @@ func (m *RootModel) applyAgentRunEvent(event relaybaseclient.AgentRunEvent) {
 	case "tool.approval_required", "approval_required", "setup.file_write_approval_required", "setup.manifest_patch_approval_required":
 		if approval, ok := agentApprovalFromData(event.Data); ok {
 			m.pendingAgentApproval = &approval
+			m.resetBodyScroll()
+			m.interaction.OpenModal(interaction.ModalAgentApproval)
 			m.addAssistantMessage("Operator Agent approval required: " + firstNonEmpty(approval.Target, approval.Action, approval.ToolName, approval.ID) + ".")
 			m.refreshAssistantPrompt()
 		}
 	case "tool.approved":
 		if approval, ok := agentApprovalFromData(event.Data); ok && m.pendingAgentApproval != nil && approval.ID == m.pendingAgentApproval.ID {
 			m.pendingAgentApproval = nil
+			m.interaction.CloseModal()
+			m.resetBodyScroll()
 		}
 		m.addAssistantMessage("Operator Agent tool approval recorded.")
 	case "tool.rejected":
-		m.pendingAgentApproval = nil
+		if approval, ok := agentApprovalFromData(event.Data); ok && m.pendingAgentApproval != nil && approval.ID == m.pendingAgentApproval.ID {
+			m.pendingAgentApproval = nil
+			m.interaction.CloseModal()
+			m.resetBodyScroll()
+		}
 		m.addAssistantMessage("Operator Agent tool approval rejected.")
 	case "tool.started":
 		m.addAssistantMessage("Operator Agent tool started: " + firstNonEmpty(stringField(event.Data, "toolName"), stringField(event.Data, "tool"), "tool") + ".")
@@ -2275,6 +3708,8 @@ func (m *RootModel) applyAgentRunEvent(event relaybaseclient.AgentRunEvent) {
 	case "action_result":
 		if m.pendingAgentApproval != nil && stringField(event.Data, "approvalId") == m.pendingAgentApproval.ID {
 			m.pendingAgentApproval = nil
+			m.interaction.CloseModal()
+			m.resetBodyScroll()
 			m.refreshAssistantPrompt()
 		}
 		m.applyAgentActionResultState(event.Data)
@@ -2301,13 +3736,24 @@ func (m *RootModel) applyAgentRunEvent(event relaybaseclient.AgentRunEvent) {
 	case "run.started":
 		m.agentStatus = "running"
 	case "run.completed":
+		m.flushAgentDelta()
 		m.agentStatus = "idle"
 	case "run.failed":
+		m.flushAgentDelta()
 		m.agentStatus = "failed"
 		if message := diagnosticMessageFromData(event.Data); message != "" {
 			m.addAssistantMessage("Operator Agent run failed: " + message)
 		}
 	}
+}
+
+func (m *RootModel) flushAgentDelta() {
+	delta := strings.TrimSpace(m.agentDelta)
+	if delta == "" {
+		return
+	}
+	m.agentDelta = ""
+	m.addAssistantMessage("Agent: " + delta)
 }
 
 func (m *RootModel) applyAgentActionResultState(data json.RawMessage) {
@@ -2462,6 +3908,273 @@ func (m RootModel) agentThreadGatewayAvailable() bool {
 	return m.connectionStatus == "connected" && m.agentConfig != nil && m.agentConfig.Enabled
 }
 
+func (m RootModel) openCodePicker() (RootModel, tea.Cmd) {
+	if len(m.responseCodeBlocks()) == 0 {
+		m.addDiagnostic("response_code_unavailable", "info", "The active Agent response has no sanitized fenced code blocks to copy.")
+		return m, nil
+	}
+	m.codePickerVisible = true
+	m.codePickerSelected = minInt(maxInt(m.codePickerSelected, 0), len(m.responseCodeBlocks())-1)
+	m.interaction.OpenTransient(interaction.TransientCodePicker)
+	return m, nil
+}
+
+func (m RootModel) handleCodePickerKey(msg tea.KeyPressMsg) (RootModel, tea.Cmd) {
+	switch {
+	case keymap.Matches(msg, m.keymap.Escape):
+		m.closeCodePicker()
+		return m, nil
+	case keymap.Matches(msg, m.keymap.Up), keymap.Matches(msg, m.keymap.Left):
+		m.moveCodePicker(-1)
+		return m, nil
+	case keymap.Matches(msg, m.keymap.Down), keymap.Matches(msg, m.keymap.Right):
+		m.moveCodePicker(1)
+		return m, nil
+	case keymap.Matches(msg, m.keymap.Home):
+		m.codePickerSelected = 0
+		return m, nil
+	case keymap.Matches(msg, m.keymap.End):
+		m.codePickerSelected = maxInt(0, len(m.responseCodeBlocks())-1)
+		return m, nil
+	case keymap.Matches(msg, m.keymap.Enter):
+		return m.copySelectedCodeBlock()
+	default:
+		return m, nil
+	}
+}
+
+func (m RootModel) copySelectedCodeBlock() (RootModel, tea.Cmd) {
+	blocks := m.responseCodeBlocks()
+	if len(blocks) == 0 {
+		m.closeCodePicker()
+		return m, nil
+	}
+	m.codePickerSelected = minInt(maxInt(m.codePickerSelected, 0), len(blocks)-1)
+	selected := m.codePickerSelected + 1
+	m.closeCodePicker()
+	return m, writeClipboardTargetCmd(blocks[selected-1], fmt.Sprintf("sanitized code block %d", selected))
+}
+
+func (m *RootModel) moveCodePicker(delta int) {
+	blocks := m.responseCodeBlocks()
+	if len(blocks) == 0 || delta == 0 {
+		return
+	}
+	m.codePickerSelected = minInt(maxInt(m.codePickerSelected+delta, 0), len(blocks)-1)
+}
+
+func (m *RootModel) closeCodePicker() {
+	m.codePickerVisible = false
+	m.interaction.CloseTransient()
+}
+
+func (m RootModel) codePickerDataForView() *views.CodePickerData {
+	if !m.codePickerVisible {
+		return nil
+	}
+	blocks := m.responseCodeBlocks()
+	data := &views.CodePickerData{Selected: m.codePickerSelected}
+	for _, block := range blocks {
+		lines := 0
+		if block != "" {
+			lines = strings.Count(block, "\n") + 1
+		}
+		data.LineCounts = append(data.LineCounts, lines)
+	}
+	return data
+}
+
+func (m RootModel) responseCodeBlocks() []string {
+	return response.CodeBlocks(strings.Join(m.assistantHistoryForView(), "\n\n"))
+}
+
+func (m RootModel) openThreadSwitcher() (RootModel, tea.Cmd) {
+	if !m.agentThreadGatewayAvailable() {
+		m.addAssistantMessage(m.threadGatewayUnavailableMessage())
+		return m, nil
+	}
+	m.threadSwitcherVisible = true
+	m.interaction.OpenTransient(interaction.TransientThreadSwitcher)
+	m.syncThreadSwitcherSelection()
+	if len(m.agentSessions) == 0 {
+		m.threadSwitcherLoading = true
+		return m, commands.ListAgentSessionsCmd(m.ctx, m.client)
+	}
+	return m, nil
+}
+
+func (m RootModel) handleThreadSwitcherKey(msg tea.KeyPressMsg) (RootModel, tea.Cmd) {
+	switch {
+	case keymap.Matches(msg, m.keymap.Escape):
+		m.closeThreadSwitcher()
+		return m, nil
+	case keymap.Matches(msg, m.keymap.Left), keymap.Matches(msg, m.keymap.Up):
+		m.moveThreadSwitcher(-1)
+		return m, nil
+	case keymap.Matches(msg, m.keymap.Right), keymap.Matches(msg, m.keymap.Down):
+		m.moveThreadSwitcher(1)
+		return m, nil
+	case keymap.Matches(msg, m.keymap.Home):
+		m.threadSwitcherSelected = 0
+		return m, nil
+	case keymap.Matches(msg, m.keymap.End):
+		m.threadSwitcherSelected = maxInt(0, len(m.agentSessions)-1)
+		return m, nil
+	case keymap.Matches(msg, m.keymap.Enter):
+		return m.activateSelectedThread()
+	default:
+		return m, nil
+	}
+}
+
+func (m RootModel) activateSelectedThread() (RootModel, tea.Cmd) {
+	if m.threadSwitcherLoading || len(m.agentSessions) == 0 {
+		return m, nil
+	}
+	m.syncThreadSwitcherSelection()
+	session := m.agentSessions[m.threadSwitcherSelected]
+	if session.ID == "" {
+		m.addDiagnostic("agent_thread_switch_invalid", "warning", "The selected Operator Agent thread has no daemon session identity.")
+		return m, nil
+	}
+	if session.ID == m.agentSessionID() {
+		m.closeThreadSwitcher()
+		return m, nil
+	}
+	m.captureThreadDraft()
+	m.captureThreadResponse()
+	m.threadSwitcherLoading = true
+	return m, commands.ActivateAgentSessionCmd(m.ctx, m.client, session.ID)
+}
+
+func (m *RootModel) captureThreadDraft() {
+	threadID := m.agentSessionID()
+	if threadID == "" {
+		return
+	}
+	m.syncComposer()
+	if m.threadDrafts == nil {
+		m.threadDrafts = map[string]threadDraftState{}
+	}
+	m.threadDrafts[threadID] = threadDraftState{Snapshot: m.composer.Snapshot(), Active: m.commandActive}
+}
+
+func (m *RootModel) restoreThreadDraft(threadID string) {
+	draft, ok := m.threadDrafts[threadID]
+	if !ok {
+		m.commandInput = ""
+		m.composer.SetValue("")
+		m.setPrimaryFocus(interaction.FocusPanes)
+		return
+	}
+	m.composer.Restore(draft.Snapshot)
+	m.commandInput = draft.Snapshot.Value
+	if draft.Active {
+		m.setPrimaryFocus(interaction.FocusComposer)
+	} else {
+		m.setPrimaryFocus(interaction.FocusPanes)
+	}
+}
+
+func (m *RootModel) captureThreadResponse() {
+	threadID := m.agentSessionID()
+	if threadID == "" {
+		return
+	}
+	if m.threadResponses == nil {
+		m.threadResponses = map[string]threadResponseState{}
+	}
+	m.threadResponses[threadID] = threadResponseState{
+		AssistantHistory:  append([]string(nil), m.assistantHistory...),
+		AssistantTimeline: append([]string(nil), m.assistantTimeline...),
+		NaturalHistory:    append([]assistant.HistoryEntry(nil), m.naturalHistory...),
+		AgentDelta:        m.agentDelta,
+		LastAssistantLine: m.lastAssistantLine,
+		HistoryExpanded:   m.historyExpanded,
+		ResponseOffset:    m.responseOffset,
+		ResponseFollow:    m.responseFollow,
+		ResponseNewOutput: m.responseNewOutput,
+	}
+}
+
+func (m *RootModel) restoreThreadResponse(threadID string) {
+	state, ok := m.threadResponses[threadID]
+	if !ok {
+		m.assistantHistory = nil
+		m.assistantTimeline = nil
+		m.naturalHistory = nil
+		m.agentDelta = ""
+		m.lastAssistantLine = ""
+		m.historyExpanded = false
+		m.responseOffset = 0
+		m.responseFollow = true
+		m.responseNewOutput = 0
+		m.refreshAssistantPrompt()
+		return
+	}
+	m.assistantHistory = append([]string(nil), state.AssistantHistory...)
+	m.assistantTimeline = append([]string(nil), state.AssistantTimeline...)
+	m.naturalHistory = append([]assistant.HistoryEntry(nil), state.NaturalHistory...)
+	m.agentDelta = state.AgentDelta
+	m.lastAssistantLine = state.LastAssistantLine
+	m.historyExpanded = state.HistoryExpanded
+	m.responseOffset = state.ResponseOffset
+	m.responseFollow = state.ResponseFollow
+	m.responseNewOutput = state.ResponseNewOutput
+	m.refreshAssistantPrompt()
+}
+
+func (m *RootModel) moveThreadSwitcher(delta int) {
+	if len(m.agentSessions) == 0 || delta == 0 {
+		return
+	}
+	m.syncThreadSwitcherSelection()
+	m.threadSwitcherSelected = minInt(maxInt(m.threadSwitcherSelected+delta, 0), len(m.agentSessions)-1)
+}
+
+func (m *RootModel) syncThreadSwitcherSelection() {
+	if len(m.agentSessions) == 0 {
+		m.threadSwitcherSelected = 0
+		return
+	}
+	activeID := m.agentSessionID()
+	for index, session := range m.agentSessions {
+		if session.ID != "" && session.ID == activeID {
+			m.threadSwitcherSelected = index
+			return
+		}
+	}
+	m.threadSwitcherSelected = minInt(maxInt(m.threadSwitcherSelected, 0), len(m.agentSessions)-1)
+}
+
+func (m *RootModel) closeThreadSwitcher() {
+	m.threadSwitcherVisible = false
+	m.threadSwitcherLoading = false
+	m.interaction.CloseTransient()
+}
+
+func (m RootModel) threadSwitcherDataForView() *views.ThreadSwitcherData {
+	if !m.threadSwitcherVisible {
+		return nil
+	}
+	data := &views.ThreadSwitcherData{Selected: m.threadSwitcherSelected, Loading: m.threadSwitcherLoading}
+	activeID := m.agentSessionID()
+	const visibleRows = 5
+	start := maxInt(0, m.threadSwitcherSelected-visibleRows/2)
+	start = minInt(start, maxInt(0, len(m.agentSessions)-visibleRows))
+	end := minInt(len(m.agentSessions), start+visibleRows)
+	for index, session := range m.agentSessions[start:end] {
+		attention := session.RecoveredApprovalCount > 0 || session.Summary != nil && session.Summary.PendingApprovalCount > 0
+		data.Entries = append(data.Entries, views.ThreadSwitcherEntry{
+			Index:     start + index,
+			Title:     firstNonEmpty(session.Title, "Untitled thread"),
+			Active:    session.ID != "" && session.ID == activeID,
+			Attention: attention,
+		})
+	}
+	return data
+}
+
 func (m RootModel) threadGatewayUnavailableMessage() string {
 	if m.connectionStatus != "connected" {
 		return "Daemon-backed Operator Agent threads are unavailable while the daemon is offline; deterministic local commands remain in-memory only."
@@ -2476,8 +4189,15 @@ func (m RootModel) threadGatewayUnavailableMessage() string {
 }
 
 func (m *RootModel) startNewAssistantThread(title string) tea.Cmd {
+	m.captureThreadDraft()
+	m.captureThreadResponse()
+	m.closeAgentStream()
+	m.agentSession = nil
+	m.advanceLocalThreadIdentity()
 	m.commandInput = ""
-	m.commandActive = false
+	m.composer.Clear()
+	m.setPrimaryFocus(interaction.FocusPanes)
+	m.syncCommandPalette()
 	if !m.agentThreadGatewayAvailable() {
 		m.resetLocalAssistantThread()
 		m.addAssistantMessage("New local-only assistant thread started. " + m.threadGatewayUnavailableMessage())
@@ -2496,9 +4216,14 @@ func (m *RootModel) startNewAssistantThread(title string) tea.Cmd {
 
 func (m *RootModel) resetLocalAssistantThread() {
 	m.assistantHistory = nil
+	m.assistantTimeline = nil
 	m.naturalHistory = nil
+	m.agentDelta = ""
 	m.lastAssistantLine = ""
 	m.agentPendingInput = ""
+	m.responseOffset = 0
+	m.responseFollow = true
+	m.responseNewOutput = 0
 	m.refreshAssistantPrompt()
 }
 
@@ -2507,6 +4232,29 @@ func (m RootModel) agentSessionID() string {
 		return ""
 	}
 	return m.agentSession.ID
+}
+
+func (m RootModel) composerHistoryScopeID() string {
+	if sessionID := strings.TrimSpace(m.agentSessionID()); sessionID != "" {
+		return "agent:" + sessionID
+	}
+	generation := m.localThreadGeneration
+	if generation == 0 {
+		generation = 1
+	}
+	return fmt.Sprintf("local:%d", generation)
+}
+
+func (m *RootModel) syncComposerHistoryScope() {
+	m.composer.SetHistoryScope(m.composerHistoryScopeID())
+}
+
+func (m *RootModel) advanceLocalThreadIdentity() {
+	m.localThreadGeneration++
+	if m.localThreadGeneration == 0 {
+		m.localThreadGeneration = 1
+	}
+	m.syncComposerHistoryScope()
 }
 
 func (m RootModel) agentThreadStatusLabel() string {
@@ -2540,11 +4288,43 @@ func (m RootModel) resolveAgentSessionTarget(target string) (string, error) {
 func (m *RootModel) closeAgentStream() {
 	if m.agentStream != nil {
 		_ = m.agentStream.Close()
-		m.agentStream = nil
 	}
+	m.agentStream = nil
+	m.agentStreamSessionID = ""
+	m.agentStreamGeneration++
+	m.agentInitialReplay = false
+}
+
+func (m *RootModel) connectAgentEventsCmd(sessionID string) tea.Cmd {
+	m.closeAgentStream()
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	m.agentStreamSessionID = sessionID
+	return commands.ConnectAgentEventsCmd(m.ctx, m.client, sessionID, m.agentStreamGeneration)
+}
+
+func (m RootModel) agentEventLifecycleCurrent(sessionID string, generation uint64) bool {
+	return sessionID != "" &&
+		sessionID == m.agentSessionID() &&
+		sessionID == m.agentStreamSessionID &&
+		generation == m.agentStreamGeneration
 }
 
 func (m RootModel) confirmationForView() *views.ConfirmationData {
+	if m.quitConfirmation {
+		return &views.ConfirmationData{
+			Action:         "Quit Relaybase TUI",
+			Target:         "current operator console",
+			Risk:           "the memory-only composer draft will be lost",
+			ExpectedResult: "the TUI exits without submitting or persisting the draft",
+			Details: []string{
+				fmt.Sprintf("draft size: %d bytes", len([]byte(m.commandInput))),
+				fmt.Sprintf("draft lines: %d", strings.Count(m.commandInput, "\n")+1),
+			},
+		}
+	}
 	if m.pendingAgentApproval != nil {
 		return agentApprovalForView(*m.pendingAgentApproval)
 	}
@@ -2556,17 +4336,23 @@ func (m RootModel) confirmationForView() *views.ConfirmationData {
 		Target:         m.pendingConfirm.Target.Description,
 		Risk:           m.pendingConfirm.Risk,
 		ExpectedResult: m.pendingConfirm.Expected,
+		Details:        append([]string(nil), m.pendingConfirm.Details...),
 	}
 }
 
 func (m RootModel) assistantHistoryForView() []string {
-	combined := []string{}
-	for _, entry := range m.naturalHistory {
-		if entry.Message != "" {
-			combined = append(combined, entry.Type+": "+entry.Message)
+	combined := append([]string(nil), m.assistantTimeline...)
+	if len(combined) == 0 {
+		for _, entry := range m.naturalHistory {
+			if entry.Message != "" {
+				combined = append(combined, entry.Type+": "+entry.Message)
+			}
 		}
+		combined = append(combined, m.assistantHistory...)
 	}
-	combined = append(combined, m.assistantHistory...)
+	if delta := strings.TrimSpace(m.agentDelta); delta != "" {
+		combined = append(combined, "Agent: "+assistant.SanitizeText(delta))
+	}
 	if len(combined) == 0 {
 		return nil
 	}
@@ -2591,6 +4377,10 @@ func (m *RootModel) recordAssistantInteraction(responseType string, input string
 		return
 	}
 	m.naturalHistory = append(m.naturalHistory, entry)
+	m.assistantTimeline = append(m.assistantTimeline, entry.Type+": "+entry.Message)
+	if !m.responseFollow {
+		m.responseNewOutput++
+	}
 	m.lastAssistantLine = entry.Message
 	m.trimNaturalAssistantHistory()
 }
@@ -2616,6 +4406,7 @@ func (m *RootModel) recordAssistantError(input string, err error) {
 		m.addDiagnostic("assistant_command_unsupported", "info", err.Error())
 	}
 	m.recordAssistantInteraction(responseType, input, err.Error())
+	m.restorePendingSubmissionDraft()
 	m.refreshAssistantPrompt()
 }
 
@@ -2642,6 +4433,58 @@ func (m RootModel) apps() []relaybaseclient.AppState {
 		return nil
 	}
 	return m.state.Apps
+}
+
+func (m RootModel) activeAppCount() int {
+	active := 0
+	for _, isActive := range m.appInventoryByID() {
+		if isActive {
+			active++
+		}
+	}
+	return active
+}
+
+func (m RootModel) registeredAppCount() int { return len(m.appInventoryByID()) }
+
+// appInventoryByID is the single daemon-backed inventory used by both rail
+// counts. Duplicate app records and component projections collapse onto the
+// same stable app ID, while active is accumulated from any current daemon
+// lifecycle record for that ID.
+func (m RootModel) appInventoryByID() map[string]bool {
+	inventory := map[string]bool{}
+	add := func(appID, status string, pid int) {
+		appID = strings.TrimSpace(appID)
+		if appID == "" {
+			return
+		}
+		inventory[appID] = inventory[appID] || daemonStatusIsActive(status, pid)
+	}
+	for _, app := range m.apps() {
+		add(app.ID, app.RuntimeStatus, app.PID)
+	}
+	if m.state != nil {
+		for _, component := range m.state.Components {
+			add(component.AppID, component.Status, component.PID)
+		}
+		for _, group := range m.state.Groups {
+			for _, component := range group.Components {
+				add(component.AppID, component.Status, component.PID)
+			}
+		}
+	}
+	return inventory
+}
+
+func daemonStatusIsActive(status string, pid int) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "running", "starting", "restarting", "stopping", "degraded":
+		return true
+	default:
+		// A daemon-reported PID is stronger evidence of an active process
+		// than a missing/older status label, but mere registration is not.
+		return pid > 0
+	}
 }
 
 func (m RootModel) groups() []relaybaseclient.AppGroup {
@@ -3285,6 +5128,60 @@ func isClearInput(msg tea.KeyPressMsg) bool {
 	return msg.Code == 21 || msg.Keystroke() == "ctrl+u"
 }
 
+func isPasteShortcut(msg tea.KeyPressMsg) bool {
+	if msg.Code == 22 {
+		return true
+	}
+	switch msg.Keystroke() {
+	case "ctrl+v", "ctrl+shift+v", "shift+insert":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCopyShortcut(msg tea.KeyPressMsg) bool {
+	if msg.Code == 3 {
+		return true
+	}
+	switch msg.Keystroke() {
+	case "ctrl+c", "ctrl+shift+c":
+		return true
+	default:
+		return false
+	}
+}
+
+func readClipboardCmd() tea.Cmd {
+	return func() tea.Msg {
+		text, err := readClipboardText()
+		return clipboardPasteLoadedMsg{Text: text, Err: err}
+	}
+}
+
+func writeClipboardCmd(text string) tea.Cmd {
+	return func() tea.Msg {
+		return clipboardCopyFinishedMsg{Err: writeClipboardText(text)}
+	}
+}
+
+func writeClipboardTargetCmd(text string, target string) tea.Cmd {
+	return func() tea.Msg {
+		return clipboardCopyFinishedMsg{Err: writeClipboardText(text), Target: target}
+	}
+}
+
+func writePaneLogsClipboardCmd(text string, paneID string, paneTitle string, lineCount int) tea.Cmd {
+	return func() tea.Msg {
+		return clipboardCopyFinishedMsg{
+			Err:       writeClipboardText(text),
+			PaneID:    paneID,
+			PaneTitle: paneTitle,
+			LineCount: lineCount,
+		}
+	}
+}
+
 func normalizeCommandInputText(text string) string {
 	if text == "" {
 		return ""
@@ -3310,6 +5207,10 @@ func normalizeCommandInputText(text string) string {
 
 func isContextMenuKey(msg tea.KeyPressMsg) bool {
 	return msg.Code == 26 || msg.Code == 15
+}
+
+func isThreadSwitcherShortcut(msg tea.KeyPressMsg) bool {
+	return msg.Code == 20 || msg.Keystroke() == "ctrl+t"
 }
 
 func firstString(values []string) string {
@@ -3376,6 +5277,11 @@ func agentStatusFromConfig(config *relaybaseclient.AgentConfig) string {
 		return "needs_config"
 	}
 	return "ready"
+}
+
+func agentGatewayConfigured(config *relaybaseclient.AgentConfig) bool {
+	return config != nil && config.Enabled && config.Provider.RemoteModelEnabled &&
+		config.Provider.APIKeySource.Configured && strings.TrimSpace(config.Provider.ModelSlug) != ""
 }
 
 func agentConfigDiagnostics(config *relaybaseclient.AgentConfig) []Diagnostic {
@@ -3792,6 +5698,23 @@ func stringField(data json.RawMessage, field string) string {
 	return ""
 }
 
+func int64Field(data json.RawMessage, field string) int64 {
+	if len(data) == 0 {
+		return 0
+	}
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal(data, &record); err != nil {
+		return 0
+	}
+	var value int64
+	_ = json.Unmarshal(record[field], &value)
+	return value
+}
+
+func intField(data json.RawMessage, field string) int {
+	return int(int64Field(data, field))
+}
+
 func unmarshalData(data json.RawMessage, target any) bool {
 	if len(data) == 0 {
 		return false
@@ -3824,6 +5747,14 @@ func minInt(left int, right int) int {
 	return right
 }
 
+func incrementGeneration(current uint64) uint64 {
+	current++
+	if current == 0 {
+		current = 1
+	}
+	return current
+}
+
 func (m RootModel) preferenceSnapshot() preferences.Preferences {
 	snapshot := m.preferences
 	snapshot.Panes.Pinned = m.paneManager.PinnedIDs()
@@ -3840,6 +5771,7 @@ func (m RootModel) persistPreferencesCmd() tea.Cmd {
 
 func (m *RootModel) scrollBody(delta int) {
 	m.bodyScrollOffset = maxInt(0, m.bodyScrollOffset+delta)
+	m.clampBodyScroll()
 }
 
 func (m *RootModel) resetBodyScroll() {
@@ -3847,7 +5779,117 @@ func (m *RootModel) resetBodyScroll() {
 }
 
 func (m *RootModel) clampBodyScroll() {
-	m.bodyScrollOffset = maxInt(0, m.bodyScrollOffset)
+	m.bodyScrollOffset = minInt(maxInt(0, m.bodyScrollOffset), views.BodyScrollMax(m.styles, m.shellData()))
+}
+
+func (m *RootModel) handleBodyScrollKey(msg tea.KeyPressMsg) bool {
+	if !m.bodyViewportActive() {
+		return false
+	}
+	page := maxInt(3, dashboardHeight(m.height)-2)
+	if m.inventoryVisible() {
+		metrics := layout.Compute(maxInt(m.width, 1), maxInt(m.height, 1), m.composer.Rows())
+		page = maxInt(1, metrics.Panes.Height-1)
+	}
+	switch {
+	case keymap.Matches(msg, m.keymap.Up):
+		m.scrollBody(-1)
+	case keymap.Matches(msg, m.keymap.Down):
+		m.scrollBody(1)
+	case keymap.Matches(msg, m.keymap.PageUp):
+		m.scrollBody(-page)
+	case keymap.Matches(msg, m.keymap.PageDown):
+		m.scrollBody(page)
+	case keymap.Matches(msg, m.keymap.Home):
+		m.resetBodyScroll()
+	case keymap.Matches(msg, m.keymap.End):
+		m.bodyScrollOffset = views.BodyScrollMax(m.styles, m.shellData())
+	default:
+		return false
+	}
+	return true
+}
+
+func (m RootModel) bodyViewportActive() bool {
+	return m.pendingAgentApproval != nil || m.pendingConfirm != nil || m.quitConfirmation || m.helpVisible || m.diagnosticsExpanded ||
+		strings.TrimSpace(m.setupPanelForView()) != "" || m.inventoryVisible()
+}
+
+func (m *RootModel) toggleDiagnostics() {
+	if len(m.viewDiagnostics()) == 0 {
+		m.diagnosticsExpanded = false
+		m.addAssistantMessage("No diagnostics are present.")
+		return
+	}
+	m.diagnosticsExpanded = !m.diagnosticsExpanded
+	m.closeHelp()
+	m.resetBodyScroll()
+}
+
+func (m RootModel) inventoryVisible() bool {
+	return m.connectionStatus == "connected" && !m.paneManager.Focused() &&
+		len(m.paneManager.CurrentPagePanes()) == 0 && m.appInventory.Count() > 0 &&
+		strings.TrimSpace(m.setupPanelForView()) == ""
+}
+
+func (m *RootModel) requestSelectedInventoryStart() tea.Cmd {
+	item := m.appInventory.Selected()
+	if item == nil {
+		m.addAssistantMessage("No registered app is selected.")
+		return nil
+	}
+	if !item.CanStart() {
+		switch strings.ToLower(strings.TrimSpace(item.Status)) {
+		case "running", "starting":
+			m.addAssistantMessage("App " + item.ID + " is already " + item.Status + "; use Ctrl+O to reopen a hidden monitoring pane.")
+		case "failed", "degraded":
+			m.addAssistantMessage("App " + item.ID + " is " + item.Status + "; use /restart " + item.ID + " to review a daemon restart request.")
+		default:
+			m.addAssistantMessage("App " + item.ID + " cannot be started from its current " + valueOr(item.Status, "unknown") + " state.")
+		}
+		return nil
+	}
+	confirmation, err := m.prepareConfirmation(slash.ParsedCommand{Kind: slash.KindLaunch, Target: item.ID})
+	if err != nil {
+		m.addAssistantMessage(err.Error())
+		return nil
+	}
+	m.pendingConfirm = confirmation
+	m.resetBodyScroll()
+	m.refreshAssistantPrompt()
+	return nil
+}
+
+func (m *RootModel) followInventorySelection() {
+	row := views.InventorySelectionLine(m.styles, m.shellData())
+	m.ensureBodyLineVisible(row)
+}
+
+func (m *RootModel) followPaneSelection(direction int) {
+	if direction == 0 {
+		return
+	}
+	layout := m.paneManager.Layout()
+	viewport := maxInt(1, dashboardHeight(m.height)-1)
+	if layout.Rows*layout.PaneHeight <= viewport {
+		m.resetBodyScroll()
+		return
+	}
+	m.scrollBody(direction * maxInt(1, layout.PaneHeight))
+}
+
+func (m *RootModel) ensureBodyLineVisible(line int) {
+	metrics := layout.Compute(maxInt(m.width, 1), maxInt(m.height, 1), m.composer.Rows())
+	viewport := maxInt(1, metrics.Panes.Height)
+	if views.BodyScrollMax(m.styles, m.shellData()) > 0 && viewport > 1 {
+		viewport--
+	}
+	if line < m.bodyScrollOffset {
+		m.bodyScrollOffset = line
+	} else if line >= m.bodyScrollOffset+viewport {
+		m.bodyScrollOffset = line - viewport + 1
+	}
+	m.clampBodyScroll()
 }
 
 func (m RootModel) mouseInBody(y int) bool {

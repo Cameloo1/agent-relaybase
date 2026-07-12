@@ -5,8 +5,7 @@ import { safeToolExecute, successResult, type RelaybaseAgentToolDefinition } fro
 const parameters = z
   .object({
     manifestPath: z.string().optional(),
-    cwd: z.string().optional(),
-    manifest: z.record(z.string(), z.unknown()).optional()
+    cwd: z.string().optional()
   })
   .strict();
 
@@ -14,7 +13,7 @@ export function createValidateManifestTool(): RelaybaseAgentToolDefinition<z.inf
   const definition: RelaybaseAgentToolDefinition<z.infer<typeof parameters>> = {
     name: "validate_manifest",
     description:
-      "Validate a Relaybase manifest object or manifest path without writing files. Use this before registration or patch apply.",
+      "Validate a Relaybase manifest path without writing files. Use this before registration or patch apply.",
     parameters,
     approvalRequired: false,
     risk: "low",

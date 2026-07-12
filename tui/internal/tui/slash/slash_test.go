@@ -26,6 +26,7 @@ func TestParseSlashCommands(t *testing.T) {
 		{name: "unpin", input: "/unpin current", kind: KindUnpin, target: "current"},
 		{name: "theme", input: "/theme dark", kind: KindTheme},
 		{name: "help", input: "/help", kind: KindHelp},
+		{name: "usage", input: "/usage", kind: KindUsage},
 		{name: "confirm", input: "/confirm", kind: KindConfirm},
 		{name: "cancel", input: "/cancel", kind: KindCancel},
 		{name: "daemon status", input: "/daemon status", kind: KindDaemonStatus},
@@ -37,7 +38,7 @@ func TestParseSlashCommands(t *testing.T) {
 		{name: "thread clear", input: "/thread clear", kind: KindThreadClear},
 		{name: "thread export", input: "/thread export markdown", kind: KindThreadExport},
 		{name: "thread preview", input: "/thread preview", kind: KindThreadPreview},
-		{name: "add app", input: "/add app C:/project using npm run dev", kind: KindAddApp},
+		{name: "add app", input: "/add C:/project using npm run dev", kind: KindAddApp},
 		{name: "register", input: "/register C:/project/relaybase.app.json", kind: KindRegister},
 		{name: "configure", input: "/configure current folder --dry-run", kind: KindConfigure},
 		{name: "open", input: "/open C:/project", kind: KindOpen, target: "C:/project"},
@@ -73,12 +74,12 @@ func TestParseSlashCommands(t *testing.T) {
 }
 
 func TestParseSetupCommandDetails(t *testing.T) {
-	add, err := Parse("/add app C:/Users/wamin/Desktop/app using npm run dev")
+	add, err := Parse("/add C:/Users/wamin/Desktop/app using npm run dev")
 	if err != nil {
-		t.Fatalf("Parse add app: %v", err)
+		t.Fatalf("Parse add: %v", err)
 	}
 	if add.Path != "C:/Users/wamin/Desktop/app" || add.Command != "npm run dev" {
-		t.Fatalf("unexpected add app parse: %#v", add)
+		t.Fatalf("unexpected add parse: %#v", add)
 	}
 
 	configure, err := Parse("/configure current folder --dry-run")
@@ -135,6 +136,11 @@ func TestParseRequiredSlashCommandMatrix(t *testing.T) {
 		confirmed bool
 	}{
 		{input: "/add app", kind: KindAddApp},
+		{input: "/add C:/project", kind: KindAddApp, path: "C:/project"},
+		{input: "/add .", kind: KindAddApp, path: "."},
+		{input: "/add current folder", kind: KindAddApp, path: "current folder"},
+		{input: "/add this folder", kind: KindAddApp, path: "this folder"},
+		{input: "/add C:/project using npm run dev", kind: KindAddApp, path: "C:/project"},
 		{input: "/add app C:/project using npm run dev", kind: KindAddApp, path: "C:/project"},
 		{input: "/configure", kind: KindConfigure, path: "current"},
 		{input: "/configure cwd", kind: KindConfigure, path: "current"},
@@ -184,6 +190,7 @@ func TestParseRequiredSlashCommandMatrix(t *testing.T) {
 		{input: "/daemon repair", kind: KindDaemonRepair},
 		{input: "/daemon retry", kind: KindDaemonRepair},
 		{input: "/help", kind: KindHelp},
+		{input: "/usage", kind: KindUsage},
 		{input: "/confirm", kind: KindConfirm},
 		{input: "/cancel", kind: KindCancel},
 	}
@@ -258,14 +265,15 @@ func TestParsePathAndQuotedVariants(t *testing.T) {
 		command string
 		dryRun  bool
 	}{
-		{name: "quoted Windows path add", input: `/add app "C:\Users\wamin\Desktop\My App" using "npm run dev"`, kind: KindAddApp, path: `C:\Users\wamin\Desktop\My App`, command: "npm run dev"},
+		{name: "quoted Windows path add", input: `/add "C:\Users\wamin\Desktop\My App" using "npm run dev"`, kind: KindAddApp, path: `C:\Users\wamin\Desktop\My App`, command: "npm run dev"},
+		{name: "legacy quoted Windows path add", input: `/add app "C:\Users\wamin\Desktop\My App" using "npm run dev"`, kind: KindAddApp, path: `C:\Users\wamin\Desktop\My App`, command: "npm run dev"},
 		{name: "path with spaces configure", input: `/configure "C:/Users/wamin/Desktop/My App" --dry-run`, kind: KindConfigure, path: "C:/Users/wamin/Desktop/My App", dryRun: true},
 		{name: "quoted manifest register", input: `/register "C:/Users/wamin/Desktop/My App/relaybase.app.json"`, kind: KindRegister, path: "C:/Users/wamin/Desktop/My App/relaybase.app.json"},
 		{name: "relative path configure", input: `/configure ./examples/notes`, kind: KindConfigure, path: "./examples/notes"},
 		{name: "absolute path open", input: `/open C:/Users/wamin/Desktop/project`, kind: KindOpen, path: "C:/Users/wamin/Desktop/project", target: "C:/Users/wamin/Desktop/project"},
 		{name: "nonexistent path parsed only", input: `/repair C:/this/path/does/not/exist`, kind: KindRepair, path: "C:/this/path/does/not/exist", target: "C:/this/path/does/not/exist"},
 		{name: "path traversal parsed for daemon validation", input: `/manifest inspect ../outside/relaybase.app.json`, kind: KindManifestInspect, path: "../outside/relaybase.app.json", target: "../outside/relaybase.app.json"},
-		{name: "command hint can carry npm port separator", input: `/add app C:/project using npm run dev -- --port 0`, kind: KindAddApp, path: "C:/project", command: "npm run dev -- --port 0"},
+		{name: "command hint can carry npm port separator", input: `/add C:/project using npm run dev -- --port 0`, kind: KindAddApp, path: "C:/project", command: "npm run dev -- --port 0"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -326,9 +334,9 @@ func TestParseRejectsInvalidArgumentsAndFlags(t *testing.T) {
 		{input: "/thread clear now", want: "Use /thread clear."},
 		{input: "/thread export zip", want: "Use /thread export <json|markdown>."},
 		{input: "/thread preview now", want: "Use /thread preview."},
-		{input: "/add", want: "Use /add app or /add app <path> using <command>."},
+		{input: "/add", want: "Use /add <path> or /add <path> using <command>."},
 		{input: "/add app --force using npm run dev", want: `Unknown flag "--force"`},
-		{input: "/add app C:/project using", want: "Use /add app <path> using <command>."},
+		{input: "/add app C:/project using", want: "Use /add <path> using <command>."},
 		{input: "/register", want: "Use /register <manifest-path>."},
 		{input: "/register --manifest", want: `Unknown flag "--manifest"`},
 		{input: "/configure C:/project --dry-run --dry-run", want: "Flag --dry-run was provided more than once."},
@@ -388,7 +396,7 @@ func TestConfirmationRequirements(t *testing.T) {
 		"/stop api",
 		"/restart api",
 		"/logs export all",
-		"/add app C:/project using npm run dev",
+		"/add C:/project using npm run dev",
 		"/configure C:/project",
 		"/register C:/project/relaybase.app.json",
 		"/open C:/project",
@@ -470,6 +478,33 @@ func TestResolveExactAppDisplayNameGroupAndRole(t *testing.T) {
 	}
 	if len(role.AppIDs) != 1 || role.AppIDs[0] != "api" {
 		t.Fatalf("unexpected role target: %#v", role)
+	}
+}
+
+func TestResolveExactAppIdWinsOverEquivalentSingletonGroup(t *testing.T) {
+	ctx := resolutionFixture()
+	ctx.State.Apps = []relaybaseclient.AppState{
+		{ID: "ratemygithub", Name: "ratemygithub", RuntimeStatus: "stopped"},
+	}
+	ctx.State.Groups = []relaybaseclient.AppGroup{{
+		GroupID:     "ratemygithub",
+		DisplayName: "ratemygithub",
+		Components: []relaybaseclient.AppComponent{{
+			AppID:       "ratemygithub",
+			GroupID:     "ratemygithub",
+			Role:        "other",
+			PaneLabel:   "other",
+			DisplayName: "ratemygithub",
+		}},
+	}}
+	ctx.State.Components = append([]relaybaseclient.AppComponent(nil), ctx.State.Groups[0].Components...)
+
+	target, err := ResolveLifecycleTarget(ctx, "ratemygithub")
+	if err != nil {
+		t.Fatalf("resolve singleton app/group: %v", err)
+	}
+	if len(target.AppIDs) != 1 || target.AppIDs[0] != "ratemygithub" || target.GroupID != "" {
+		t.Fatalf("expected exact app target, got %#v", target)
 	}
 }
 

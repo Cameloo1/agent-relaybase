@@ -238,8 +238,16 @@ test("OA-THREADS-001 ThreadStore active-thread metadata lives in SQLite schema_m
 
 test("RA009 daemon session and audit files survive restart without storing secrets", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-restart-"));
-  const previous = process.env.OPENROUTER_API_KEY;
+  const previous = saveEnv([
+    "OPENROUTER_API_KEY",
+    "RELAYBASE_AGENT_MODEL",
+    "RELAYBASE_AGENT_ENABLED",
+    "RELAYBASE_AGENT_REMOTE_MODEL_ENABLED"
+  ]);
   process.env.OPENROUTER_API_KEY = "sk-or-daemon-restart-secret";
+  delete process.env.RELAYBASE_AGENT_MODEL;
+  delete process.env.RELAYBASE_AGENT_ENABLED;
+  delete process.env.RELAYBASE_AGENT_REMOTE_MODEL_ENABLED;
   const first = await createRelaybaseServer({ port: 0, stateDir });
 
   try {
@@ -263,12 +271,63 @@ test("RA009 daemon session and audit files survive restart without storing secre
     assert.ok(second.runtime.agentGateway.auditEvents().some((event) => event.type === "agent.run_blocked"));
   } finally {
     await second.close();
-    if (previous === undefined) {
-      delete process.env.OPENROUTER_API_KEY;
-    } else {
-      process.env.OPENROUTER_API_KEY = previous;
-    }
+    restoreEnvValues(previous);
   }
+});
+
+test("Agent run idempotency survives gateway restart and interrupted queued work fails closed", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-run-restart-"));
+  const runtime = fakeRelaybaseRuntime();
+  const firstGateway = new AgentGatewayService({ stateDir });
+  const session = await firstGateway.createSession(runtime, {});
+  const first = await firstGateway.addMessage(runtime, session.id, {
+    content: "inspect the app",
+    idempotencyKey: "restart-safe-message-1"
+  });
+  assert.equal(first.run.status, "failed");
+
+  const restartedGateway = new AgentGatewayService({ stateDir });
+  const duplicate = await restartedGateway.addMessage(runtime, session.id, {
+    content: "inspect the app",
+    idempotencyKey: "restart-safe-message-1"
+  });
+  assert.equal(duplicate.reused, true);
+  assert.equal(duplicate.message.id, first.message.id);
+  assert.equal(duplicate.run.id, first.run.id);
+
+  const interruptedStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-run-interrupted-"));
+  const store = new AgentSessionStore({ stateDir: interruptedStateDir });
+  const interruptedSession = store.create({}, minimalContext());
+  const createdAt = new Date().toISOString();
+  store.appendMessage(interruptedSession.id, {
+    id: "message-interrupted-1",
+    sessionId: interruptedSession.id,
+    runId: "run-interrupted-1",
+    role: "user",
+    content: "start the app",
+    createdAt
+  });
+  store.appendRun(interruptedSession.id, {
+    id: "run-interrupted-1",
+    sessionId: interruptedSession.id,
+    status: "queued",
+    provider: "openrouter",
+    modelSlug: "openrouter/test-model",
+    createdAt,
+    events: []
+  });
+
+  const reconciledGateway = new AgentGatewayService({ stateDir: interruptedStateDir });
+  const reconciledRun = reconciledGateway.getRun(interruptedSession.id, "run-interrupted-1");
+  assert.equal(reconciledRun.status, "failed");
+  assert.equal(reconciledRun.diagnostic?.code, "AGENT_RUN_INTERRUPTED");
+  assert.match(reconciledRun.diagnostic?.userAction ?? "", /retry/i);
+  const failedEvent = reconciledGateway
+    .sessionEvents(interruptedSession.id)
+    .find((event) => event.runId === reconciledRun.id && event.type === "run.failed");
+  assert.ok(failedEvent);
+  assert.equal(failedEvent.id, String(failedEvent.sequence));
+  assert.match(failedEvent.id, /^\d+$/);
 });
 
 test("RA009 budget limit blocks before model spend and audits the block", async () => {
@@ -312,7 +371,8 @@ test("RA009 audit records approval, tool, setup, manifest, prove, repair, and us
     const gateway = gatewayWithApprovalRunner("start_app", { appId: "notes-web" });
     const session = await gateway.createSession(fixture.runtime, {});
     const result = await gateway.addMessage(fixture.runtime, session.id, { content: "start notes" });
-    const approval = approvalFromEvents(result.run.events);
+    await waitFor(() => gateway.getRun(session.id, result.run.id).status === "waiting_for_approval");
+    const approval = approvalFromEvents(gateway.sessionEvents(session.id));
     await gateway.resolveApproval(fixture.runtime, approval.id, "approved");
 
     const directAudit = new AgentAuditStore();
@@ -368,7 +428,8 @@ test("OA-THREADS-002 persisted approvals recover pending and require reconfirmat
     const fixture = fakeApprovalRelaybaseRuntime();
     const gateway = gatewayWithApprovalRunner("start_app", { appId: "notes-web" }, stateDir);
     const session = await gateway.createSession(fixture.runtime, {});
-    await gateway.addMessage(fixture.runtime, session.id, { content: "start notes" });
+    const submitted = await gateway.addMessage(fixture.runtime, session.id, { content: "start notes" });
+    await waitFor(() => gateway.getRun(session.id, submitted.run.id).status === "waiting_for_approval");
     const approval = approvalFromEvents(gateway.sessionEvents(session.id));
 
     const restarted = new AgentGatewayService({ stateDir });
@@ -458,10 +519,11 @@ test("AGENT-TUI-MATRIX-004 redaction covers config, session, audit, prompt, and 
     const unsubscribe = gateway.subscribeSession(session.id, (event) => streamed.push(event));
 
     try {
-      await gateway.addMessage(runtime, session.id, {
+      const submitted = await gateway.addMessage(runtime, session.id, {
         content:
           "Please summarize OPENROUTER_API_KEY=sk-or-user-message-secret Authorization: Bearer user-bearer-secret"
       });
+      await waitFor(() => gateway.getRun(session.id, submitted.run.id).status === "completed");
     } finally {
       unsubscribe();
     }
@@ -666,6 +728,20 @@ async function withEnvAsync(name: string, value: string, callback: () => Promise
       delete process.env[name];
     } else {
       process.env[name] = previous;
+    }
+  }
+}
+
+function saveEnv(names: string[]): Map<string, string | undefined> {
+  return new Map(names.map((name) => [name, process.env[name]]));
+}
+
+function restoreEnvValues(values: Map<string, string | undefined>): void {
+  for (const [name, value] of values.entries()) {
+    if (value === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = value;
     }
   }
 }

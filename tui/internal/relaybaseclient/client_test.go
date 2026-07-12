@@ -3,9 +3,14 @@ package relaybaseclient
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestGetStateSuccess(t *testing.T) {
@@ -46,7 +51,7 @@ func TestQueryLogsSuccess(t *testing.T) {
 			t.Fatalf("unexpected limit query: %s", r.URL.RawQuery)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"notes","events":[{"sequence":1,"appId":"notes","groupId":"notes","componentRole":"frontend","stream":"stdout","message":"ready"}],"page":{"limit":50,"oldestSequence":1,"newestSequence":1,"hasMore":false},"diagnostics":[]}`))
+		_, _ = w.Write([]byte(`{"id":"notes","events":[{"sequence":1,"appId":"notes","groupId":"notes","componentRole":"frontend","stream":"stdout","message":"ready"}],"page":{"limit":50,"nextBefore":1,"oldestSequence":1,"newestSequence":1,"hasMore":true},"diagnostics":[]}`))
 	}))
 	defer server.Close()
 
@@ -57,6 +62,9 @@ func TestQueryLogsSuccess(t *testing.T) {
 	}
 	if len(snapshot.Events) != 1 || snapshot.Events[0].DisplayLine() != "[stdout] ready" {
 		t.Fatalf("unexpected snapshot: %#v", snapshot)
+	}
+	if string(snapshot.Page.NextBefore) != "1" {
+		t.Fatalf("numeric nextBefore did not decode as cursor string: %#v", snapshot.Page)
 	}
 }
 
@@ -107,6 +115,199 @@ func TestEventStreamParsesDaemonEvent(t *testing.T) {
 	if event.Type != "daemon.ready" || event.Sequence != 12 {
 		t.Fatalf("unexpected event: %#v", event)
 	}
+}
+
+func TestAgentEventStreamReconnectsFromLastSequenceAndDeduplicatesReplay(t *testing.T) {
+	connection := 0
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		connection++
+		body := ""
+		switch connection {
+		case 1:
+			if got := r.URL.Query().Get("afterSequence"); got != "" {
+				t.Fatalf("initial stream unexpectedly requested replay from %q", got)
+			}
+			body = "id: 1\nevent: run.started\ndata: {\"type\":\"run.started\",\"sequence\":1}\n\n"
+		case 2:
+			if got := r.URL.Query().Get("afterSequence"); got != "1" {
+				t.Fatalf("reconnect afterSequence=%q, want 1", got)
+			}
+			if got := r.Header.Get("Last-Event-ID"); got != "1" {
+				t.Fatalf("reconnect Last-Event-ID=%q, want 1", got)
+			}
+			body = "id: 1\nevent: run.started\ndata: {\"type\":\"run.started\",\"sequence\":1}\n\n" +
+				"id: 2\nevent: answer\ndata: {\"type\":\"answer\",\"sequence\":2,\"data\":{\"content\":\"done\"}}\n\n"
+		default:
+			t.Fatalf("unexpected stream connection %d", connection)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})}
+
+	client := New("http://relaybase.test", "test-token", httpClient)
+	stream, err := client.StreamAgentSessionEvents(context.Background(), "session-1")
+	if err != nil {
+		t.Fatalf("StreamAgentSessionEvents returned error: %v", err)
+	}
+	defer stream.Close()
+	stream.reconnectBackoff = func(int) time.Duration { return 0 }
+
+	first, err := stream.Next(context.Background())
+	if err != nil || first.Sequence != 1 {
+		t.Fatalf("first event=%#v err=%v", first, err)
+	}
+	reconnecting, err := stream.Next(context.Background())
+	if err != nil || reconnecting.Type != "stream.reconnecting" {
+		t.Fatalf("reconnect status event=%#v err=%v", reconnecting, err)
+	}
+	replayed, err := stream.Next(context.Background())
+	if err != nil {
+		t.Fatalf("replayed Next returned error: %v", err)
+	}
+	if replayed.Sequence != 2 || replayed.Type != "answer" {
+		t.Fatalf("duplicate replay was not discarded: %#v", replayed)
+	}
+	if connection != 2 {
+		t.Fatalf("connection count=%d, want 2", connection)
+	}
+}
+
+func TestAgentEventStreamCloseDuringNextIsConcurrentAndIdempotent(t *testing.T) {
+	body := newBlockingReadCloser()
+	stream := newAgentEventStream(&http.Response{StatusCode: http.StatusOK, Body: body}, nil)
+	nextResult := make(chan error, 1)
+	go func() {
+		_, err := stream.Next(context.Background())
+		nextResult <- err
+	}()
+
+	select {
+	case <-body.readStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Next did not begin its blocking read")
+	}
+
+	const closeCallers = 8
+	closeErrors := make(chan error, closeCallers)
+	var waiters sync.WaitGroup
+	waiters.Add(closeCallers)
+	for range closeCallers {
+		go func() {
+			defer waiters.Done()
+			closeErrors <- stream.Close()
+		}()
+	}
+	waiters.Wait()
+	close(closeErrors)
+	for err := range closeErrors {
+		if err != nil {
+			t.Fatalf("concurrent Close returned error: %v", err)
+		}
+	}
+
+	select {
+	case err := <-nextResult:
+		if !errors.Is(err, io.ErrClosedPipe) {
+			t.Fatalf("Next error=%v, want io.ErrClosedPipe", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not unblock Next")
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("idempotent Close returned error: %v", err)
+	}
+	if got := body.closeCount.Load(); got != 1 {
+		t.Fatalf("response body closed %d times, want exactly once", got)
+	}
+}
+
+func TestAgentEventStreamCloseDuringReconnectCancelsWithoutDeadlock(t *testing.T) {
+	reconnectStarted := make(chan struct{})
+	stream := newAgentEventStream(
+		&http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(
+				"id: 1\nevent: run.started\ndata: {\"type\":\"run.started\",\"sequence\":1}\n\n",
+			)),
+		},
+		func(ctx context.Context, _ int64) (*http.Response, error) {
+			close(reconnectStarted)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	)
+	stream.reconnectBackoff = func(int) time.Duration { return 0 }
+
+	if event, err := stream.Next(context.Background()); err != nil || event.Sequence != 1 {
+		t.Fatalf("initial event=%#v err=%v", event, err)
+	}
+	if event, err := stream.Next(context.Background()); err != nil || event.Type != "stream.reconnecting" {
+		t.Fatalf("reconnect status event=%#v err=%v", event, err)
+	}
+
+	nextResult := make(chan error, 1)
+	go func() {
+		_, err := stream.Next(context.Background())
+		nextResult <- err
+	}()
+	select {
+	case <-reconnectStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconnect did not begin")
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("Close during reconnect returned error: %v", err)
+	}
+	select {
+	case err := <-nextResult:
+		if !errors.Is(err, io.ErrClosedPipe) {
+			t.Fatalf("reconnect Next error=%v, want io.ErrClosedPipe", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not cancel reconnect")
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("second Close returned error: %v", err)
+	}
+}
+
+type blockingReadCloser struct {
+	readStarted chan struct{}
+	closed      chan struct{}
+	readOnce    sync.Once
+	closeOnce   sync.Once
+	closeCount  atomic.Int32
+}
+
+func newBlockingReadCloser() *blockingReadCloser {
+	return &blockingReadCloser{
+		readStarted: make(chan struct{}),
+		closed:      make(chan struct{}),
+	}
+}
+
+func (b *blockingReadCloser) Read(_ []byte) (int, error) {
+	b.readOnce.Do(func() { close(b.readStarted) })
+	<-b.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (b *blockingReadCloser) Close() error {
+	b.closeOnce.Do(func() {
+		b.closeCount.Add(1)
+		close(b.closed)
+	})
+	return nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
 
 func TestSetupClientMethodsUseDaemonSetupRoutes(t *testing.T) {

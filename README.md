@@ -2,7 +2,7 @@
 
 # Relaybase
 
-[![CI](https://github.com/Cameloo1/agent-relaybase/actions/workflows/ci.yml/badge.svg)](https://github.com/Cameloo1/agent-relaybase/actions/workflows/ci.yml)
+[![CI](https://github.com/Cameloo1/relaybase/actions/workflows/ci.yml/badge.svg)](https://github.com/Cameloo1/relaybase/actions/workflows/ci.yml)
 [![Package](https://img.shields.io/badge/package-%40cameloo%2Frelaybase-blue)](https://www.npmjs.com/package/@cameloo/relaybase)
 ![Node](https://img.shields.io/badge/node-%3E%3D24-339933)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -14,9 +14,25 @@ Relaybase is a local-first lifecycle hub for AI-built apps. It runs a localhost 
 ## Normal Flow
 
 ```powershell
-relaybase configure
-relaybase open
-relaybase health
+relaybase start
+relaybase check
+relaybase verify
+```
+
+`relaybase start` launches the normal operator surface. With no app id, it starts the Relaybase daemon when safe, locates or builds the Go TUI in a source checkout, and opens the TUI. With an app id, `relaybase start <app-id>` still starts that registered app through the daemon.
+
+In a fresh source checkout, `npm.cmd start` launches the same bundled start flow without changing the global npm prefix. Ordinary start and check commands never run `npm link` or remove command shims. If you intentionally want this checkout to own the global `relaybase` command, inspect with `relaybase repair-prefix --diagnose` and run `relaybase repair-prefix` explicitly.
+
+`relaybase check` is the read-only daily diagnosis command. It runs the TUI/toolchain doctor, project and daemon health, and app inventory without making OpenRouter calls, running a package dry-run, starting unknown user apps, or repairing the command prefix.
+
+`relaybase verify` is the source-checkout verification gate. By default it runs formatting, lint, typecheck, Node tests, Jest tests, and Relaybase health. Add `--full`, `--release`, `--live`, `--race`, or `--all` when you intentionally want deeper gates.
+
+The npm wrappers call the same CLI bundles:
+
+```powershell
+npm.cmd start
+npm.cmd run check
+npm.cmd run verify
 ```
 
 `relaybase configure` detects the project, chooses a setup plan, writes guarded Relaybase files, registers the app, and can verify the launch.
@@ -27,14 +43,24 @@ relaybase health
 
 Use `relaybase list` to see registered apps and runtime state. It uses daemon state when available and registry-only state when the daemon is offline.
 
+Daemon lifecycle operations are recorded in a bounded redacted SQLite ledger under the Relaybase state directory. If the daemon restarts during queued or running work, the operation fails closed as interrupted and remains inspectable/retryable; Relaybase does not infer completion.
+
 ## TUI
 
-Run the daemon, then launch the terminal UI:
+Launch the terminal UI through the bundled start command:
+
+```powershell
+relaybase start
+```
+
+The lower-level daemon and TUI commands remain available:
 
 ```powershell
 relaybase serve
 relaybase tui
 ```
+
+The dashboard at `http://localhost:7777/__hub` provides a safe read-only, searchable and status-filtered app inventory, registered/running/stopped/attention counts, refresh, and an allowlisted app detail drawer. It does not embed the daemon token or full app records. Lifecycle changes, rich state, and logs remain available through authenticated Relaybase clients; the page does not own app processes.
 
 The Node CLI bridge resolves the TUI binary in this order: `RELAYBASE_TUI_BIN`, the repo-local `.relaybase/tui-dev-bin/<platform binary>` from `npm run tui:build`, `bin/relaybase-tui/<platform binary>` inside the installed package, an optional `@cameloo/relaybase-tui-<platform>-<arch>` platform package, then a globally installed `relaybase-tui` on `PATH`. Local source builds write both the ignored development launch binary and the package asset binary with:
 
@@ -52,7 +78,7 @@ The direct binary entrypoint is `relaybase-tui`; it accepts `--base-url`, `--sta
 
 If `relaybase tui` reports a missing binary, build it from source or set `RELAYBASE_TUI_BIN` to an existing `relaybase-tui` binary. Source builds and TUI checks require Go `1.25.x`; `npm run doctor:tui` reports the local Go, binary, and release-tool readiness. If the bridge reports that the daemon is unavailable, start `relaybase serve` first. Auth failures are handled by the TUI using the existing Relaybase state directory token conventions.
 
-Relaybase CLI commands load a local `.env` from the command working directory before reading environment-backed options. Copy `.env.example` to `.env`, fill in `OPENROUTER_API_KEY` and `RELAYBASE_AGENT_MODEL` for live Operator Agent/OpenRouter runs, then start the daemon or run `npm run agent:smoke:openrouter`. Existing shell environment values take precedence over `.env`; set `RELAYBASE_ENV_FILE` to use a different file.
+Relaybase CLI commands load a local `.env` from the command working directory before reading environment-backed options. Copy `.env.example` to `.env`, fill in `OPENROUTER_API_KEY` and `RELAYBASE_AGENT_MODEL` for live Operator Agent/OpenRouter runs, then start the daemon or run `npm run agent:smoke:openrouter`. Existing shell environment values take precedence over `.env`; set `RELAYBASE_ENV_FILE` to use a different file. Non-secret Agent defaults can also be updated through the token-gated Agent config API and are persisted at `<state-dir>/agent/config.json`; shell and `.env` values override those persisted defaults, and API key material is never written there. The current local live acceptance used `openai/gpt-5.4`; provider model availability is external and should be rechecked when repeating live verification.
 
 ## Routes
 

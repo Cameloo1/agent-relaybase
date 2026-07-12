@@ -13,10 +13,29 @@ This is the required keymap for the Relaybase Bubble Tea TUI.
 | `f`             | Toggle follow mode in log/event panes.                                                                                                   |
 | `/`             | Open slash-command input.                                                                                                                |
 | Text input      | Start deterministic assistant input from the dashboard.                                                                                  |
+| Ctrl+V          | Paste the system clipboard into the assistant input when the terminal does not send bracketed paste text itself.                         |
+| Ctrl+Shift+V    | Paste the system clipboard into the assistant input.                                                                                     |
+| Ctrl+C          | Copy the current assistant input while the input is active; outside active input, it is left to the terminal/runtime.                    |
+| Ctrl+Shift+C    | Copy the current assistant input while the input is active.                                                                              |
 | Ctrl+Z          | Open the contextual menu when the terminal supports it.                                                                                  |
 | Ctrl+O          | Open the contextual menu as the guaranteed fallback.                                                                                     |
+| Ctrl+D          | Toggle the diagnostics drawer when diagnostics are present.                                                                              |
 | `?`             | Open help.                                                                                                                               |
 | `q`             | Start the quit flow.                                                                                                                     |
+
+## Pane Log Controls
+
+Each pane places `[c] [·] [·]` below its PID/backend-port metadata. The active `[c]` control copies the newest 20 non-empty retained log lines, in chronological order, to the system clipboard. It copies only the sanitized display lines and never echoes the payload into TUI history or diagnostics. The `c` key performs the same copy action only while that pane is focused. If the host clipboard is unavailable or the pane has no retained logs, Relaybase reports a safe diagnostic instead of claiming success.
+
+The two dot controls are intentionally inert reserved space for future pane-local controls. They do not change focus, lifecycle state, or clipboard state.
+
+Mouse-wheel scrolling applies to a compact dashboard pane only while the pointer is over that pane's log content. It changes that pane's retained-log offset without selecting, focusing, or scrolling a different pane. At the older-log boundary, Relaybase may request an older daemon log page for that same app. Wheel events over non-log content retain their existing body-scroll behavior.
+
+## Command Discovery
+
+`?` opens searchable help with a focused text input at the top. Search matches command names, aliases, descriptions, categories, and keywords. Up/Down select results; PageUp/PageDown move five results; Home/End jump; Ctrl+Up/Ctrl+Down scroll the selected command's usage/example detail; Enter inserts the selected command into the normal assistant input without executing it; Esc closes help in one step.
+
+Typing `/` in the assistant input shows a temporary command palette directly above the pinned input. It displays up to five filtered commands at normal terminal heights (and fewer only when the terminal is too short), each with a concise description. Up/Down, PageUp/PageDown, Home/End, mouse wheel, and mouse click move/select the result. Tab always inserts the selected command; Enter inserts it when the current slash text is incomplete, or submits it once it is syntactically complete. Filtering is recalculated after typing and backspacing.
 
 ## Navigation Model
 
@@ -30,6 +49,8 @@ On the dashboard, PageUp and PageDown move between pane pages. This is how 9+ pa
 
 Inside a focused pane, PageUp and PageDown scroll logs. PageUp may request older logs from the daemon when the current pane has older scrollback available. They must not start lifecycle actions, dismiss modal state, or bypass confirmation gates.
 
+In diagnostics, setup, confirmation, and stopped-app inventory surfaces, Up/Down scroll by line, PageUp/PageDown scroll by a viewport page, and Home/End move to the beginning/end. Searchable help owns those keys for its result list as described above. The assistant bar remains pinned while the body scrolls.
+
 ## Contextual Menu
 
 Ctrl+Z is allowed only when the terminal delivers it to the TUI. Ctrl+O is the required fallback and must always open the same contextual menu, even when preferences customize the secondary binding.
@@ -40,7 +61,7 @@ The pane contextual menu currently supports:
 - pin or unpin pane
 - reopen a hidden or stopped pane when pane state is still available
 - change pane color
-- show route when the selected pane has one; clipboard copy is not implemented yet
+- show route when the selected pane has one; the pane-local `[c]` control copies the retained log tail
 - export pane logs through the daemon export API; disabled with a daemon-offline reason when the TUI is not connected
 - stop app/component through the daemon lifecycle API after confirmation; disabled with a daemon-offline reason when the TUI is not connected
 - restart app/component through the daemon lifecycle API after confirmation; disabled with a daemon-offline reason when the TUI is not connected
@@ -65,8 +86,9 @@ From the dashboard, Ctrl+Z/Ctrl+O opens the pane contextual menu. While slash in
 
 Implemented deterministic slash commands:
 
-- `/add app`
-- `/add app <path> using <command>`
+- `/add <path>`
+- `/add <path> using <command>`
+- `/add app <path> using <command>` (temporary compatibility alias)
 - `/launch <app|group|role>`
 - `/stop <app|group|role>`
 - `/restart <app|group|role>`
@@ -77,6 +99,7 @@ Implemented deterministic slash commands:
 - `/unpin <pane>`
 - `/theme <light|dark|auto>`
 - `/help`
+- `/usage`
 - `/thread list`
 - `/thread new [title]`
 - `/thread switch <id|number>`
@@ -87,6 +110,12 @@ Implemented deterministic slash commands:
 - `/daemon status`
 - `/daemon repair`
 - `/daemon retry`
+- `/create-package {'Registered App','Other App'} 'package-name'`
+- `/packages`
+- `/launch-package <package-name>`
+- `/delete-package <package-name>`
+- `/package-run retry <run-id>`
+- `/package-run abort <run-id>`
 - `/register <manifest-path>`
 - `/configure`
 - `/configure cwd`
@@ -105,9 +134,13 @@ Implemented deterministic slash commands:
 - `/component group <app> <groupId>`
 - `/component label <app> <label>`
 
-Pane targets may use `current`, the exact pane/app label, or the visible pane number on the current page. Start, stop, restart, log export, setup apply, manifest registration, project open/prove, and safe manifest patch commands require a confirmation preview unless the command includes `--confirm`. `/configure <path> --dry-run`, `/repair <app-or-path>`, and `/manifest inspect <app-or-path>` are read-only daemon requests and do not require confirmation. The preview shows action, target, risk, and expected result. Ambiguous targets ask the user to choose a more specific app id, group id, or pane id; unknown targets return an actionable error.
+Pane targets may use `current`, the exact pane/app label, or the visible pane number on the current page. Start, stop, restart, log export, package launch/delete/run retry/run abort, setup apply, manifest registration, project open/prove, and safe manifest patch commands require a confirmation preview unless the command includes `--confirm`. `/configure <path> --dry-run`, `/repair <app-or-path>`, and `/manifest inspect <app-or-path>` are read-only daemon requests and do not require confirmation. The preview shows action, target, risk, and expected result. Ambiguous targets ask the user to choose a more specific app id, group id, or pane id; unknown targets return an actionable error.
 
-Setup commands call daemon setup APIs. The TUI does not write manifests, wrappers, setup profiles, env files, or MCP config files, and it does not spawn app commands. App-targeted manifest edits require the daemon state to expose a manifest path; otherwise the TUI asks for an explicit manifest or project path instead of guessing.
+`/create-package` persists an ordered package only after every quoted member resolves to one registered app id or a unique registered display name. It refuses empty, duplicate, ambiguous, unknown, reserved, or conflicting names without starting an app. `/launch-package` creates a daemon-owned package run only after confirmation; it preflights the entire package, skips healthy running members, starts at most four members concurrently, continues after individual failures, and never rolls back already-started apps. `/package-run retry` retries only failed, skipped, or interrupted members. `/package-run abort` prevents remaining members from being enqueued; it does not stop apps that were already started.
+
+Setup commands call daemon setup APIs. The TUI does not write manifests, wrappers, setup profiles, env files, or MCP config files, and it does not spawn app commands. `/add <path>` without a command, `/configure <path>` when setup details are unclear, and `/register <project-path>` route to the daemon Agent Gateway when the Operator Agent is enabled so the daemon-owned agent can inspect the project and prepare a safe setup preview. The compatibility alias `/add app <path> using <command>` remains accepted for one release. App-targeted manifest edits require the daemon state to expose a manifest path; otherwise the TUI asks for an explicit manifest or project path instead of guessing.
+
+Only parsed `/add`, `/configure`, and folder `/register` targets populate the transient `authorizedProjectRoots` sent to the daemon. The root is canonicalized and bounded; free-form/model text does not authorize filesystem access. When the daemon is connected but the Agent is disabled or incompletely configured, `/add <path>` requests a deterministic read-only setup preview instead of becoming a dead end.
 
 Thread commands call daemon Agent Gateway session APIs. The TUI does not store chat transcripts in preferences and does not merge daemon transcript history into local deterministic history when switching threads. `/thread switch <number>` uses the latest `/thread list` result; exact IDs can be activated directly. `/thread preview` shows the daemon's active-thread context categories, recall policy, redaction state, and approval counts without exposing raw secrets, raw logs, or raw diffs.
 
@@ -119,9 +152,9 @@ Daemon repair commands use the local launch bridge created by `relaybase tui`. `
 
 Ordinary dashboard text first checks deterministic assistant phrases. This mode is local-only and uses no LLM, remote provider, or assistant-side network call while parsing. Supported phrases include launch/start/run, stop/shut down, restart/reboot/reload, show/tail/view logs, export logs, pin/unpin pane, pane color, page next/previous, diagnostics, daemon status, daemon repair/retry, and help. Supported deterministic phrases map to the same target resolver, confirmation gates, and daemon API calls as slash commands; unsupported text may be sent to the daemon Agent Gateway only when that gateway is explicitly enabled.
 
-Path-rich setup phrases are treated as daemon Agent Gateway setup input instead of local lifecycle targets when the Operator Agent is enabled. Examples include `go start the server in C:\path\to\app`, `start project .\apps\notes`, `configure <path> and start it`, `add <path> using npm run dev`, `use npm run dev in <path>`, `open <path>`, and `repair <path>`. The TUI strips common prompt artifacts such as a trailing PowerShell `>` and preserves Windows paths, relative paths, quoted paths, and `current folder`/`cwd` wording. If the daemon or Agent Gateway is unavailable, the TUI shows the exact `relaybase serve ...` recovery command when relevant plus a slash fallback such as `/configure <path> --dry-run`, `/add app <path> using npm run dev`, `/open <path>`, or `/repair <path>`.
+Path-rich setup phrases are treated as daemon Agent Gateway setup input instead of local lifecycle targets when the Operator Agent is enabled. Examples include `go start the server in C:\path\to\app`, `start project .\apps\notes`, `configure <path> and start it`, `add <path>`, `add <path> using npm run dev`, `use npm run dev in <path>`, `open <path>`, and `repair <path>`. The TUI strips common prompt artifacts such as a trailing PowerShell `>` and preserves Windows paths, relative paths, quoted paths, and `current folder`/`cwd` wording. If the daemon or Agent Gateway is unavailable, the TUI shows the exact `relaybase serve ...` recovery command when relevant plus a slash fallback such as `/configure <path> --dry-run`, `/add <path> using npm run dev`, `/open <path>`, or `/repair <path>`.
 
-The bottom assistant bar is a single-line input surface. Backspace and Ctrl+H remove the previous character, Delete is inert at the end of the line, Ctrl+U clears the current input, and pasted multiline text is normalized into a single line. The body above the assistant bar scrolls independently, and the assistant bar stays pinned at the bottom.
+The bottom assistant bar is a single-line input surface. Backspace and Ctrl+H remove the previous character, Delete is inert at the end of the line, Ctrl+U clears the current input, and pasted multiline text is normalized into a single line. Bracketed terminal paste, Ctrl+V, Ctrl+Shift+V, and Shift+Insert paste into the assistant bar. Ctrl+C and Ctrl+Shift+C copy only the current active assistant input without logging the copied value. If the host clipboard command is unavailable, the TUI shows a diagnostic instead of pretending the action worked. The body above the assistant bar scrolls independently, and the assistant bar stays pinned at the bottom.
 
 Implemented deterministic phrases:
 
@@ -159,6 +192,8 @@ Deterministic assistant mode is checked before Agent Gateway routing. When the d
 Any model-proposed start, stop, restart, setup write, manifest patch, browser/clipboard-adjacent action, or export action must become a daemon approval preview and pass through the visible confirmation gate before execution.
 
 Recovered approvals are rendered as recovered and require an explicit Enter reconfirmation or Esc rejection. The TUI passes reconfirmation to the daemon; it does not auto-resume recovered tool calls.
+
+The Agent session stream reconnects from the last accepted numeric sequence with both `afterSequence` and `Last-Event-ID`, uses bounded backoff, shows reconnecting state, and ignores replayed duplicate sequence IDs. Exhausted reconnect attempts become an explicit disconnected diagnostic.
 
 ## Quit Flow
 

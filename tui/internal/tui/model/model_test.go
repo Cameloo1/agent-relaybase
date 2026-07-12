@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/cameloo/relaybase/tui/internal/bootstrap"
 	"github.com/cameloo/relaybase/tui/internal/config"
@@ -228,6 +229,26 @@ func TestAgentDiagnosticsReplaceAndClear(t *testing.T) {
 	}
 }
 
+func TestInitialAgentReplayKeepsHistoricalDiagnosticsOutOfCurrentHealth(t *testing.T) {
+	root := newTestModel(t)
+	root.agentInitialReplay = true
+	root.applyAgentRunEvent(rawAgentEvent("diagnostic", `{"code":"AGENT_DISABLED","severity":"error","message":"historical disabled state"}`))
+
+	if hasDiagnostic(root.Diagnostics(), "agent_disabled") {
+		t.Fatalf("historical replay diagnostic contaminated current health: %#v", root.Diagnostics())
+	}
+	if !strings.Contains(strings.Join(root.assistantTimeline, "\n"), "historical disabled state") {
+		t.Fatalf("historical replay should remain visible in the thread timeline: %#v", root.assistantTimeline)
+	}
+
+	root.applyAgentRunEvent(rawAgentEvent("stream.replay_completed", `{"afterSequence":0}`))
+	root.applyAgentRunEvent(rawAgentEvent("diagnostic", `{"code":"AGENT_PROVIDER_TIMEOUT","severity":"error","message":"current provider timeout"}`))
+
+	if !hasDiagnostic(root.Diagnostics(), "agent_provider_timeout") {
+		t.Fatalf("current live diagnostic should remain visible after replay: %#v", root.Diagnostics())
+	}
+}
+
 func TestAgentConfigDiagnosticsReplaceAndClear(t *testing.T) {
 	root := newTestModel(t)
 	disabled := commands.AgentConfigLoadedMsg{Config: &relaybaseclient.AgentConfig{Enabled: false}}
@@ -368,6 +389,8 @@ func TestDashboardKeyFlow(t *testing.T) {
 
 func TestDashboardPageKeysMovePanePages(t *testing.T) {
 	root := newTestModelWithPanes(t, 9)
+	updated, _ := root.Update(tea.WindowSizeMsg{Width: 120, Height: 32})
+	root = updated.(RootModel)
 	if root.PaneManager().PageCount() != 2 {
 		t.Fatalf("expected two dashboard pages, got %d", root.PaneManager().PageCount())
 	}
@@ -393,6 +416,8 @@ func TestDashboardPageKeysMovePanePages(t *testing.T) {
 
 func TestPaneSelectionSurvivesEventReconnectAndStateRefresh(t *testing.T) {
 	root := newTestModelWithPanes(t, 9)
+	updated, _ := root.Update(tea.WindowSizeMsg{Width: 120, Height: 32})
+	root = updated.(RootModel)
 	if !root.paneManager.SelectPane("app-9:app-9-web:frontend:frontend") {
 		t.Fatal("expected page-two pane to be selectable")
 	}
@@ -473,13 +498,11 @@ func TestFocusEscapeFlowKeepsAssistantBarVisible(t *testing.T) {
 	}
 }
 
-func TestMainBodyMouseWheelScrollsAbovePinnedAssistantBar(t *testing.T) {
+func TestConstrainedRecoveryPreservesStateAndBackgroundWheelIsInert(t *testing.T) {
 	root := newTestModel(t)
+	root = typeAssistantText(t, root, "preserve this draft")
 	updated, _ := root.Update(tea.WindowSizeMsg{Width: 120, Height: 12})
 	model := updated.(RootModel)
-	for index := 1; index <= 20; index++ {
-		model.addDiagnostic(fmt.Sprintf("diagnostic-%02d", index), "warning", "overflow body line")
-	}
 
 	view := model.View()
 	if view.MouseMode != tea.MouseModeCellMotion {
@@ -487,32 +510,14 @@ func TestMainBodyMouseWheelScrollsAbovePinnedAssistantBar(t *testing.T) {
 	}
 
 	initial := model.Render()
-	if !strings.Contains(initial, "> _") {
-		t.Fatalf("initial render lost assistant bar:\n%s", initial)
-	}
-	if strings.Contains(initial, "diagnostic-20") {
-		t.Fatalf("initial render should clip late diagnostics before scrolling:\n%s", initial)
+	if !strings.Contains(initial, "needs at least 40") || model.CommandInput() != "preserve this draft" {
+		t.Fatalf("expected resize recovery without losing the draft, input=%q:\n%s", model.CommandInput(), initial)
 	}
 
-	for range 5 {
-		updated, _ = model.Update(tea.MouseWheelMsg{X: 10, Y: 5, Button: tea.MouseWheelDown})
-		model = updated.(RootModel)
-	}
-	if model.bodyScrollOffset == 0 {
-		t.Fatal("expected mouse wheel to advance main body scroll offset")
-	}
-	scrolled := model.Render()
-	if !strings.Contains(scrolled, "> _") {
-		t.Fatalf("scrolled render lost assistant bar:\n%s", scrolled)
-	}
-	if !strings.Contains(scrolled, "diagnostic-12") && !strings.Contains(scrolled, "diagnostic-13") {
-		t.Fatalf("expected scrolled body diagnostics above pinned assistant bar:\n%s", scrolled)
-	}
-
-	updated, _ = model.Update(tea.MouseWheelMsg{X: 10, Y: model.height - 1, Button: tea.MouseWheelDown})
+	updated, _ = model.Update(tea.MouseWheelMsg{X: 10, Y: 5, Button: tea.MouseWheelDown})
 	model = updated.(RootModel)
-	if model.bodyScrollOffset != 15 {
-		t.Fatalf("wheel over assistant bar should not scroll body, got offset %d", model.bodyScrollOffset)
+	if model.bodyScrollOffset != 0 || model.CommandInput() != "preserve this draft" {
+		t.Fatalf("background wheel should be inert during recovery, offset=%d input=%q", model.bodyScrollOffset, model.CommandInput())
 	}
 }
 
@@ -652,8 +657,92 @@ func TestAssistantInputEditingKeysAndPasteStayUsable(t *testing.T) {
 
 	updated, _ = model.Update(tea.KeyPressMsg{Text: "show\ndiagnostics", Code: 's'})
 	model = updated.(RootModel)
-	if model.CommandInput() != "show diagnostics" {
-		t.Fatalf("multiline paste should normalize to one line, got %q", model.CommandInput())
+	if model.CommandInput() != "show\ndiagnostics" {
+		t.Fatalf("multiline paste should preserve lines, got %q", model.CommandInput())
+	}
+}
+
+func TestAssistantInputBracketedPasteStartsAndNormalizesInput(t *testing.T) {
+	root := newTestModel(t)
+
+	updated, command := root.Update(tea.PasteMsg{Content: "launch\nnotes\tfrontend"})
+	if command == nil {
+		t.Fatal("expected asynchronous bracketed paste normalization")
+	}
+	updated, _ = updated.Update(command())
+	model := updated.(RootModel)
+
+	if !model.commandActive || model.CommandInput() != "launch\nnotes    frontend" {
+		t.Fatalf("expected bracketed paste to start normalized input, active=%v input=%q", model.commandActive, model.CommandInput())
+	}
+}
+
+func TestAssistantInputCtrlVPastesSystemClipboard(t *testing.T) {
+	root := newTestModel(t)
+	clipboard := "show\ndiagnostics"
+	readClipboardText = func() (string, error) {
+		return clipboard, nil
+	}
+	t.Cleanup(func() {
+		readClipboardText = readSystemClipboardText
+	})
+
+	updated, cmd := root.Update(tea.KeyPressMsg{Code: 22})
+	if cmd == nil {
+		t.Fatal("expected ctrl+v to request clipboard contents")
+	}
+	updated, pasteCommand := updated.Update(cmd())
+	if pasteCommand == nil {
+		t.Fatal("expected clipboard text to enter the shared paste pipeline")
+	}
+	updated, _ = updated.Update(pasteCommand())
+	model := updated.(RootModel)
+	if !model.commandActive || model.CommandInput() != "show\ndiagnostics" {
+		t.Fatalf("expected ctrl+v to paste normalized clipboard text, active=%v input=%q", model.commandActive, model.CommandInput())
+	}
+
+	clipboard = " now"
+	updated, cmd = model.Update(tea.KeyPressMsg{Code: 22})
+	if cmd == nil {
+		t.Fatal("expected ctrl+v to request clipboard contents while input is active")
+	}
+	updated, pasteCommand = updated.Update(cmd())
+	if pasteCommand == nil {
+		t.Fatal("expected second clipboard read to enter the shared paste pipeline")
+	}
+	updated, _ = updated.Update(pasteCommand())
+	model = updated.(RootModel)
+	if model.CommandInput() != "show\ndiagnostics now" {
+		t.Fatalf("expected second paste to append to active input, got %q", model.CommandInput())
+	}
+}
+
+func TestAssistantInputCopyShortcutCopiesCurrentInputOnly(t *testing.T) {
+	root := newTestModel(t)
+	model := typeAssistantText(t, root, "SECRET_TOKEN=abc123")
+	copied := ""
+	writeClipboardText = func(text string) error {
+		copied = text
+		return nil
+	}
+	t.Cleanup(func() {
+		writeClipboardText = writeSystemClipboardText
+	})
+
+	updated, cmd := model.Update(tea.KeyPressMsg{Code: 3})
+	if cmd == nil {
+		t.Fatal("expected ctrl+c to copy active input")
+	}
+	updated, _ = updated.Update(cmd())
+	model = updated.(RootModel)
+	if copied != "SECRET_TOKEN=abc123" {
+		t.Fatalf("expected current input to be copied exactly, got %q", copied)
+	}
+	if model.CommandInput() != "SECRET_TOKEN=abc123" || !model.commandActive {
+		t.Fatalf("copy should not clear active input, active=%v input=%q", model.commandActive, model.CommandInput())
+	}
+	if strings.Contains(fmt.Sprint(model.Diagnostics()), "abc123") {
+		t.Fatalf("copy diagnostic leaked clipboard contents: %#v", model.Diagnostics())
 	}
 }
 
@@ -678,9 +767,12 @@ func TestAssistantInputCanSubmitRepeatedLocalCommandsAfterFailuresAndCancel(t *t
 	first := typeAssistantText(t, root, "unknown command")
 	updated, cmd := first.Update(keyPress("enter"))
 	model := updated.(RootModel)
-	if cmd != nil || model.commandActive {
-		t.Fatalf("unsupported command should stay local and reset input, cmd=%v active=%v", cmd, model.commandActive)
+	if cmd != nil || !model.commandActive || model.CommandInput() != "unknown command" {
+		t.Fatalf("unsupported command should stay local and preserve its retryable draft, cmd=%v active=%v input=%q", cmd, model.commandActive, model.CommandInput())
 	}
+	model.commandInput = ""
+	model.composer.Clear()
+	model.setPrimaryFocus("panes")
 
 	second := typeAssistantText(t, model, "what is broken?")
 	updated, cmd = second.Update(keyPress("enter"))
@@ -696,7 +788,8 @@ func TestAssistantInputCanSubmitRepeatedLocalCommandsAfterFailuresAndCancel(t *t
 	if cmd != nil || !pending.PendingConfirmation() {
 		t.Fatalf("expected pending confirmation before cancel, cmd=%v pending=%v", cmd, pending.PendingConfirmation())
 	}
-	cancelled, cmd := submitPendingSlashInput(t, pending, "/cancel")
+	updated, cmd = pending.Update(keyPress("esc"))
+	cancelled := updated.(RootModel)
 	if cmd != nil || cancelled.PendingConfirmation() {
 		t.Fatalf("expected /cancel to clear pending confirmation, cmd=%v pending=%v", cmd, cancelled.PendingConfirmation())
 	}
@@ -729,19 +822,16 @@ func TestAssistantInputSurvivesDaemonEventsResizeScrollAndThemeChange(t *testing
 		t.Fatalf("submit after event should stay local and reset input, cmd=%v active=%v", cmd, model.commandActive)
 	}
 
-	updated, _ = model.Update(tea.WindowSizeMsg{Width: 100, Height: 10})
+	updated, _ = model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	model = updated.(RootModel)
-	for index := 1; index <= 12; index++ {
-		model.addDiagnostic(fmt.Sprintf("scroll-test-%02d", index), "warning", "body line")
-	}
-	updated, _ = model.Update(tea.MouseWheelMsg{X: 4, Y: 5, Button: tea.MouseWheelDown})
+	updated, _ = model.Update(tea.MouseWheelMsg{X: 4, Y: 0, Button: tea.MouseWheelDown})
 	model = updated.(RootModel)
-	if model.bodyScrollOffset == 0 {
-		t.Fatal("expected viewport to be scrolled before typing")
+	if model.bodyScrollOffset != 0 {
+		t.Fatalf("background wheel should not move the fixed operator shell, offset=%d", model.bodyScrollOffset)
 	}
 
 	model = typeAssistantText(t, model, "show diagnostics")
-	updated, _ = model.Update(tea.WindowSizeMsg{Width: 90, Height: 9})
+	updated, _ = model.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
 	model = updated.(RootModel)
 	if model.CommandInput() != "show diagnostics" || !model.commandActive {
 		t.Fatalf("resize should preserve input, active=%v input=%q", model.commandActive, model.CommandInput())
@@ -756,42 +846,35 @@ func TestAssistantInputSurvivesDaemonEventsResizeScrollAndThemeChange(t *testing
 	}
 }
 
-func TestAssistantLongInputRendersAsPinnedSingleLineBar(t *testing.T) {
+func TestAssistantLongInputUsesTheBoundedMultilineComposer(t *testing.T) {
 	root := newTestModel(t)
-	updated, _ := root.Update(tea.WindowSizeMsg{Width: 80, Height: 8})
+	updated, _ := root.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	model := updated.(RootModel)
 	longInput := "ask " + strings.Repeat("x", 240)
 	model = typeAssistantText(t, model, longInput)
 	rendered := model.Render()
-	if !strings.Contains(rendered, "ask ") {
-		t.Fatalf("expected assistant input to remain visible:\n%s", rendered)
+	if model.CommandInput() != longInput || model.composer.Rows() != 3 {
+		t.Fatalf("expected preserved input in three-row composer, rows=%d input=%q", model.composer.Rows(), model.CommandInput())
 	}
-	if strings.Contains(rendered, strings.Repeat("x", 120)) {
-		t.Fatalf("long input should be truncated in the pinned bar, not wrap through the layout:\n%s", rendered)
+	if got := lipgloss.Height(rendered); got != 24 || !strings.Contains(rendered, "Composer") {
+		t.Fatalf("expected fixed operator shell with composer, rows=%d:\n%s", got, rendered)
 	}
 }
 
-func TestPendingConfirmationAllowsNewAssistantTextInput(t *testing.T) {
+func TestPendingConfirmationBlocksBackgroundAssistantTextInput(t *testing.T) {
 	root := applyState(newTestModel(t), notesFrontendBackendState())
 	pending, cmd := root.submitAssistantInput("stop the backend")
 	if cmd != nil || !pending.PendingConfirmation() {
 		t.Fatalf("expected pending confirmation, cmd=%v pending=%v", cmd, pending.PendingConfirmation())
 	}
 
-	model := typeAssistantText(t, pending, "what is broken?")
-	if !model.commandActive || model.CommandInput() != "what is broken?" {
-		t.Fatalf("expected pending confirmation to allow typed assistant input, active=%v input=%q", model.commandActive, model.CommandInput())
-	}
-	updated, cmd := model.Update(keyPress("enter"))
-	model = updated.(RootModel)
-	if cmd != nil {
-		t.Fatalf("expected diagnostic assistant input to stay local, got command %v", cmd)
+	updated, cmd := pending.Update(keyPress("x"))
+	model := updated.(RootModel)
+	if cmd != nil || model.commandActive || model.CommandInput() != "" {
+		t.Fatalf("modal should consume background typing, cmd=%v active=%v input=%q", cmd, model.commandActive, model.CommandInput())
 	}
 	if !model.PendingConfirmation() {
-		t.Fatal("expected original confirmation to remain pending after non-destructive assistant input")
-	}
-	if history := strings.Join(model.assistantHistoryForView(), "\n"); !strings.Contains(history, "No failed or degraded apps") {
-		t.Fatalf("expected assistant answer after typing during confirmation, got %#v", history)
+		t.Fatal("expected original confirmation to remain pending")
 	}
 }
 
@@ -802,9 +885,8 @@ func TestPendingApprovalBlocksNewDestructiveAssistantPhrase(t *testing.T) {
 		t.Fatalf("expected initial pending confirmation, cmd=%v pending=%v", cmd, pending.PendingConfirmation())
 	}
 
-	model := typeAssistantText(t, pending, "restart api")
-	updated, cmd := model.Update(keyPress("enter"))
-	model = updated.(RootModel)
+	updated, cmd := pending.Update(keyPress("r"))
+	model := updated.(RootModel)
 	if cmd != nil {
 		t.Fatalf("destructive phrase while pending should not return command: %v", cmd)
 	}
@@ -814,32 +896,25 @@ func TestPendingApprovalBlocksNewDestructiveAssistantPhrase(t *testing.T) {
 	if model.pendingConfirm.Command.Kind != slash.KindStop {
 		t.Fatalf("expected original stop confirmation to remain, got %#v", model.pendingConfirm.Command)
 	}
-	if history := strings.Join(model.assistantHistoryForView(), "\n"); !strings.Contains(history, "Finish or cancel the pending approval") {
-		t.Fatalf("expected pending approval diagnostic, got %#v", history)
+	if model.commandActive || model.CommandInput() != "" {
+		t.Fatalf("modal should consume destructive background typing, active=%v input=%q", model.commandActive, model.CommandInput())
 	}
 }
 
-func TestPendingAgentApprovalAllowsNewAssistantTextInput(t *testing.T) {
+func TestPendingAgentApprovalBlocksBackgroundAssistantTextInput(t *testing.T) {
 	root := applyState(newTestModel(t), notesFrontendBackendState())
 	root.applyAgentRunEvent(agentSimpleApprovalEvent("approval-typing", "stop_app"))
 	if root.pendingAgentApproval == nil {
 		t.Fatal("expected pending agent approval")
 	}
 
-	model := typeAssistantText(t, root, "what is broken?")
-	if !model.commandActive || model.CommandInput() != "what is broken?" {
-		t.Fatalf("expected pending agent approval to allow typed assistant input, active=%v input=%q", model.commandActive, model.CommandInput())
-	}
-	updated, cmd := model.Update(keyPress("enter"))
-	model = updated.(RootModel)
-	if cmd != nil {
-		t.Fatalf("expected diagnostic assistant input to stay local, got command %v", cmd)
+	updated, cmd := root.Update(keyPress("x"))
+	model := updated.(RootModel)
+	if cmd != nil || model.commandActive || model.CommandInput() != "" {
+		t.Fatalf("approval modal should consume background typing, cmd=%v active=%v input=%q", cmd, model.commandActive, model.CommandInput())
 	}
 	if model.pendingAgentApproval == nil {
-		t.Fatal("expected original agent approval to remain pending after non-destructive assistant input")
-	}
-	if history := strings.Join(model.assistantHistoryForView(), "\n"); !strings.Contains(history, "No failed or degraded apps") {
-		t.Fatalf("expected assistant answer after typing during agent approval, got %#v", history)
+		t.Fatal("expected original agent approval to remain pending")
 	}
 }
 
@@ -1217,7 +1292,8 @@ func TestSlashConfirmAndCancelWorkFromPendingInput(t *testing.T) {
 		t.Fatalf("expected pending stop confirmation, cmd=%v pending=%v", cmd, pending.PendingConfirmation())
 	}
 
-	cancelled, cmd := submitPendingSlashInput(t, pending, "/cancel")
+	updated, cmd := pending.Update(keyPress("esc"))
+	cancelled := updated.(RootModel)
 	if cmd != nil {
 		t.Fatal("/cancel should not return a daemon command")
 	}
@@ -1243,7 +1319,8 @@ func TestSlashConfirmAndCancelWorkFromPendingInput(t *testing.T) {
 		t.Fatalf("expected pending stop confirmation, cmd=%v pending=%v", cmd, pending.PendingConfirmation())
 	}
 
-	confirmed, cmd := submitPendingSlashInput(t, pending, "/confirm")
+	updated, cmd = pending.Update(keyPress("enter"))
+	confirmed := updated.(RootModel)
 	if cmd == nil {
 		t.Fatal("/confirm should return confirmed daemon command")
 	}
@@ -1473,6 +1550,120 @@ func TestPathRichNaturalPhraseRoutesToAgentGatewayWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestExplicitAgentManagedSlashSerializesOnlyCanonicalAuthorizedProjectRoot(t *testing.T) {
+	projectRoot := t.TempDir()
+	canonicalRoot, err := filepath.EvalSymlinks(projectRoot)
+	if err != nil {
+		canonicalRoot = filepath.Clean(projectRoot)
+	}
+	cfg := config.Config{
+		BaseURL:          "http://127.0.0.1:7777",
+		StateDir:         t.TempDir(),
+		Token:            "test-token",
+		ThemeMode:        "auto",
+		CurrentDirectory: filepath.Dir(projectRoot),
+	}
+	root := NewRoot(cfg, relaybaseclient.New(cfg.BaseURL, cfg.Token, nil))
+	root.connectionStatus = "connected"
+	root.agentConfig = enabledAgentConfig(true)
+	root.agentSession = &relaybaseclient.AgentSession{ID: "session-1"}
+	root.agentStream = &relaybaseclient.AgentEventStream{}
+
+	for _, command := range []string{"/add", "/configure", "/register"} {
+		updated, cmd := root.submitSlashCommand(command + ` "` + projectRoot + `"`)
+		if cmd == nil {
+			t.Fatalf("expected explicit %s path to use Agent Gateway", command)
+		}
+		payload, err := json.Marshal(updated.agentContext())
+		if err != nil {
+			t.Fatalf("marshal %s agent context: %v", command, err)
+		}
+		var contextPayload relaybaseclient.TuiAgentContext
+		if err := json.Unmarshal(payload, &contextPayload); err != nil {
+			t.Fatalf("unmarshal %s agent context: %v", command, err)
+		}
+		if len(contextPayload.AuthorizedProjectRoots) != 1 || !strings.EqualFold(contextPayload.AuthorizedProjectRoots[0], canonicalRoot) {
+			t.Fatalf("%s authorized roots=%#v, want only %q", command, contextPayload.AuthorizedProjectRoots, canonicalRoot)
+		}
+	}
+
+	plain, _ := root.submitAgentInput("inspect arbitrary model text mentioning " + projectRoot)
+	if roots := plain.agentContext().AuthorizedProjectRoots; len(roots) != 0 {
+		t.Fatalf("arbitrary model text authorized project roots: %#v", roots)
+	}
+}
+
+func TestAddPathFallsBackToDeterministicDaemonPreviewWhenAgentUnavailable(t *testing.T) {
+	configs := []struct {
+		name   string
+		config *relaybaseclient.AgentConfig
+	}{
+		{name: "disabled", config: &relaybaseclient.AgentConfig{Enabled: false}},
+		{name: "unconfigured", config: enabledAgentConfig(false)},
+	}
+	for _, test := range configs {
+		t.Run(test.name, func(t *testing.T) {
+			var requestedPath string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestedPath = r.URL.Path
+				if requestedPath != "/__hub/api/setup/preview" {
+					t.Fatalf("unexpected fallback path: %s", requestedPath)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"setup":{"cwd":"C:/project","selectedPlan":{"id":"managed","choice":{"id":"managed"}},"fileWritePlan":{"root":"C:/project","approvalRequired":true,"writes":[]},"diagnostics":[]}}`))
+			}))
+			defer server.Close()
+
+			cfg := config.Config{BaseURL: server.URL, StateDir: t.TempDir(), Token: "test-token", ThemeMode: "auto", CurrentDirectory: "C:/"}
+			root := NewRoot(cfg, relaybaseclient.New(cfg.BaseURL, cfg.Token, server.Client()))
+			root.connectionStatus = "connected"
+			root.agentConfig = test.config
+
+			updated, cmd := root.submitSlashCommand("/add C:/project")
+			if cmd == nil {
+				t.Fatal("expected deterministic setup preview command")
+			}
+			if updated.PendingConfirmation() {
+				t.Fatal("read-only deterministic preview should not require mutation confirmation")
+			}
+			if history := strings.Join(updated.assistantHistoryForView(), "\n"); !strings.Contains(history, "deterministic daemon setup preview") {
+				t.Fatalf("missing deterministic fallback status: %s", history)
+			}
+			message := cmd()
+			if _, ok := message.(commands.SetupPreviewCompletedMsg); !ok {
+				t.Fatalf("fallback returned %T, want SetupPreviewCompletedMsg", message)
+			}
+			result, _ := updated.Update(message)
+			model := result.(RootModel)
+			if requestedPath != "/__hub/api/setup/preview" || model.setupSession.Preview == nil {
+				t.Fatalf("deterministic preview did not populate setup state: path=%s state=%#v", requestedPath, model.setupSession)
+			}
+		})
+	}
+}
+
+func TestAgentReconnectStatusIsVisibleAndClearsOnReplay(t *testing.T) {
+	root := newTestModel(t)
+	stream := &relaybaseclient.AgentEventStream{}
+	root.agentSession = &relaybaseclient.AgentSession{ID: "session-1"}
+	root.agentStream = stream
+	root.agentStreamSessionID = "session-1"
+	root.agentStreamGeneration = 1
+	reconnecting := rawAgentEvent("stream.reconnecting", `{"afterSequence":7,"attempt":2}`)
+	updated, _ := root.Update(commands.AgentEventMsg{Stream: stream, Event: reconnecting, SessionID: "session-1", Generation: 1})
+	model := updated.(RootModel)
+	if model.agentStatus != "reconnecting" || !hasDiagnostic(model.Diagnostics(), agentEventDisconnectedCode) {
+		t.Fatalf("reconnect status not visible: status=%s diagnostics=%#v", model.agentStatus, model.Diagnostics())
+	}
+
+	replayed := rawAgentEvent("answer", `{"content":"reconnected"}`)
+	updated, _ = model.Update(commands.AgentEventMsg{Stream: stream, Event: replayed, SessionID: "session-1", Generation: 1})
+	model = updated.(RootModel)
+	if model.agentStatus != "streaming" || hasDiagnostic(model.Diagnostics(), agentEventDisconnectedCode) {
+		t.Fatalf("reconnect status did not clear: status=%s diagnostics=%#v", model.agentStatus, model.Diagnostics())
+	}
+}
+
 func TestPathRichNaturalPhraseDoesNotResolveAsLifecycleTarget(t *testing.T) {
 	root := applyState(newTestModel(t), notesFrontendBackendState())
 	root.connectionStatus = "connected"
@@ -1505,7 +1696,7 @@ func TestPathRichNaturalPhraseDisabledAgentGivesActionableFallback(t *testing.T)
 	}
 	history := strings.Join(updated.assistantHistoryForView(), "\n")
 	if !strings.Contains(history, "Operator Agent is disabled") ||
-		!strings.Contains(history, `Slash fallback: /add app "C:\Users\wamin\Desktop\development\My App" using npm run dev`) ||
+		!strings.Contains(history, `Slash fallback: /add "C:\Users\wamin\Desktop\development\My App" using npm run dev`) ||
 		!strings.Contains(history, "relaybase serve") {
 		t.Fatalf("expected disabled-agent fallback with slash and daemon command, got %s", history)
 	}
@@ -2145,13 +2336,16 @@ func TestNoAppsStateRendersSetupOnboardingActions(t *testing.T) {
 	root.cfg.CurrentDirectory = "C:/project"
 	updated, _ := root.Update(commands.StateLoadedMsg{State: &relaybaseclient.RelaybaseState{}})
 	model := updated.(RootModel)
+	updated, _ = model.Update(tea.WindowSizeMsg{Width: 120, Height: 32})
+	model = updated.(RootModel)
 	rendered := model.Render()
 
 	for _, expected := range []string{
 		"No Apps Registered",
-		"/configure current folder --dry-run",
-		"/register <manifest-path>",
-		"/configure <path> --dry-run",
+		"Configure current project",
+		"Register manifest",
+		"Choose project path",
+		"Open setup docs",
 	} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("expected %q in no-apps render:\n%s", expected, rendered)
@@ -2733,19 +2927,22 @@ func TestAgentStreamEventRendersApprovalAndEscRejects(t *testing.T) {
 
 	cfg := config.Config{BaseURL: server.URL, StateDir: t.TempDir(), Token: "test-token", ThemeMode: "auto"}
 	root := NewRoot(cfg, relaybaseclient.New(cfg.BaseURL, cfg.Token, server.Client()))
+	updated, _ := root.Update(tea.WindowSizeMsg{Width: 160, Height: 48})
+	root = updated.(RootModel)
 	root.applyAgentRunEvent(agentApprovalEvent("approval-1"))
 
 	if root.pendingAgentApproval == nil {
 		t.Fatal("expected pending agent approval")
 	}
 	rendered := root.Render()
+	details := strings.Join(root.confirmationForView().Details, "\n")
 	if !strings.Contains(rendered, "Confirm Action") ||
-		!strings.Contains(rendered, "relaybase.app.json") ||
-		!strings.Contains(rendered, "+ {") ||
-		!strings.Contains(rendered, "runtime python") ||
-		!strings.Contains(rendered, "command python -m uvicorn main:app --host HOST --port PORT") ||
-		!strings.Contains(rendered, "port candidates explicit_host_port_flags, generated_launch_wrapper") ||
-		!strings.Contains(rendered, "setup question Which ASGI module should Relaybase run?") {
+		!strings.Contains(details, "relaybase.app.json") ||
+		!strings.Contains(details, "+ {") ||
+		!strings.Contains(details, "runtime python") ||
+		!strings.Contains(details, "command python -m uvicorn main:app --host HOST --port PORT") ||
+		!strings.Contains(details, "port candidates explicit_host_port_flags, generated_launch_wrapper") ||
+		!strings.Contains(details, "setup question Which ASGI module should Relaybase run?") {
 		t.Fatalf("expected approval file diff render:\n%s", rendered)
 	}
 
@@ -2814,6 +3011,7 @@ func TestAgentSetupRepairAndProveEventsRender(t *testing.T) {
 
 func TestAgentFolderStartApprovalAndResultsRenderFullLoop(t *testing.T) {
 	root := newTestModel(t)
+	root.height = 80
 	root.applyAgentRunEvent(rawAgentEvent("setup.file_write_approval_required", `{"approval":{"id":"approval-setup","sessionId":"session-1","runId":"run-1","status":"pending","createdAt":"2026-06-02T00:00:00Z","toolName":"setup_and_start_project","action":"setup_and_start_project","target":"C:/project","risk":"high","expectedResult":"Apply approved setup writes and register the app.","arguments":{"phase":"apply_setup","cwd":"C:/project","selectedPlanId":"managed","commandHint":"npm run dev","portStrategyHint":"framework_port_flags"},"preview":{"action":"setup_and_start_project","target":"C:/project","expectedResult":"Apply approved setup writes and register the app.","risk":"high","runtimeId":"node","runtimeLabel":"Vite","runtimeConfidence":"high","selectedCommand":{"preview":"npm run dev"},"portStrategy":"framework_port_flags"},"fileWrite":{"kind":"file_write","setupPlanId":"managed","risk":"high","fileWritePlan":{"root":"C:/project","approvalRequired":true,"writes":[{"path":"C:/project/relaybase.app.json","action":"create","reason":"manifest","diff":{"path":"C:/project/relaybase.app.json","beforeExists":false,"afterExists":true,"changed":true,"hunks":["+ {\"id\":\"selection-web\"}"]}}],"risks":[{"code":"manifest_write","severity":"warning","message":"writes manifest","requiresApproval":true}]}}}}`))
 	rendered := root.Render()
 	for _, expected := range []string{

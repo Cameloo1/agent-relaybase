@@ -11,12 +11,35 @@ import {
   type RelaybaseAgentToolDefinition
 } from "./common.ts";
 
+const relaybasePatchSchema = z
+  .object({
+    groupId: z.string().optional(),
+    componentRole: z.enum(["frontend", "backend", "worker", "database", "service", "other"]).optional(),
+    displayName: z.string().optional(),
+    paneLabel: z.string().optional(),
+    paneOrder: z.number().int().optional()
+  })
+  .strict();
+
+const manifestPatchSchema = z
+  .object({
+    id: z.string().optional(),
+    name: z.string().optional(),
+    command: z.string().optional(),
+    cwd: z.string().optional(),
+    protocol: z.enum(["http", "http+ws", "tcp"]).optional(),
+    healthUrl: z.string().optional(),
+    upstreamPort: z.number().int().positive().optional(),
+    relaybase: relaybasePatchSchema.optional()
+  })
+  .strict();
+
 const parameters = z
   .object({
     appId: z.string().optional(),
     manifestPath: z.string().optional(),
     cwd: z.string().optional(),
-    patch: z.record(z.string(), z.unknown()),
+    patch: manifestPatchSchema,
     reason: z.string().optional(),
     confirmationContext: confirmationContextSchema
   })

@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/cameloo/relaybase/tui/internal/tui/contextmenu"
+	"github.com/cameloo/relaybase/tui/internal/tui/inventory"
 	"github.com/cameloo/relaybase/tui/internal/tui/keymap"
 	"github.com/cameloo/relaybase/tui/internal/tui/panes"
 	"github.com/cameloo/relaybase/tui/internal/tui/styles"
@@ -17,6 +18,16 @@ import (
 
 func TestGoldenOnePane(t *testing.T) {
 	assertPaneSnapshot(t, 1, "App 1: frontend")
+}
+
+func TestTruncateTextRespectsTerminalDisplayWidth(t *testing.T) {
+	got := truncateText("\x1b[31m界界界", 5)
+	if strings.Contains(got, "\x1b") || lipgloss.Width(got) > 5 || got != "界界." {
+		t.Fatalf("wide/ANSI truncation=%q width=%d", got, lipgloss.Width(got))
+	}
+	if got := truncateText("界", 1); got != "." {
+		t.Fatalf("single-cell budget must not overflow with a wide glyph: %q", got)
+	}
 }
 
 func TestGoldenTwoPanes(t *testing.T) {
@@ -49,13 +60,14 @@ func TestGoldenZeroPanesShowsNoAppsGuidance(t *testing.T) {
 		Height:           24,
 		ConnectionStatus: "connected",
 		EventStatus:      "connected",
+		StateKnown:       true,
 		KeyMap:           keymap.Default(),
 		AssistantPrompt:  "> _",
 		PaneLayout:       panes.CalculateLayout(120, 14, 0),
 		PageCount:        1,
 	})
 	snapshot := compactSnapshot(rendered)
-	if !strings.Contains(snapshot, "No active panes") ||
+	if !strings.Contains(snapshot, "No monitoring panes are open") ||
 		!strings.Contains(snapshot, "/configure <path> --dry-run") ||
 		!strings.Contains(snapshot, "> _") {
 		t.Fatalf("zero-pane render should give setup guidance and keep assistant bar:\n%s", snapshot)
@@ -161,6 +173,8 @@ func TestRenderShellClipsScrollableBodyAndPinsAssistantBar(t *testing.T) {
 		KeyMap:           keymap.Default(),
 		AssistantPrompt:  "> pinned",
 		Diagnostics:      diagnostics,
+		DiagnosticsOpen:  true,
+		StateKnown:       true,
 		PageCount:        1,
 	}
 
@@ -330,22 +344,105 @@ func TestPaneLogRenderingStripsAnsiAndTruncatesLongLines(t *testing.T) {
 
 func TestHelpExplainsDashboardAndFocusedPaging(t *testing.T) {
 	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
-	rendered := RenderShell(styles.New(theme), ShellData{
+	style := styles.New(theme)
+	data := ShellData{
 		Width:            120,
 		Height:           30,
 		ConnectionStatus: "connected",
 		EventStatus:      "connected",
+		StateKnown:       true,
 		KeyMap:           keymap.Default(),
 		AssistantPrompt:  "> _",
 		ShowHelp:         true,
 		PageCount:        1,
-	})
+	}
+	rendered := RenderShell(style, data)
 	snapshot := compactSnapshot(rendered)
 	if !strings.Contains(snapshot, "Dashboard PageUp/PageDown changes pane pages.") {
-		t.Fatalf("help missing dashboard paging text:\n%s", snapshot)
+		t.Fatalf("help missing dashboard paging guidance:\n%s", snapshot)
 	}
+	data.BodyScrollOffset = 1
+	snapshot = compactSnapshot(RenderShell(style, data))
 	if !strings.Contains(snapshot, "Focused pane PageUp/PageDown scrolls logs and fetches older logs when available.") {
-		t.Fatalf("help missing focused paging text:\n%s", snapshot)
+		t.Fatalf("help missing focused-pane paging guidance after scrolling:\n%s", snapshot)
+	}
+	data.BodyScrollOffset = BodyScrollMax(style, data)
+	snapshot = compactSnapshot(RenderShell(style, data))
+	if !strings.Contains(snapshot, "/component label <app> <label>") {
+		t.Fatalf("help did not reach the final command at maximum scroll:\n%s", snapshot)
+	}
+}
+
+func TestRegisteredStoppedInventoryIsDiscoverableAndStartable(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	rendered := RenderShell(styles.New(theme), ShellData{
+		Width:            64,
+		Height:           20,
+		ConnectionStatus: "connected",
+		EventStatus:      "connected",
+		AgentStatus:      "idle",
+		StateKnown:       true,
+		KeyMap:           keymap.Default(),
+		AssistantPrompt:  "> _",
+		Inventory: []inventory.Item{
+			{ID: "api", Name: "API", Status: "running"},
+			{ID: "worker", Name: "Worker", Status: "stopped", Selected: true},
+		},
+		PageCount: 1,
+	})
+	snapshot := compactSnapshot(rendered)
+	for _, expected := range []string{"Registered apps", "Worker", "stopped", "Enter: start", "> _"} {
+		if !strings.Contains(snapshot, expected) {
+			t.Fatalf("inventory missing %q:\n%s", expected, snapshot)
+		}
+	}
+}
+
+func TestConnectionAndDiagnosticStatesAreDistinct(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	style := styles.New(theme)
+	base := ShellData{Width: 80, Height: 16, EventStatus: "connecting", AgentStatus: "checking", KeyMap: keymap.Default(), AssistantPrompt: "> _"}
+
+	base.ConnectionStatus = "connecting"
+	if rendered := compactSnapshot(RenderShell(style, base)); !strings.Contains(rendered, "Connecting to Relaybase daemon") {
+		t.Fatalf("missing connecting state:\n%s", rendered)
+	}
+	base.ConnectionStatus = "connected"
+	if rendered := compactSnapshot(RenderShell(style, base)); !strings.Contains(rendered, "Loading Relaybase daemon state") {
+		t.Fatalf("missing loading state:\n%s", rendered)
+	}
+	base.ConnectionStatus = "offline"
+	base.Diagnostics = []DiagnosticLine{{Code: "daemon", Severity: "error", Message: "unreachable"}}
+	if rendered := compactSnapshot(RenderShell(style, base)); !strings.Contains(rendered, "daemon is offline") || strings.Contains(rendered, "unreachable") {
+		t.Fatalf("offline state should show compact diagnostics only:\n%s", rendered)
+	}
+	base.DiagnosticsOpen = true
+	if rendered := compactSnapshot(RenderShell(style, base)); !strings.Contains(rendered, "unreachable") || !strings.Contains(rendered, "Esc to return") {
+		t.Fatalf("diagnostics drawer missing detail and exit hint:\n%s", rendered)
+	}
+}
+
+func TestRequiredTerminalSizesStayWithinViewport(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	style := styles.New(theme)
+	for _, size := range []struct{ width, height int }{{40, 12}, {52, 24}, {64, 20}, {80, 24}, {120, 40}} {
+		t.Run(fmt.Sprintf("%dx%d", size.width, size.height), func(t *testing.T) {
+			rendered := RenderShell(style, ShellData{
+				Width: size.width, Height: size.height, ConnectionStatus: "connected", EventStatus: "connected", AgentStatus: "running", StateKnown: true,
+				KeyMap: keymap.Default(), AssistantPrompt: "> _", Panes: paneSnapshots(4), PaneLayout: panes.CalculateLayout(size.width, maxInt(6, size.height-10), 4), PageCount: 1,
+			})
+			if got := lipgloss.Height(rendered); got != size.height {
+				t.Fatalf("height %d, want %d", got, size.height)
+			}
+			for index, line := range strings.Split(rendered, "\n") {
+				if got := lipgloss.Width(line); got > size.width {
+					t.Fatalf("line %d width %d exceeds %d:\n%s", index, got, size.width, compactSnapshot(rendered))
+				}
+			}
+			if snapshot := compactSnapshot(rendered); !strings.Contains(snapshot, "a:running") && !strings.Contains(snapshot, "agent: running") {
+				t.Fatalf("agent status not visible at %dx%d:\n%s", size.width, size.height, snapshot)
+			}
+		})
 	}
 }
 

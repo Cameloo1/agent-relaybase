@@ -1818,7 +1818,13 @@ async function getAppStateViaApi(
   options: RelaybaseCommandOptions,
   id: string
 ): Promise<{ ok: boolean; state?: AppState; error?: string }> {
-  const response = await httpRequest(options, "GET", `/__hub/api/apps/${encodeURIComponent(id)}/state`);
+  const response = await httpRequest(
+    options,
+    "GET",
+    `/__hub/api/apps/${encodeURIComponent(id)}/state`,
+    undefined,
+    await getOrCreateSessionToken(options.stateDir)
+  );
   if (!response.ok) {
     return { ok: false, error: response.body };
   }

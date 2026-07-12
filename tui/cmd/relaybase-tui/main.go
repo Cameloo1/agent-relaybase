@@ -160,9 +160,11 @@ func drainSmokeCmd(root model.RootModel, cmd tea.Cmd) model.RootModel {
 
 func applySmokeInput(root model.RootModel, input string) model.RootModel {
 	for _, char := range input {
-		updated, cmd := root.Update(tea.KeyPressMsg{Text: string(char), Code: char})
+		// Textarea editing can schedule cursor blink/tick commands. A one-frame
+		// smoke render needs the resulting draft, not an unbounded animation
+		// drain; only the final Enter may issue a meaningful daemon command.
+		updated, _ := root.Update(tea.KeyPressMsg{Text: string(char), Code: char})
 		root = updated.(model.RootModel)
-		root = drainSmokeCmd(root, cmd)
 	}
 
 	updated, cmd := root.Update(tea.KeyPressMsg{Code: tea.KeyEnter})

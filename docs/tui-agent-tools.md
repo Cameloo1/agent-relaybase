@@ -2,7 +2,9 @@
 
 This document defines the daemon-owned tool surface for Relaybase's own in-TUI Operator Agent. Tools are not arbitrary shell commands. They are typed Relaybase daemon contracts with policy gates, redaction, recovery hints, and operation/export/setup identifiers where applicable.
 
-As of RA010, the Agent Gateway API contract exists, the OpenRouter/OpenAI Agents SDK TypeScript Chat Completions adapter path is proven by an isolated provider module and live smoke command, the daemon Operator Agent runtime has a real Relaybase tool registry, and the Go TUI can create sessions, send messages, stream events, render approval/setup previews, and approve or reject pending daemon approvals. Read-only tools can inspect daemon state, grouped app/component state, diagnostics, bounded redacted logs, and setup previews. Mutating tools require explicit approval and route through existing daemon lifecycle, export, setup, manifest, and registry primitives. The Go TUI remains a client and approval/display surface; it does not spawn processes, write manifests, or manage lifecycle directly.
+As of RA010, the Agent Gateway API contract exists, the OpenRouter/OpenAI Agents SDK TypeScript Chat Completions adapter path is proven by an isolated provider module and live smoke command, the daemon Operator Agent runtime has a real Relaybase tool registry, and the Go TUI can create sessions, submit queued runs, stream events, inspect/cancel/retry runs, render approval/setup previews, and approve or reject pending daemon approvals. Read-only tools can inspect daemon state, grouped app/component state, diagnostics, bounded redacted logs, and setup previews. Mutating tools require explicit approval and route through existing daemon lifecycle, export, setup, manifest, and registry primitives. The Go TUI remains a client and approval/display surface; it does not spawn processes, write manifests, or manage lifecycle directly.
+
+The 2026-07-10 local acceptance included a minimal live OpenRouter Agent session using `openai/gpt-5.4`. It returned exactly `RELAYBASE_AGENT_OK` and recorded `run.started`, `model.request_started`, `model.delta`, `model.completed`, `answer`, and `run.completed`. This proves the configured provider/session/event path only; the full destructive or mutation command matrix was not rerun against the live provider. Provider model availability remains external and volatile.
 
 ## Tool Rules
 
@@ -14,6 +16,10 @@ As of RA010, the Agent Gateway API contract exists, the OpenRouter/OpenAI Agents
 - Tool results must not include raw tokens, raw env secrets, or unredacted log payloads.
 
 ## Agent Gateway Event Contract
+
+Message submission persists a user message and queued run, then returns `202` without waiting for the provider. A session permits one queued, running, or approval-waiting run at a time. Failed and cancelled runs can be retried from the original persisted user message. Submission and retry accept a bounded idempotency key so safe repeats return the same persisted message/run instead of creating duplicate work. Cancellation is supported before completion, except while an already approved daemon tool is executing; Relaybase refuses to pretend that daemon work was cancelled.
+
+Queued and running runs found after an Agent Gateway restart fail closed with `AGENT_RUN_INTERRUPTED` and explicit retry guidance. Pending approvals are recovered separately and require user reconfirmation before execution. Setup workflows can continue through separate approval-gated apply, start, and health-proof steps without requiring another user-authored prompt.
 
 The session event stream at `GET /__hub/api/agent/sessions/:sessionId/events` emits typed model, tool, setup, and TUI action events. Tool and setup event names include:
 
@@ -31,7 +37,9 @@ The session event stream at `GET /__hub/api/agent/sessions/:sessionId/events` em
 - `setup.prove_result`
 - `tui.proposed_action`
 
-The current tests cover the contract, blocked diagnostics, configured runtime event streaming, timeout diagnostics, prompt/session redaction, SDK tool schema construction, target clarification, approval gating, approval continuation, lifecycle operation ID propagation, log export routing, setup previews, manifest patch safety, env override redaction, and TUI-proposed actions.
+Agent session events use numeric sequence IDs. Clients reconnect with `afterSequence` or `Last-Event-ID`, replay only stored events newer than that sequence, and discard duplicates. The Go client uses bounded reconnect backoff and exposes reconnecting state instead of silently spinning.
+
+The current tests cover the contract, queued/idempotent/cancel/retry behavior, restart recovery, blocked diagnostics, configured runtime event streaming, timeout diagnostics, prompt/session redaction, SDK tool schema construction, target clarification, approval gating, approval continuation, lifecycle operation ID propagation, log export routing, setup previews, manifest patch safety, env override redaction, and TUI-proposed actions.
 
 ## Read-Only App Tools
 
@@ -45,6 +53,22 @@ The current tests cover the contract, blocked diagnostics, configured runtime ev
 | `search_logs`     | Search bounded redacted logs.                               | No tool approval; prompt inclusion policy may gate model use |
 
 The implemented tools return redacted log payloads. They do not request unbounded history and do not expose raw token/password/secret/key-like values.
+
+## Project Inspection Tools
+
+These read-only tools give the Operator Agent bounded `rg`/`cat`-style project inspection without exposing arbitrary shell execution. They are used when commands such as `/add <path>`, `/configure <path>`, `/register <project-path>`, or natural phrases like `find how this server starts` are missing setup details.
+
+| Tool                              | Purpose                                                               | Approval      |
+| --------------------------------- | --------------------------------------------------------------------- | ------------- |
+| `project_list_files`              | List bounded project files while skipping vendor/build/cache folders. | No, read-only |
+| `project_search_files`            | Search bounded text files with redacted match snippets.               | No, read-only |
+| `project_read_file`               | Read one bounded redacted text file inside the selected project root. | No, read-only |
+| `project_detect_start_commands`   | Return Relaybase setup detection command candidates for the project.  | No, read-only |
+| `project_inspect_package_scripts` | Read package scripts and candidate package-manager commands safely.   | No, read-only |
+
+Project inspection tools require a canonical project-root grant. The daemon derives grants only from trusted TUI current-directory context or a bounded list of user-selected roots attached to a parsed `/add`, `/configure`, or folder `/register` request; model-generated arguments cannot grant a new root. Grants are canonicalized, unavailable/stale grants fail closed, and the TUI clears its transient selected-root list after the request.
+
+Within a granted root, tools deny traversal, skip symlinks and common generated directories, deny environment files, private keys, package/cloud credential stores, skip binary files, enforce bounded time/files/bytes/results, reject unsafe regular expressions, redact token/key/credential-URL values including common camelCase JSON/YAML/TOML fields, and never execute package scripts or shell commands. Discovered commands are candidates only; the daemon setup engine must validate and preview the selected command before any write, registration, or lifecycle action can occur.
 
 ## Lifecycle And Export Tools
 
@@ -85,6 +109,10 @@ As of RA012C, the Operator Agent prompt and tool descriptions consume that matri
 
 Current `repair_app_setup` returns repair choices, runtime repair candidates, and previews only. Applying repair writes still goes through `apply_setup_plan` and requires approval.
 
+Both `apply_setup_plan` and the `setup_and_start_project` tool's `apply_setup` phase are bound to the exact daemon preview. Their approvals store a SHA-256 binding over the preview plus a revision derived from the project root, selected plan, write actions, existence/changed state, and diff hunks. Approved execution regenerates the preview and verifies the binding before mutation. Missing bindings return `SETUP_PREVIEW_BINDING_REQUIRED`; changed plan/project/write state returns `SETUP_PREVIEW_STALE`. Both fail before file writes and require a fresh preview and approval.
+
+Every path-bearing setup/manifest Agent tool passes the centralized canonical project-scope authorization before read-only, approval creation, and approved execution paths. Manifest registration and safe manifest/env mutation tools also bind the canonical target and current content digest into the approval. Missing or changed revisions return `AGENT_APPROVAL_STATE_BINDING_REQUIRED` or `AGENT_APPROVAL_STATE_STALE` with `mutationPerformed: false`.
+
 `detect_project`, `plan_app_setup`, `preview_setup_writes`, and `repair_app_setup` now expose runtime-aware detections, command candidates, port strategies, health candidates, setup questions, and repair candidates. Tool execution must continue to route through daemon setup APIs and approval gates. The model must not convert a runtime command candidate into a file write or lifecycle action without the existing approval path. If runtime/command/module/service/process selection is ambiguous, the model must ask the user to choose from daemon-returned questions rather than guessing.
 
 ## TUI-Proposed UI Actions
@@ -107,7 +135,11 @@ If clipboard or browser support is missing, the TUI must show an honest unavaila
 
 Relaybase keeps Zod schemas as the internal validation contract and passes JSON Schema to the OpenAI Agents SDK tool helper. This avoids SDK rejection of optional Zod fields while preserving runtime validation before tool execution.
 
+The exported OpenAI tool schemas intentionally use the supported subset. `validate_manifest` accepts a path only, and `patch_manifest_fields` exposes explicit safe fields. Regression coverage rejects unsupported keywords including `propertyNames`, `patternProperties`, `unevaluatedProperties`, and `prefixItems` before a schema can reach the provider.
+
 The SDK/default execution path invokes tools with `approved:false`. Mutating tools return `approval_required` until the daemon approval flow invokes the approved execution path. Model-supplied JSON cannot set `approved:true`.
+
+Non-secret Agent defaults persist at `<state-dir>/agent/config.json`. Explicit shell or `.env` values override persisted defaults, and no API key material is stored in that file. Diagnostics emit ready state only when no configuration blocker is present.
 
 ## Tool Audit Fields
 

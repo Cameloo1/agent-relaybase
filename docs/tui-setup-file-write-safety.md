@@ -34,6 +34,10 @@ The daemon setup API produces a setup plan preview with:
 
 Dry-run previews must not mutate files or registry state. RA001 contract tests verify that `/__hub/api/setup/preview` does not create `relaybase.app.json` or `.relaybase/setup-profile.json`.
 
+The Operator Agent's `apply_setup_plan` and composed `setup_and_start_project` `apply_setup` approvals include an immutable versioned SHA-256 binding to the exact preview and its write revision. Approved execution regenerates the preview immediately before apply and verifies the selected plan, full preview digest, and write revision. A missing binding fails with `SETUP_PREVIEW_BINDING_REQUIRED`; any drift fails with `SETUP_PREVIEW_STALE`. Neither path performs a mutation. The user must review and approve a newly generated preview.
+
+Manifest registration and safe manifest/env edit approvals bind both the canonical target path and current file-content digest. Missing bindings fail with `AGENT_APPROVAL_STATE_BINDING_REQUIRED`; target/content drift fails with `AGENT_APPROVAL_STATE_STALE`. Central project-scope authorization also runs for every path-bearing setup/manifest Agent tool before read, preview, approval, or approved execution.
+
 ## File Write Plan
 
 Each planned write includes:
@@ -101,7 +105,9 @@ The approval prompt must show action, target files, risk, expected result, and h
 
 As of RA003, the TUI confirmation path is implemented for:
 
-- `/add app`
+- `/add <path>`
+- `/add <path> using <command>`
+- `/add app <path> using <command>` as a temporary compatibility alias
 - `/configure <path>`
 - `/register <manifest-path>`
 - `/open <path-or-app>`
@@ -171,3 +177,7 @@ If apply fails, the daemon should report:
 - next action
 
 The TUI should keep the setup session open so the user can retry, skip, abort, or choose another plan.
+
+If the daemon restarts while a lifecycle operation is queued or running, the durable operation ledger records it as failed with `LIFECYCLE_OPERATION_INTERRUPTED`, marks it retryable, and directs the operator to inspect process, port, route, and logs before retrying. Relaybase does not infer that an interrupted file/lifecycle action succeeded.
+
+Graceful daemon shutdown stops accepting new lifecycle work, waits up to a bounded timeout for active operations, fails any still-active work closed with `LIFECYCLE_OPERATION_SHUTDOWN`, persists retry guidance, and closes the operation ledger before MCP/log services and sockets. The durable operation list can discover retryable interrupted work after restart.

@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { z } from "zod";
 import { OperationStore } from "../src/operationStore.ts";
 import type { RelaybaseRuntime } from "../src/server.ts";
 import type { AgentToolExecutionContext } from "../src/agent/tools/index.ts";
@@ -32,6 +33,11 @@ test("RA007 registry exposes read and gated mutation tools", () => {
     "get_diagnostics",
     "tail_logs",
     "search_logs",
+    "project_list_files",
+    "project_search_files",
+    "project_read_file",
+    "project_detect_start_commands",
+    "project_inspect_package_scripts",
     "start_app",
     "stop_app",
     "restart_app",
@@ -62,6 +68,11 @@ test("RA007 registry exposes read and gated mutation tools", () => {
     "get_diagnostics",
     "tail_logs",
     "search_logs",
+    "project_list_files",
+    "project_search_files",
+    "project_read_file",
+    "project_detect_start_commands",
+    "project_inspect_package_scripts",
     "detect_project",
     "plan_app_setup",
     "preview_setup_writes",
@@ -92,6 +103,29 @@ test("RA007 registry exposes read and gated mutation tools", () => {
     ),
     true
   );
+});
+
+test("Agent tool schemas stay inside the OpenAI function-calling JSON Schema subset", () => {
+  const unsupportedKeywords = new Set(["propertyNames", "patternProperties", "unevaluatedProperties", "prefixItems"]);
+  const failures: string[] = [];
+
+  const visit = (value: unknown, path: string): void => {
+    if (!value || typeof value !== "object") {
+      return;
+    }
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      if (unsupportedKeywords.has(key)) {
+        failures.push(`${path}/${key}`);
+      }
+      visit(nested, `${path}/${key}`);
+    }
+  };
+
+  for (const definition of relaybaseAgentToolDefinitions()) {
+    visit(z.toJSONSchema(definition.parameters), definition.name);
+  }
+
+  assert.deepEqual(failures, []);
 });
 
 test("AGENT-TUI-MATRIX-004 read-only tool matrix runs without approval or daemon mutation", async () => {
@@ -142,6 +176,11 @@ test("AGENT-TUI-MATRIX-004 read-only tool matrix runs without approval or daemon
     { name: "get_diagnostics", input: { includeLogStore: true } },
     { name: "tail_logs", input: { appId: "notes-web", limit: 10 } },
     { name: "search_logs", input: { appId: "notes-web", query: "ready", limit: 10 } },
+    { name: "project_list_files", input: { projectRoot: project } },
+    { name: "project_search_files", input: { projectRoot: project, query: "vite", maxResults: 10 } },
+    { name: "project_read_file", input: { projectRoot: project, path: "package.json" } },
+    { name: "project_detect_start_commands", input: { projectRoot: project } },
+    { name: "project_inspect_package_scripts", input: { projectRoot: project } },
     { name: "detect_project", input: { cwd: project } },
     { name: "plan_app_setup", input: { cwd: project } },
     { name: "preview_setup_writes", input: { cwd: project, commandHint: "npm.cmd run dev" } },
@@ -164,6 +203,172 @@ test("AGENT-TUI-MATRIX-004 read-only tool matrix runs without approval or daemon
     assert.deepEqual(context.calls, beforeCalls, entry.name);
     assert.doesNotMatch(JSON.stringify(result), /readonly-secret-token|Bearer readonly-secret-token/, entry.name);
   }
+});
+
+test("agent-managed project inspection tools are scoped, bounded, and redacted", async () => {
+  const project = await runtimeProject("relaybase-agent-project-inspect-", {
+    "package.json": JSON.stringify({
+      scripts: {
+        dev: "vite --host 127.0.0.1",
+        leak: "node server.js --token=package-secret"
+      },
+      dependencies: { vite: "latest" }
+    }),
+    "src/server.ts": "console.log('ready');\nconst token = 'server-secret-token';\n",
+    "src/config.txt":
+      "DATABASE_URL=postgres://relay:database-password@localhost/relaybase\n" +
+      'PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nprivate-key-material\n-----END PRIVATE KEY-----"\n',
+    "src/settings.json": JSON.stringify({ apiKey: "rk_custom_unrecognized", clientSecret: "custom-json-secret" }),
+    "src/settings.yaml": "privateKey: custom-yaml-private\naccessKey: custom-yaml-access\n",
+    "src/settings.toml": 'databaseUrl = "custom-toml-uri"\nsessionToken = "custom-toml-session"\n',
+    ".env": "OPENROUTER_API_KEY=sk-project-secret\n",
+    "node_modules/ignored/index.js": "console.log('ignored');"
+  });
+  const outside = path.join(os.tmpdir(), `relaybase-outside-${Date.now()}.txt`);
+  await fs.writeFile(outside, "outside", "utf8");
+  const context = fakeToolContext({ tuiContext: { currentCwd: project, daemonHasZeroApps: true, diagnostics: [] } });
+
+  const listed = await executeRelaybaseAgentTool("project_list_files", { projectRoot: project }, context);
+  const listedJson = JSON.stringify(listed);
+  assert.equal(listed.status, "succeeded");
+  assert.match(listedJson, /package\.json/);
+  assert.doesNotMatch(listedJson, /node_modules\/ignored/);
+  assert.doesNotMatch(listedJson, /\.env/);
+  assert.match(listedJson, /"environment":1/);
+
+  const searched = await executeRelaybaseAgentTool(
+    "project_search_files",
+    { projectRoot: project, query: "secret", maxResults: 10 },
+    context
+  );
+  const searchedJson = JSON.stringify(searched);
+  assert.equal(searched.status, "succeeded");
+  assert.doesNotMatch(searchedJson, /server-secret-token|sk-project-secret|package-secret/);
+  assert.match(searchedJson, /\[redacted\]/);
+
+  const read = await executeRelaybaseAgentTool(
+    "project_read_file",
+    { projectRoot: project, path: "src/server.ts" },
+    context
+  );
+  assert.equal(read.status, "succeeded");
+  assert.doesNotMatch(JSON.stringify(read), /server-secret-token/);
+
+  const sensitiveRead = await executeRelaybaseAgentTool(
+    "project_read_file",
+    { projectRoot: project, path: ".env" },
+    context
+  );
+  assert.equal(sensitiveRead.status, "diagnostic");
+  assert.equal(sensitiveRead.diagnostic?.code, "PROJECT_SENSITIVE_FILE_DENIED");
+  assert.deepEqual(sensitiveRead.diagnostic?.detail, { policy: "deny", category: "environment" });
+  assert.doesNotMatch(JSON.stringify(sensitiveRead), /OPENROUTER_API_KEY|sk-project-secret|\.env/);
+
+  const configRead = await executeRelaybaseAgentTool(
+    "project_read_file",
+    { projectRoot: project, path: "src/config.txt" },
+    context
+  );
+  const configJson = JSON.stringify(configRead);
+  assert.equal(configRead.status, "succeeded");
+  assert.match(configJson, /\[redacted(?: private key)?\]/);
+  assert.doesNotMatch(configJson, /database-password|private-key-material/);
+
+  for (const [file, forbidden] of [
+    ["src/settings.json", /rk_custom_unrecognized|custom-json-secret/],
+    ["src/settings.yaml", /custom-yaml-private|custom-yaml-access/],
+    ["src/settings.toml", /custom-toml-uri|custom-toml-session/]
+  ] as const) {
+    const structuredConfig = await executeRelaybaseAgentTool(
+      "project_read_file",
+      { projectRoot: project, path: file },
+      context
+    );
+    assert.equal(structuredConfig.status, "succeeded", file);
+    assert.match(JSON.stringify(structuredConfig), /\[redacted\]/, file);
+    assert.doesNotMatch(JSON.stringify(structuredConfig), forbidden, file);
+  }
+
+  const traversal = await executeRelaybaseAgentTool(
+    "project_read_file",
+    { projectRoot: project, path: outside },
+    context
+  );
+  assert.equal(traversal.status, "diagnostic");
+  assert.equal(traversal.diagnostic?.code, "PROJECT_PATH_OUTSIDE_ROOT");
+
+  const unauthorizedRoot = await executeRelaybaseAgentTool(
+    "project_list_files",
+    { projectRoot: path.dirname(outside) },
+    context
+  );
+  assert.equal(unauthorizedRoot.status, "diagnostic");
+  assert.equal(unauthorizedRoot.diagnostic?.code, "PROJECT_ROOT_NOT_GRANTED");
+
+  const unauthorizedLegacyRead = await executeRelaybaseAgentTool(
+    "detect_project",
+    { cwd: path.dirname(outside) },
+    context
+  );
+  assert.equal(unauthorizedLegacyRead.status, "diagnostic");
+  assert.equal(unauthorizedLegacyRead.diagnostic?.code, "PROJECT_ROOT_NOT_GRANTED");
+
+  const unauthorizedLegacyMutation = await executeRelaybaseAgentTool(
+    "apply_setup_plan",
+    { cwd: path.dirname(outside), commandHint: "npm.cmd run dev" },
+    context
+  );
+  assert.equal(unauthorizedLegacyMutation.status, "diagnostic");
+  assert.equal(unauthorizedLegacyMutation.diagnostic?.code, "PROJECT_ROOT_NOT_GRANTED");
+
+  const missingGrant = await executeRelaybaseAgentTool(
+    "project_list_files",
+    { projectRoot: project },
+    { ...context, projectRootGrants: undefined }
+  );
+  assert.equal(missingGrant.status, "diagnostic");
+  assert.equal(missingGrant.diagnostic?.code, "PROJECT_ROOT_NOT_GRANTED");
+
+  const unsafeRegex = await executeRelaybaseAgentTool(
+    "project_search_files",
+    { projectRoot: project, query: "(a+)+$", regex: true },
+    context
+  );
+  assert.equal(unsafeRegex.status, "diagnostic");
+  assert.equal(unsafeRegex.diagnostic?.code, "PROJECT_SEARCH_REGEX_UNSAFE");
+
+  const scripts = await executeRelaybaseAgentTool("project_inspect_package_scripts", { projectRoot: project }, context);
+  assert.equal(scripts.status, "succeeded");
+  assert.doesNotMatch(JSON.stringify(scripts), /package-secret/);
+
+  const commands = await executeRelaybaseAgentTool("project_detect_start_commands", { projectRoot: project }, context);
+  assert.equal(commands.status, "succeeded");
+  assert.match(JSON.stringify(commands), /vite|dev/);
+});
+
+test("project search enforces aggregate byte budgets on large input", async () => {
+  const files = Object.fromEntries(
+    Array.from({ length: 20 }, (_, index) => [`src/large-${String(index).padStart(2, "0")}.txt`, "a".repeat(65_536)])
+  );
+  const project = await runtimeProject("relaybase-agent-project-budget-", files);
+  const context = fakeToolContext({
+    tuiContext: { currentCwd: project, daemonHasZeroApps: true, diagnostics: [] }
+  });
+
+  const result = await executeRelaybaseAgentTool(
+    "project_search_files",
+    { projectRoot: project, query: "not-present", maxFiles: 100 },
+    context
+  );
+  assert.equal(result.status, "succeeded");
+  const data = result.data as {
+    truncated: boolean;
+    limits: { maxAggregateBytes: number; readBytes: number; stopReason?: string; scannedFiles: number };
+  };
+  assert.equal(data.truncated, true);
+  assert.equal(data.limits.stopReason, "aggregate_bytes");
+  assert.equal(data.limits.readBytes <= data.limits.maxAggregateBytes, true);
+  assert.equal(data.limits.scannedFiles < 20, true);
 });
 
 test("AGENT-TUI-MATRIX-004 mutating tool matrix requires approval before any daemon-owned mutation", async () => {
@@ -241,7 +446,10 @@ test("AGENT-TUI-MATRIX-004 approved mutating tools execute through daemon/setup 
 
   const directCases = mutatingToolCases(project, manifestPath);
   for (const entry of directCases) {
-    const result = await executeRelaybaseAgentTool(entry.name, entry.input, { ...context, approved: true });
+    const previewed = await executeRelaybaseAgentTool(entry.name, entry.input, context);
+    assert.equal(previewed.status, "approval_required", entry.name);
+    const approvedInput = previewed.approval?.arguments as Record<string, unknown>;
+    const result = await executeRelaybaseAgentTool(entry.name, approvedInput, { ...context, approved: true });
     assert.notEqual(result.status, "approval_required", entry.name);
     assert.doesNotMatch(JSON.stringify(result), /relaybase-test-token-secret|sk-or-|Bearer /, entry.name);
     if (result.operationId) {
@@ -516,7 +724,10 @@ test("setup tools preview file writes and require approval before applying or pa
   );
   const notesApp = appStatus("notes-web", "Notes", "frontend", "notes", "frontend");
   notesApp.manifestPath = manifestPath;
-  const context = fakeToolContext({ apps: [notesApp] });
+  const context = fakeToolContext({
+    apps: [notesApp],
+    tuiContext: { currentCwd: project, daemonHasZeroApps: false, diagnostics: [] }
+  });
 
   const detect = await executeRelaybaseAgentTool("detect_project", { cwd: project }, context);
   assert.equal(detect.status, "succeeded");
@@ -543,26 +754,35 @@ test("setup tools preview file writes and require approval before applying or pa
   assert.equal(patchBlocked.status, "approval_required");
   assert.match(JSON.stringify(patchBlocked.data), /healthz/);
 
-  const patchApproved = await executeRelaybaseAgentTool(
+  const healthBlocked = await executeRelaybaseAgentTool(
     "set_health_route",
     { manifestPath, cwd: project, healthUrl: "/healthz" },
+    context
+  );
+  assert.equal(healthBlocked.status, "approval_required");
+  const patchApproved = await executeRelaybaseAgentTool(
+    "set_health_route",
+    healthBlocked.approval?.arguments as Record<string, unknown>,
     { ...context, approved: true }
   );
   assert.equal(patchApproved.status, "succeeded");
   const updated = JSON.parse(await fs.readFile(manifestPath, "utf8")) as { healthUrl?: string };
   assert.equal(updated.healthUrl, "/healthz");
 
+  const metadataInput = {
+    appId: "notes-web",
+    manifestPath: "relaybase.json",
+    cwd: project,
+    groupId: "notes",
+    componentRole: "frontend",
+    paneLabel: "frontend",
+    paneOrder: 10
+  };
+  const metadataBlocked = await executeRelaybaseAgentTool("set_component_metadata", metadataInput, context);
+  assert.equal(metadataBlocked.status, "approval_required");
   const metadataApproved = await executeRelaybaseAgentTool(
     "set_component_metadata",
-    {
-      appId: "notes-web",
-      manifestPath: "relaybase.json",
-      cwd: project,
-      groupId: "notes",
-      componentRole: "frontend",
-      paneLabel: "frontend",
-      paneOrder: 10
-    },
+    metadataBlocked.approval?.arguments as Record<string, unknown>,
     { ...context, approved: true }
   );
   assert.equal(metadataApproved.status, "succeeded");
@@ -580,7 +800,9 @@ test("RA012C setup tools expose runtime matrix fields and accept runtime hints",
     "pyproject.toml": '[project]\ndependencies = ["fastapi", "uvicorn"]\n',
     "main.py": "from fastapi import FastAPI\napp = FastAPI()\n"
   });
-  const context = fakeToolContext();
+  const context = fakeToolContext({
+    tuiContext: { currentCwd: project, daemonHasZeroApps: true, diagnostics: [] }
+  });
 
   const detect = await executeRelaybaseAgentTool("detect_project", { cwd: project }, context);
   assert.equal(detect.status, "succeeded");
@@ -634,7 +856,9 @@ test("AGENT-FOLDER-START-002 setup tools preserve selected command through appro
     )
   });
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-selection-state-"));
-  const context = fakeToolContext();
+  const context = fakeToolContext({
+    tuiContext: { currentCwd: project, daemonHasZeroApps: true, diagnostics: [] }
+  });
   context.runtime.stateDir = stateDir;
   const expectedCommand = process.platform === "win32" ? "npm.cmd run dev" : "npm run dev";
   const componentMetadata = {
@@ -676,13 +900,7 @@ test("AGENT-FOLDER-START-002 setup tools preserve selected command through appro
 
   const applied = await executeRelaybaseAgentTool(
     "apply_setup_plan",
-    {
-      cwd: project,
-      commandHint: "npm run dev",
-      selectedPlanId: "framework-port-flag",
-      portStrategyHint: "generated_launch_wrapper",
-      componentMetadata
-    },
+    blocked.approval?.arguments as Record<string, unknown>,
     { ...context, approved: true }
   );
   assert.equal(applied.status, "succeeded");
@@ -776,7 +994,7 @@ test("AGENT-FOLDER-START-003 existing manifest registers before separately appro
 
   const registered = await executeRelaybaseAgentTool(
     "setup_and_start_project",
-    { phase: "register_manifest", cwd: project, manifestPath },
+    registerBlocked.approval?.arguments as Record<string, unknown>,
     { ...context, approved: true }
   );
   assert.equal(registered.status, "succeeded");
@@ -845,24 +1063,14 @@ test("AGENT-FOLDER-START-003 missing manifest previews setup, applies after appr
   assert.equal(await exists(manifestPath), false);
   assert.equal(context.calls.register, 0);
   assert.equal(context.calls.start, 0);
+  const approvedSetupInput = setupBlocked.approval?.arguments as Record<string, unknown>;
+  assert.equal(typeof (approvedSetupInput.previewBinding as { digest?: unknown })?.digest, "string");
+  assert.equal(typeof (approvedSetupInput.previewBinding as { revision?: unknown })?.revision, "string");
 
-  const setupApplied = await executeRelaybaseAgentTool(
-    "setup_and_start_project",
-    {
-      phase: "apply_setup",
-      cwd: project,
-      commandHint: "npm run dev",
-      selectedPlanId: "framework-port-flag",
-      portStrategyHint: "generated_launch_wrapper",
-      componentMetadata: {
-        appId: "setup-start-web",
-        groupId: "setup-start",
-        componentRole: "frontend",
-        paneLabel: "frontend"
-      }
-    },
-    { ...context, approved: true }
-  );
+  const setupApplied = await executeRelaybaseAgentTool("setup_and_start_project", approvedSetupInput, {
+    ...context,
+    approved: true
+  });
   assert.equal(setupApplied.status, "succeeded");
   assert.equal(await exists(manifestPath), true);
   assert.equal(context.calls.register, 1);
@@ -876,6 +1084,128 @@ test("AGENT-FOLDER-START-003 missing manifest previews setup, applies after appr
   );
   assert.equal(startApproved.status, "succeeded");
   assert.equal(context.calls.start, 1);
+});
+
+test("setup apply fails closed on missing or stale preview bindings with zero mutation", async () => {
+  const project = await runtimeProject("relaybase-folder-start-preview-binding-", {
+    "package.json": JSON.stringify({
+      name: "preview-binding-app",
+      scripts: { dev: "vite --host 127.0.0.1" },
+      devDependencies: { vite: "^6.0.0" }
+    })
+  });
+  const context = fakeToolContext({
+    apps: [],
+    tuiContext: { currentCwd: project, daemonHasZeroApps: true, diagnostics: [] }
+  });
+  const manifestPath = path.join(project, "relaybase.app.json");
+  const setupInput = {
+    phase: "apply_setup",
+    cwd: project,
+    commandHint: "npm run dev",
+    selectedPlanId: "framework-port-flag",
+    portStrategyHint: "generated_launch_wrapper",
+    componentMetadata: {
+      appId: "preview-binding-web",
+      groupId: "preview-binding",
+      componentRole: "frontend",
+      paneLabel: "frontend"
+    }
+  };
+
+  const preview = await executeRelaybaseAgentTool("setup_and_start_project", setupInput, context);
+  assert.equal(preview.status, "approval_required");
+  const boundInput = preview.approval?.arguments as Record<string, unknown>;
+  assert.equal(typeof (boundInput.previewBinding as { digest?: unknown })?.digest, "string");
+
+  const missingBinding = await executeRelaybaseAgentTool("setup_and_start_project", setupInput, {
+    ...context,
+    approved: true
+  });
+  assert.equal(missingBinding.status, "diagnostic");
+  assert.equal(missingBinding.diagnostic?.code, "SETUP_PREVIEW_BINDING_REQUIRED");
+  assert.equal(await exists(manifestPath), false);
+  assert.equal(context.calls.register, 0);
+  assert.equal(context.calls.start, 0);
+
+  await writeManifest(manifestPath, {
+    id: "manual-drift",
+    name: "Manual Drift",
+    cwd: project,
+    healthUrl: "/manual-health"
+  });
+  const driftedManifest = await fs.readFile(manifestPath, "utf8");
+  const stalePreview = await executeRelaybaseAgentTool("setup_and_start_project", boundInput, {
+    ...context,
+    approved: true
+  });
+  assert.equal(stalePreview.status, "diagnostic");
+  assert.equal(stalePreview.diagnostic?.code, "SETUP_PREVIEW_STALE");
+  assert.equal((stalePreview.diagnostic?.detail as { mutationPerformed?: boolean }).mutationPerformed, false);
+  assert.equal(await fs.readFile(manifestPath, "utf8"), driftedManifest);
+  assert.equal(context.calls.register, 0);
+  assert.equal(context.calls.start, 0);
+});
+
+test("legacy setup and manifest approvals fail closed on filesystem drift", async () => {
+  const project = await runtimeProject("relaybase-agent-legacy-binding-", {
+    "package.json": JSON.stringify({
+      name: "legacy-binding",
+      scripts: { dev: "vite --host 127.0.0.1" },
+      devDependencies: { vite: "^6.0.0" }
+    })
+  });
+  const context = fakeToolContext({
+    tuiContext: { currentCwd: project, daemonHasZeroApps: true, diagnostics: [] }
+  });
+  const manifestPath = path.join(project, "relaybase.app.json");
+
+  const setupPreview = await executeRelaybaseAgentTool(
+    "apply_setup_plan",
+    { cwd: project, selectedPlanId: "framework-port-flag", commandHint: "npm run dev" },
+    context
+  );
+  assert.equal(setupPreview.status, "approval_required");
+  const setupArguments = setupPreview.approval?.arguments as Record<string, unknown>;
+  assert.equal(typeof (setupArguments.previewBinding as { digest?: unknown })?.digest, "string");
+  await fs.writeFile(
+    path.join(project, "package.json"),
+    JSON.stringify({ scripts: { dev: "vite --host 0.0.0.0" } }),
+    "utf8"
+  );
+  const staleSetup = await executeRelaybaseAgentTool("apply_setup_plan", setupArguments, {
+    ...context,
+    approved: true
+  });
+  assert.equal(staleSetup.status, "diagnostic");
+  assert.equal(staleSetup.diagnostic?.code, "SETUP_PREVIEW_STALE");
+  assert.equal(await exists(manifestPath), false);
+
+  await writeManifest(manifestPath, {
+    id: "legacy-binding",
+    name: "Legacy Binding",
+    cwd: project,
+    healthUrl: "/"
+  });
+  const manifestPreview = await executeRelaybaseAgentTool(
+    "set_health_route",
+    { manifestPath, cwd: project, healthUrl: "/readyz" },
+    context
+  );
+  assert.equal(manifestPreview.status, "approval_required");
+  const manifestArguments = manifestPreview.approval?.arguments as Record<string, unknown>;
+  assert.equal((manifestArguments.approvalStateBinding as { kind?: unknown })?.kind, "manifest_revision");
+  const changedManifest = JSON.parse(await fs.readFile(manifestPath, "utf8")) as Record<string, unknown>;
+  changedManifest.name = "Changed After Preview";
+  await fs.writeFile(manifestPath, JSON.stringify(changedManifest, null, 2) + "\n", "utf8");
+  const staleManifest = await executeRelaybaseAgentTool("set_health_route", manifestArguments, {
+    ...context,
+    approved: true
+  });
+  assert.equal(staleManifest.status, "diagnostic");
+  assert.equal(staleManifest.diagnostic?.code, "AGENT_APPROVAL_STATE_STALE");
+  const after = JSON.parse(await fs.readFile(manifestPath, "utf8")) as { healthUrl?: string };
+  assert.equal(after.healthUrl, "/");
 });
 
 test("AGENT-FOLDER-START-003 failed folder start returns logs and repair choices without guessing", async () => {
@@ -927,7 +1257,6 @@ test("AGENT-FOLDER-START-003 failed folder start returns logs and repair choices
 });
 
 test("RA012C language setup phrases map to corresponding daemon adapters and ambiguity questions", async () => {
-  const context = fakeToolContext();
   const fixtures: Array<{ label: string; runtime: string; files: Record<string, string> }> = [
     {
       label: "add this Go server",
@@ -949,6 +1278,9 @@ test("RA012C language setup phrases map to corresponding daemon adapters and amb
 
   for (const fixture of fixtures) {
     const project = await runtimeProject(`relaybase-agent-${fixture.runtime}-`, fixture.files);
+    const context = fakeToolContext({
+      tuiContext: { currentCwd: project, daemonHasZeroApps: true, diagnostics: [] }
+    });
     const detect = await executeRelaybaseAgentTool("detect_project", { cwd: project }, context);
     assert.equal(detect.status, "succeeded", fixture.label);
     assert.match(JSON.stringify(detect.data), new RegExp(`"runtime":"${fixture.runtime}"`), fixture.label);
@@ -957,7 +1289,10 @@ test("RA012C language setup phrases map to corresponding daemon adapters and amb
   const procfileProject = await runtimeProject("relaybase-agent-procfile-", {
     Procfile: "web: npm run dev\nweb-api: npm run api\n"
   });
-  const procfileDetect = await executeRelaybaseAgentTool("detect_project", { cwd: procfileProject }, context);
+  const procfileContext = fakeToolContext({
+    tuiContext: { currentCwd: procfileProject, daemonHasZeroApps: true, diagnostics: [] }
+  });
+  const procfileDetect = await executeRelaybaseAgentTool("detect_project", { cwd: procfileProject }, procfileContext);
   assert.equal(procfileDetect.status, "succeeded");
   assert.match(JSON.stringify(procfileDetect.data), /procfile\.process/);
 });
@@ -981,20 +1316,28 @@ test("manifest env override rejects raw secret-like values and accepts safe refe
     ),
     "utf8"
   );
-  const context = fakeToolContext();
+  const context = fakeToolContext({
+    tuiContext: { currentCwd: project, daemonHasZeroApps: true, diagnostics: [] }
+  });
 
   const rejected = await executeRelaybaseAgentTool(
     "add_env_override_safe",
     { manifestPath, cwd: project, key: "API_KEY", value: "sk-raw-secret-value" },
-    { ...context, approved: true }
+    context
   );
   assert.equal(rejected.status, "diagnostic");
   assert.equal(rejected.diagnostic?.code, "AGENT_ENV_SECRET_VALUE_REJECTED");
   assert.doesNotMatch(JSON.stringify(rejected), /sk-raw-secret-value/);
 
-  const accepted = await executeRelaybaseAgentTool(
+  const acceptedPreview = await executeRelaybaseAgentTool(
     "add_env_override_safe",
     { manifestPath, cwd: project, key: "API_KEY", valueReference: "env:API_KEY" },
+    context
+  );
+  assert.equal(acceptedPreview.status, "approval_required");
+  const accepted = await executeRelaybaseAgentTool(
+    "add_env_override_safe",
+    acceptedPreview.approval?.arguments as Record<string, unknown>,
     { ...context, approved: true }
   );
   assert.equal(accepted.status, "succeeded");
@@ -1237,6 +1580,17 @@ function fakeToolContext(
       daemonHasZeroApps: apps.length === 0,
       diagnostics: options.diagnostics ?? []
     },
+    ...(options.tuiContext?.currentCwd
+      ? {
+          projectRootGrants: [
+            {
+              grantId: "test_current_project",
+              canonicalRoot: path.resolve(options.tuiContext.currentCwd),
+              source: "tui_current_cwd" as const
+            }
+          ]
+        }
+      : {}),
     emit: options.emit,
     calls
   };

@@ -6,7 +6,7 @@ import test from "node:test";
 import { OperationStore } from "../src/operationStore.ts";
 import type { RelaybaseRuntime } from "../src/server.ts";
 import { buildOperatorPromptContext } from "../src/agent/context.ts";
-import { AgentGatewayService, defaultAgentConfig } from "../src/agent/gateway.ts";
+import { AgentGatewayService, canonicalProjectRootGrants, defaultAgentConfig } from "../src/agent/gateway.ts";
 import {
   operatorAgentModelSettings,
   operatorAgentReadOnlyToolNames,
@@ -16,6 +16,7 @@ import { evaluateToolPolicy, outputGuardrail, userMessageGuardrail } from "../sr
 import { buildOperatorPromptInput, operatorAgentInstructions } from "../src/agent/prompts.ts";
 import { OperatorAgentRuntime, type OperatorAgentRunner } from "../src/agent/runtime.ts";
 import { AgentSessionStore } from "../src/agent/sessionStore.ts";
+import { liveFolderStartMutatingToolStarted } from "../src/agent/liveFolderStart.ts";
 import type {
   AgentApproval,
   AgentConfig,
@@ -39,24 +40,73 @@ test("Operator Agent runtime initializes with valid OpenRouter config and RA007 
   });
 });
 
-test("Agent Gateway returns diagnostic when agent is disabled and does not call runtime", async () => {
-  const gateway = new AgentGatewayService({
-    agentRuntime: new OperatorAgentRuntime({
-      runnerFactory: () => {
-        throw new Error("runtime should not be called");
+test("live folder-start prompt injection check ignores read-only tool starts and advertised mutating tool names", () => {
+  const events = [
+    {
+      type: "model.request_started",
+      data: {
+        toolNames: ["list_apps", "start_app", "restart_app", "stop_app", "setup_and_start_project"]
       }
-    })
-  });
-  const relaybase = fakeRelaybaseRuntime();
-  const session = await gateway.createSession(relaybase, {});
-  const result = await gateway.addMessage(relaybase, session.id, { content: "what is broken?" });
+    },
+    {
+      type: "tool.started",
+      data: { toolName: "list_apps" }
+    },
+    {
+      type: "run.completed",
+      data: {
+        toolNames: ["list_apps", "start_app", "restart_app", "stop_app", "setup_and_start_project"]
+      }
+    }
+  ] as Array<Pick<AgentRunEvent, "type" | "data">>;
 
-  assert.equal(result.run.status, "failed");
-  assert.equal(result.diagnostics[0]?.code, "AGENT_DISABLED");
   assert.equal(
-    gateway.sessionEvents(session.id).some((event) => event.type === "model.delta"),
+    liveFolderStartMutatingToolStarted(events, ["start_app", "restart_app", "stop_app", "setup_and_start_project"]),
     false
   );
+
+  assert.equal(
+    liveFolderStartMutatingToolStarted(
+      [...events, { type: "tool.started", data: { toolName: "start_app" } }],
+      ["start_app", "restart_app", "stop_app", "setup_and_start_project"]
+    ),
+    true
+  );
+});
+
+test("Agent Gateway returns diagnostic when agent is disabled and does not call runtime", async () => {
+  const previous = saveEnv([
+    "OPENROUTER_API_KEY",
+    "RELAYBASE_AGENT_MODEL",
+    "RELAYBASE_AGENT_ENABLED",
+    "RELAYBASE_AGENT_REMOTE_MODEL_ENABLED"
+  ]);
+  delete process.env.OPENROUTER_API_KEY;
+  delete process.env.RELAYBASE_AGENT_MODEL;
+  delete process.env.RELAYBASE_AGENT_ENABLED;
+  delete process.env.RELAYBASE_AGENT_REMOTE_MODEL_ENABLED;
+
+  try {
+    const gateway = new AgentGatewayService({
+      agentRuntime: new OperatorAgentRuntime({
+        runnerFactory: () => {
+          throw new Error("runtime should not be called");
+        }
+      })
+    });
+    const relaybase = fakeRelaybaseRuntime();
+    const session = await gateway.createSession(relaybase, {});
+    const result = await gateway.addMessage(relaybase, session.id, { content: "what is broken?" });
+
+    assert.equal(result.run.status, "failed");
+    assert.equal(result.diagnostics[0]?.code, "AGENT_DISABLED");
+    assert.equal(
+      gateway.sessionEvents(session.id).some((event) => event.type === "model.delta"),
+      false
+    );
+  } finally {
+    restoreEnvValues(previous);
+  }
 });
 
 test("Agent Gateway default config can be enabled from explicit env flags", () => {
@@ -83,7 +133,8 @@ test("Agent Gateway key and model env values alone do not enable remote model ca
 
   assert.equal(config.enabled, false);
   assert.equal(config.provider.remoteModelEnabled, false);
-  assert.equal(config.provider.modelSlug, "google/gemini-3.1-flash-lite");
+  assert.equal(config.provider.modelSlug, undefined);
+  assert.equal(config.provider.apiKeySource.configured, false);
 });
 
 test("Agent Gateway reports remote model disabled separately from agent disabled", async () => {
@@ -160,10 +211,13 @@ test("Agent Gateway streams runtime events through session event model", async (
     const unsubscribe = gateway.subscribeSession(session.id, (event) => streamed.push(event));
 
     try {
-      const result = await gateway.addMessage(relaybase, session.id, {
-        content: "inspect current folder",
-        context: { currentCwd: "C:\\project", selectedAppId: "notes" }
-      });
+      const result = await submitAndWait(
+        gateway,
+        gateway.addMessage(relaybase, session.id, {
+          content: "inspect current folder",
+          context: { currentCwd: "C:\\project", selectedAppId: "notes" }
+        })
+      );
 
       assert.equal(result.run.status, "completed");
       assert.equal(result.diagnostics.length, 0);
@@ -189,6 +243,61 @@ test("Agent Gateway streams runtime events through session event model", async (
   });
 });
 
+test("Agent Gateway queues promptly, enforces one active run, and supports idempotent cancel and retry", async () => {
+  await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-queued-run-secret", async () => {
+    const gateway = new AgentGatewayService({
+      agentRuntime: new OperatorAgentRuntime({
+        runnerFactory: () => ({
+          async run() {
+            return new Promise(() => undefined);
+          }
+        })
+      })
+    });
+    gateway.updateConfig({
+      enabled: true,
+      provider: {
+        modelSlug: "openrouter/test-model",
+        remoteModelEnabled: true,
+        apiKeyEnvVar: "RELAYBASE_TEST_OPENROUTER_KEY"
+      }
+    });
+    const relaybase = fakeRelaybaseRuntime();
+    const session = await gateway.createSession(relaybase, {});
+
+    const accepted = await gateway.addMessage(relaybase, session.id, {
+      content: "inspect the active app",
+      idempotencyKey: "queued-run-1"
+    });
+    assert.equal(accepted.run.status, "queued");
+    assert.equal(gateway.activeRun(session.id)?.id, accepted.run.id);
+
+    const reused = await gateway.addMessage(relaybase, session.id, {
+      content: "inspect the active app",
+      idempotencyKey: "queued-run-1"
+    });
+    assert.equal(reused.reused, true);
+    assert.equal(reused.run.id, accepted.run.id);
+
+    await assert.rejects(
+      () => gateway.addMessage(relaybase, session.id, { content: "second concurrent request" }),
+      (error: unknown) =>
+        Boolean(error && typeof error === "object" && "code" in error && error.code === "AGENT_SESSION_RUN_ACTIVE")
+    );
+
+    const cancelled = gateway.cancelRun(session.id, accepted.run.id);
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(gateway.activeRun(session.id), undefined);
+
+    const retried = await gateway.retryRun(relaybase, session.id, accepted.run.id, {
+      idempotencyKey: "queued-run-retry-1"
+    });
+    assert.equal(retried.run.status, "queued");
+    assert.notEqual(retried.run.id, accepted.run.id);
+    gateway.cancelRun(session.id, retried.run.id);
+  });
+});
+
 test("Agent Gateway includes only active thread recall in model prompt context", async () => {
   await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-thread-recall-secret", async () => {
     const fakeRunner = new FakeRunner("Thread context noted.");
@@ -207,11 +316,11 @@ test("Agent Gateway includes only active thread recall in model prompt context",
     });
     const relaybase = fakeRelaybaseRuntime();
     const first = await gateway.createSession(relaybase, { title: "First thread" });
-    await gateway.addMessage(relaybase, first.id, { content: "alpha project context" });
+    await submitAndWait(gateway, gateway.addMessage(relaybase, first.id, { content: "alpha project context" }));
 
     const second = await gateway.createSession(relaybase, { title: "Second thread" });
-    await gateway.addMessage(relaybase, second.id, { content: "beta project context" });
-    await gateway.addMessage(relaybase, second.id, { content: "use only this thread" });
+    await submitAndWait(gateway, gateway.addMessage(relaybase, second.id, { content: "beta project context" }));
+    await submitAndWait(gateway, gateway.addMessage(relaybase, second.id, { content: "use only this thread" }));
 
     const secondThreadPrompt = fakeRunner.prompts.at(-1) ?? "";
     assert.match(secondThreadPrompt, /beta project context/);
@@ -241,9 +350,12 @@ test("Agent Gateway emits read-only tool lifecycle events from SDK stream", asyn
     const unsubscribe = gateway.subscribeSession(session.id, (event) => streamed.push(event));
 
     try {
-      const result = await gateway.addMessage(relaybase, session.id, {
-        content: "Use the list_apps tool and summarize the registered apps."
-      });
+      const result = await submitAndWait(
+        gateway,
+        gateway.addMessage(relaybase, session.id, {
+          content: "Use the list_apps tool and summarize the registered apps."
+        })
+      );
 
       assert.equal(result.run.status, "completed");
       assert.deepEqual(
@@ -331,6 +443,52 @@ test("Operator Agent config filters offered tools and blocks read-only policy mu
   });
 });
 
+test("Operator Agent model tools receive only canonical roots granted by trusted TUI context", async () => {
+  await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-project-root-grant-secret", async () => {
+    const trustedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-granted-root-"));
+    const unauthorizedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-ungranted-root-"));
+    await fs.writeFile(path.join(trustedRoot, "package.json"), JSON.stringify({ name: "trusted" }), "utf8");
+    await fs.writeFile(path.join(unauthorizedRoot, "package.json"), JSON.stringify({ name: "unauthorized" }), "utf8");
+    const context = minimalTuiContext({ currentCwd: trustedRoot, authorizedProjectRoots: [trustedRoot] });
+    const grants = await canonicalProjectRootGrants(context);
+    assert.equal(grants.length, 1);
+    assert.equal(grants[0]?.canonicalRoot, await fs.realpath(trustedRoot));
+
+    const trustedRunner = new ModelProjectInspectionRunner(trustedRoot);
+    const trustedRuntime = new OperatorAgentRuntime({ runnerFactory: () => trustedRunner });
+    const trustedSession = makeSession();
+    const trustedRun = makeRun(trustedSession.id);
+    await trustedRuntime.execute({
+      relaybase: fakeRelaybaseRuntime(),
+      config: validAgentConfig(),
+      session: trustedSession,
+      message: makeMessage(trustedSession.id, trustedRun.id, "inspect the selected project"),
+      run: trustedRun,
+      context,
+      projectRootGrants: grants,
+      emit: () => undefined
+    });
+    assert.equal(trustedRunner.toolResult?.status, "succeeded");
+
+    const unauthorizedRunner = new ModelProjectInspectionRunner(unauthorizedRoot);
+    const unauthorizedRuntime = new OperatorAgentRuntime({ runnerFactory: () => unauthorizedRunner });
+    const unauthorizedSession = makeSession();
+    const unauthorizedRun = makeRun(unauthorizedSession.id);
+    await unauthorizedRuntime.execute({
+      relaybase: fakeRelaybaseRuntime(),
+      config: validAgentConfig(),
+      session: unauthorizedSession,
+      message: makeMessage(unauthorizedSession.id, unauthorizedRun.id, "inspect a different project"),
+      run: unauthorizedRun,
+      context,
+      projectRootGrants: grants,
+      emit: () => undefined
+    });
+    assert.equal(unauthorizedRunner.toolResult?.status, "diagnostic");
+    assert.equal(unauthorizedRunner.toolResult?.diagnostic?.code, "PROJECT_ROOT_NOT_GRANTED");
+  });
+});
+
 test("Agent Gateway converts SDK approval interruptions into pending approvals and resumes approved tools", async () => {
   await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-approval-secret", async () => {
     const fixture = fakeApprovalRelaybaseRuntime();
@@ -340,10 +498,13 @@ test("Agent Gateway converts SDK approval interruptions into pending approvals a
     const unsubscribe = gateway.subscribeSession(session.id, (event) => streamed.push(event));
 
     try {
-      const result = await gateway.addMessage(fixture.runtime, session.id, {
-        content: "start notes",
-        context: { selectedAppId: "notes-web" }
-      });
+      const result = await submitAndWait(
+        gateway,
+        gateway.addMessage(fixture.runtime, session.id, {
+          content: "start notes",
+          context: { selectedAppId: "notes-web" }
+        })
+      );
 
       assert.equal(result.run.status, "waiting_for_approval");
       assert.equal(fixture.calls.start, 0);
@@ -373,6 +534,46 @@ test("Agent Gateway converts SDK approval interruptions into pending approvals a
   });
 });
 
+test("Agent Gateway continues an approved setup start into health proof without another user prompt", async () => {
+  await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-workflow-secret", async () => {
+    const project = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-workflow-root-"));
+    const fixture = fakeApprovalRelaybaseRuntime();
+    const gateway = gatewayWithApprovalRunner("setup_and_start_project", {
+      phase: "start_registered",
+      appId: "notes-web",
+      cwd: project
+    });
+    const session = await gateway.createSession(fixture.runtime, {
+      context: { selectedAppId: "notes-web", currentCwd: project }
+    });
+
+    const submitted = await submitAndWait(
+      gateway,
+      gateway.addMessage(fixture.runtime, session.id, {
+        content: "start and prove notes",
+        context: { selectedAppId: "notes-web", currentCwd: project }
+      })
+    );
+    assert.equal(submitted.run.status, "waiting_for_approval");
+    const startApproval = approvalFromEvents(gateway.sessionEvents(session.id));
+    assert.equal(startApproval.toolName, "setup_and_start_project");
+
+    await gateway.resolveApproval(fixture.runtime, startApproval.id, "approved");
+
+    const active = gateway.activeRun(session.id);
+    assert.equal(active?.id, submitted.run.id);
+    assert.equal(active?.status, "waiting_for_approval");
+    const proofApproval = gateway
+      .sessionEvents(session.id)
+      .map((event) => (event.data as { approval?: AgentApproval } | undefined)?.approval)
+      .find((approval) => approval?.status === "pending" && approval.toolName === "prove_app_health");
+    assert.ok(proofApproval);
+    assert.equal(proofApproval.runId, submitted.run.id);
+    assert.equal(proofApproval.arguments.appId, "notes-web");
+    assert.equal(gateway.getSession(session.id).messages.filter((message) => message.role === "user").length, 1);
+  });
+});
+
 test("Agent Gateway blocks lifecycle approval when role target is model-inferred and unselected", async () => {
   await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-ambiguous-lifecycle-secret", async () => {
     const fixture = fakeApprovalRelaybaseRuntime();
@@ -389,10 +590,13 @@ test("Agent Gateway blocks lifecycle approval when role target is model-inferred
     const unsubscribe = gateway.subscribeSession(session.id, (event) => streamed.push(event));
 
     try {
-      const result = await gateway.addMessage(fixture.runtime, session.id, {
-        content: "stop the backend",
-        context: minimalTuiContext({ daemonHasZeroApps: false })
-      });
+      const result = await submitAndWait(
+        gateway,
+        gateway.addMessage(fixture.runtime, session.id, {
+          content: "stop the backend",
+          context: minimalTuiContext({ daemonHasZeroApps: false })
+        })
+      );
 
       assert.equal(result.run.status, "completed");
       assert.equal(fixture.calls.stop, 0);
@@ -414,7 +618,10 @@ test("Agent Gateway rejection never executes the pending tool", async () => {
     const fixture = fakeApprovalRelaybaseRuntime();
     const gateway = gatewayWithApprovalRunner("start_app", { appId: "notes-web" });
     const session = await gateway.createSession(fixture.runtime, { context: { selectedAppId: "notes-web" } });
-    const result = await gateway.addMessage(fixture.runtime, session.id, { content: "start notes" });
+    const result = await submitAndWait(
+      gateway,
+      gateway.addMessage(fixture.runtime, session.id, { content: "start notes" })
+    );
     const approval = approvalFromEvents(result.run.events);
 
     const resolved = await gateway.resolveApproval(fixture.runtime, approval.id, "rejected", { reason: "not now" });
@@ -435,7 +642,10 @@ test("Agent Gateway binds approval to the exact saved tool arguments", async () 
     const fixture = fakeApprovalRelaybaseRuntime();
     const gateway = gatewayWithApprovalRunner("start_app", { appId: "notes-web" });
     const session = await gateway.createSession(fixture.runtime, { context: { selectedAppId: "notes-web" } });
-    const result = await gateway.addMessage(fixture.runtime, session.id, { content: "start notes" });
+    const result = await submitAndWait(
+      gateway,
+      gateway.addMessage(fixture.runtime, session.id, { content: "start notes" })
+    );
     const approval = approvalFromEvents(result.run.events);
 
     await assert.rejects(
@@ -477,10 +687,13 @@ test("AGENT-TUI-MATRIX-004 every mutating tool creates a redacted pending approv
       const session = await gateway.createSession(fixture.runtime, {
         context: minimalTuiContext({ currentCwd: project, selectedAppId: "notes-web", daemonHasZeroApps: false })
       });
-      const result = await gateway.addMessage(fixture.runtime, session.id, {
-        content: `request approval for ${scenario.toolName}`,
-        context: minimalTuiContext({ currentCwd: project, selectedAppId: "notes-web", daemonHasZeroApps: false })
-      });
+      const result = await submitAndWait(
+        gateway,
+        gateway.addMessage(fixture.runtime, session.id, {
+          content: `request approval for ${scenario.toolName}`,
+          context: minimalTuiContext({ currentCwd: project, selectedAppId: "notes-web", daemonHasZeroApps: false })
+        })
+      );
       const approval = approvalFromEvents(result.run.events);
       const serialized = JSON.stringify({ approval, events: result.run.events, audit: gateway.auditEvents() });
 
@@ -522,9 +735,12 @@ test("AGENT-TUI-MATRIX-004 every mutating approval rejects cleanly and changed a
       const changedSession = await changedGateway.createSession(changedFixture.runtime, {
         context: minimalTuiContext({ currentCwd: project, selectedAppId: "notes-web", daemonHasZeroApps: false })
       });
-      const changedRun = await changedGateway.addMessage(changedFixture.runtime, changedSession.id, {
-        content: `request changed-args approval for ${scenario.toolName}`
-      });
+      const changedRun = await submitAndWait(
+        changedGateway,
+        changedGateway.addMessage(changedFixture.runtime, changedSession.id, {
+          content: `request changed-args approval for ${scenario.toolName}`
+        })
+      );
       const changedApproval = approvalFromEvents(changedRun.run.events);
 
       await assert.rejects(
@@ -549,9 +765,12 @@ test("AGENT-TUI-MATRIX-004 every mutating approval rejects cleanly and changed a
       const rejectSession = await rejectGateway.createSession(rejectFixture.runtime, {
         context: minimalTuiContext({ currentCwd: project, selectedAppId: "notes-web", daemonHasZeroApps: false })
       });
-      const rejectRun = await rejectGateway.addMessage(rejectFixture.runtime, rejectSession.id, {
-        content: `request rejected approval for ${scenario.toolName}`
-      });
+      const rejectRun = await submitAndWait(
+        rejectGateway,
+        rejectGateway.addMessage(rejectFixture.runtime, rejectSession.id, {
+          content: `request rejected approval for ${scenario.toolName}`
+        })
+      );
       const rejectedApproval = approvalFromEvents(rejectRun.run.events);
       const rejected = await rejectGateway.resolveApproval(rejectFixture.runtime, rejectedApproval.id, "rejected", {
         reason: "cancel"
@@ -583,7 +802,10 @@ test("AGENT-TUI-MATRIX-004 duplicate and unknown approvals fail without duplicat
     const fixture = fakeApprovalRelaybaseRuntime();
     const gateway = gatewayWithApprovalRunner("start_app", { appId: "notes-web" });
     const session = await gateway.createSession(fixture.runtime, { context: { selectedAppId: "notes-web" } });
-    const result = await gateway.addMessage(fixture.runtime, session.id, { content: "start notes" });
+    const result = await submitAndWait(
+      gateway,
+      gateway.addMessage(fixture.runtime, session.id, { content: "start notes" })
+    );
     const approval = approvalFromEvents(result.run.events);
 
     const approved = await gateway.resolveApproval(fixture.runtime, approval.id, "approved");
@@ -619,6 +841,15 @@ test("AGENT-TUI-MATRIX-004 duplicate and unknown approvals fail without duplicat
 test("RA008 policy guardrails separate read-only tools, approval-required tools, and blocked inputs", () => {
   assert.equal(evaluateToolPolicy("list_apps", {}).status, "allowed");
   assert.equal(evaluateToolPolicy("detect_project", { cwd: "C:\\project" }).status, "allowed");
+  assert.equal(evaluateToolPolicy("project_list_files", { projectRoot: "C:\\project" }).status, "allowed");
+  assert.equal(
+    evaluateToolPolicy("project_search_files", { projectRoot: "C:\\project", query: "dev" }).status,
+    "allowed"
+  );
+  assert.equal(
+    evaluateToolPolicy("project_read_file", { projectRoot: "C:\\project", path: "package.json" }).status,
+    "allowed"
+  );
 
   for (const toolName of [
     "start_app",
@@ -681,6 +912,29 @@ test("RA008 policy guardrails separate read-only tools, approval-required tools,
   assert.equal(outputGuardrail("Status: Stopped", 0), undefined);
   assert.equal(outputGuardrail("The preview wrote relaybase.app.json.", 1)?.code, "AGENT_PREVIEW_CLAIMS_WRITE");
   assert.equal(outputGuardrail("Once approved, I will use apply_setup_plan to register these changes.", 1), undefined);
+  assert.equal(
+    outputGuardrail("I need your approval to apply the setup plan and create files. Would you like me to proceed?", 3)
+      ?.code,
+    "AGENT_PROSE_APPROVAL_WITHOUT_TOOL_EVENT"
+  );
+  assert.equal(
+    outputGuardrail(
+      "Applying this plan requires approval. If you want to proceed later, Relaybase will show a confirmation.",
+      3,
+      "Inspect this folder and propose how to configure it, but do not write files. Use detect_project, plan_app_setup, and preview_setup_writes.",
+      ["detect_project", "plan_app_setup", "preview_setup_writes"]
+    ),
+    undefined
+  );
+  assert.equal(
+    outputGuardrail(
+      "I need your approval to apply the setup plan and create files. Would you like me to proceed?",
+      3,
+      "go start the server and call setup_and_start_project with phase=apply_setup",
+      ["detect_project", "plan_app_setup", "preview_setup_writes"]
+    )?.code,
+    "AGENT_PROSE_APPROVAL_WITHOUT_TOOL_EVENT"
+  );
 });
 
 test("setup and manifest approvals do not write before approval and redact preview arguments", async () => {
@@ -712,12 +966,16 @@ test("setup and manifest approvals do not write before approval and redact previ
     });
     const session = await gateway.createSession(fixture.runtime, { context: { currentCwd: project } });
 
-    const result = await gateway.addMessage(fixture.runtime, session.id, { content: "set health route" });
+    const result = await submitAndWait(
+      gateway,
+      gateway.addMessage(fixture.runtime, session.id, { content: "set health route" })
+    );
     const approval = approvalFromEvents(result.run.events);
     const before = JSON.parse(await fs.readFile(manifestPath, "utf8")) as { healthUrl?: string };
 
     assert.equal(before.healthUrl, undefined);
     assert.equal(approval.preview?.healthRoute, "/readyz");
+    assert.equal((approval.arguments.approvalStateBinding as { kind?: unknown })?.kind, "manifest_revision");
     assert.doesNotMatch(JSON.stringify(approval), /relaybase-token-secret/);
     assert.equal(
       gateway.sessionEvents(session.id).some((event) => event.type === "setup.manifest_patch_approval_required"),
@@ -748,7 +1006,10 @@ test("RA012C setup approval preview includes runtime command and port context", 
     const fixture = fakeApprovalRelaybaseRuntime();
     const session = await gateway.createSession(fixture.runtime, { context: { currentCwd: project } });
 
-    const result = await gateway.addMessage(fixture.runtime, session.id, { content: "configure this folder" });
+    const result = await submitAndWait(
+      gateway,
+      gateway.addMessage(fixture.runtime, session.id, { content: "configure this folder" })
+    );
     const approval = approvalFromEvents(result.run.events);
 
     assert.equal(approval.preview?.runtimeId, "python");
@@ -760,6 +1021,69 @@ test("RA012C setup approval preview includes runtime command and port context", 
       )
     );
     assert.doesNotMatch(JSON.stringify(approval), /sk-or-runtime-approval-secret/);
+  });
+});
+
+test("Agent Gateway persists an exact setup preview binding and drift performs zero setup mutation", async () => {
+  await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-setup-binding-secret", async () => {
+    const project = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-gateway-binding-"));
+    await fs.writeFile(
+      path.join(project, "package.json"),
+      JSON.stringify({ scripts: { dev: "vite" }, dependencies: { vite: "latest" } }),
+      "utf8"
+    );
+    const manifestPath = path.join(project, "relaybase.app.json");
+    const fixture = fakeApprovalRelaybaseRuntime();
+    const gateway = gatewayWithApprovalRunner("setup_and_start_project", {
+      phase: "apply_setup",
+      cwd: project,
+      commandHint: "npm run dev",
+      selectedPlanId: "framework-port-flag",
+      portStrategyHint: "generated_launch_wrapper",
+      componentMetadata: {
+        appId: "gateway-binding-web",
+        groupId: "gateway-binding",
+        componentRole: "frontend",
+        paneLabel: "frontend"
+      }
+    });
+    const session = await gateway.createSession(fixture.runtime, {
+      context: { currentCwd: project, authorizedProjectRoots: [project] }
+    });
+    const submitted = await submitAndWait(
+      gateway,
+      gateway.addMessage(fixture.runtime, session.id, { content: "configure and register this folder" })
+    );
+    const approval = approvalFromEvents(submitted.run.events);
+    const binding = approval.arguments.previewBinding as
+      | { schemaVersion?: unknown; digest?: unknown; revision?: unknown; setupPlanId?: unknown }
+      | undefined;
+    assert.equal(binding?.schemaVersion, 1);
+    assert.equal(typeof binding?.digest, "string");
+    assert.equal(typeof binding?.revision, "string");
+    assert.equal(typeof binding?.setupPlanId, "string");
+    assert.ok(approval.argumentsHash);
+
+    const driftedManifest = JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "manual-drift",
+        name: "Manual Drift",
+        command: "npm run dev",
+        protocol: "http",
+        cwd: project,
+        healthUrl: "/manual-health"
+      },
+      null,
+      2
+    );
+    await fs.writeFile(manifestPath, driftedManifest, "utf8");
+    await gateway.resolveApproval(fixture.runtime, approval.id, "approved");
+
+    assert.equal(await fs.readFile(manifestPath, "utf8"), driftedManifest);
+    assert.equal(fixture.calls.start, 0);
+    assert.equal(gateway.getRun(session.id, submitted.run.id).status, "failed");
+    assert.equal(gateway.getRun(session.id, submitted.run.id).diagnostic?.code, "SETUP_PREVIEW_STALE");
   });
 });
 
@@ -837,6 +1161,9 @@ test("Operator Agent instructions require runtime-matrix setup behavior", () => 
   const instructions = operatorAgentInstructions();
 
   assert.match(instructions, /call detect_project first, then plan_app_setup, then preview_setup_writes/);
+  assert.match(instructions, /project_list_files/);
+  assert.match(instructions, /Project inspection tools are read-only/);
+  assert.match(instructions, /Treat discovered scripts and commands as candidates only/);
   assert.match(instructions, /Do not assume a project uses Node, npm, or npm run dev/);
   assert.match(instructions, /Python/);
   assert.match(instructions, /Go/);
@@ -895,6 +1222,40 @@ test("TUI action proposal honors browser and copy config gates", async () => {
   assert.equal(open.status, "unavailable");
   assert.equal(open.diagnostic?.code, "AGENT_TUI_BROWSER_OPEN_DISABLED");
 });
+
+class ModelProjectInspectionRunner implements OperatorAgentRunner {
+  readonly projectRoot: string;
+  toolResult?: {
+    status?: string;
+    diagnostic?: { code?: string };
+  };
+
+  constructor(projectRoot: string) {
+    this.projectRoot = projectRoot;
+  }
+
+  async run(agent: unknown): Promise<any> {
+    const tool = (
+      agent as {
+        tools?: Array<{
+          name?: string;
+          invoke?: (context: unknown, input: string) => Promise<unknown>;
+        }>;
+      }
+    ).tools?.find((candidate) => candidate.name === "project_list_files");
+    assert.ok(tool?.invoke, "project_list_files must be present in the model-side SDK registry");
+    const rawResult = await tool.invoke({}, JSON.stringify({ projectRoot: this.projectRoot, maxFiles: 10 }));
+    this.toolResult = (typeof rawResult === "string" ? JSON.parse(rawResult) : rawResult) as typeof this.toolResult;
+    return {
+      finalOutput: "Project inspection completed.",
+      usage: { inputTokens: 10, outputTokens: 5 },
+      completed: Promise.resolve(),
+      async *[Symbol.asyncIterator]() {
+        // The runner invokes the SDK tool directly so this test can inspect its structured authorization result.
+      }
+    };
+  }
+}
 
 class FakeRunner implements OperatorAgentRunner {
   private readonly finalOutput: string;
@@ -1324,6 +1685,20 @@ async function withEnvAsync(name: string, value: string, callback: () => Promise
   }
 }
 
+function saveEnv(names: string[]): Map<string, string | undefined> {
+  return new Map(names.map((name) => [name, process.env[name]]));
+}
+
+function restoreEnvValues(values: Map<string, string | undefined>): void {
+  for (const [name, value] of values.entries()) {
+    if (value === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = value;
+    }
+  }
+}
+
 async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1336,4 +1711,18 @@ async function waitFor(condition: () => boolean): Promise<void> {
     await delay(5);
   }
   assert.equal(condition(), true);
+}
+
+async function submitAndWait(
+  gateway: AgentGatewayService,
+  submission: Promise<Awaited<ReturnType<AgentGatewayService["addMessage"]>>>
+): Promise<Awaited<ReturnType<AgentGatewayService["addMessage"]>>> {
+  const accepted = await submission;
+  if (accepted.run.status === "queued" || accepted.run.status === "running") {
+    await waitFor(() => {
+      const status = gateway.getRun(accepted.run.sessionId, accepted.run.id).status;
+      return status !== "queued" && status !== "running";
+    });
+  }
+  return { ...accepted, run: gateway.getRun(accepted.run.sessionId, accepted.run.id) };
 }

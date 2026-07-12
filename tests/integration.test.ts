@@ -75,7 +75,10 @@ test("reports degraded route health when only the agent header route reaches the
     });
     await hub.listen();
 
-    const response = await httpRequest(hub.address().port, "/__hub/api/apps/degraded/state", { host: "localhost" });
+    const response = await httpRequest(hub.address().port, "/__hub/api/apps/degraded/state", {
+      host: "localhost",
+      "x-relaybase-token": hub.runtime.token
+    });
     assert.equal(response.statusCode, 200);
     const state = JSON.parse(response.body).state;
     assert.equal(state.routeReachable, true);
@@ -86,6 +89,84 @@ test("reports degraded route health when only the agent header route reaches the
     assert.equal(state.readiness.state, "ready");
     assert.ok(
       state.readiness.checks.some((check: { name: string; ok: boolean }) => check.name === "human-route" && !check.ok)
+    );
+  } finally {
+    await hub.close();
+    await upstream.close();
+  }
+});
+
+test("treats routed HTTP 404 responses as unhealthy", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-route-404-"));
+  const upstream = await createConditionalHttpUpstream(() => ({
+    statusCode: 404,
+    body: JSON.stringify({ error: "not found" })
+  }));
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
+
+  try {
+    await hub.runtime.registry.upsertManifest({
+      id: "missing-health-route",
+      name: "Missing Health Route",
+      command: "external",
+      cwd: ".",
+      protocol: "http",
+      healthUrl: "/health",
+      upstreamPort: upstream.port
+    });
+    await hub.listen();
+
+    const response = await httpRequest(hub.address().port, "/__hub/api/apps/missing-health-route/state", {
+      host: "localhost",
+      "x-relaybase-token": hub.runtime.token
+    });
+    assert.equal(response.statusCode, 200);
+    const state = JSON.parse(response.body).state;
+    assert.equal(state.routeReachable, false);
+    assert.equal(state.routeHealth.status, "failed");
+    assert.equal(state.routeHealth.humanRoute.statusCode, 404);
+    assert.equal(state.routeHealth.agentRoute.statusCode, 404);
+    assert.equal(state.readiness.state, "unhealthy");
+  } finally {
+    await hub.close();
+    await upstream.close();
+  }
+});
+
+test("route health keeps interactive app-state reads within a bounded probe budget", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-route-slow-"));
+  const upstream = await createDelayedHttpUpstream(2500, () => ({
+    statusCode: 200,
+    body: JSON.stringify({ ok: true })
+  }));
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
+
+  try {
+    await hub.runtime.registry.upsertManifest({
+      id: "slow-route",
+      name: "Slow Route",
+      command: "external",
+      cwd: ".",
+      protocol: "http",
+      healthUrl: "/health",
+      healthTimeoutMs: 12000,
+      upstreamPort: upstream.port
+    });
+    await hub.listen();
+
+    const startedAt = Date.now();
+    const response = await httpRequest(hub.address().port, "/__hub/api/apps/slow-route/state", {
+      host: "localhost",
+      "x-relaybase-token": hub.runtime.token
+    });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(response.statusCode, 200);
+    const state = JSON.parse(response.body).state;
+    assert.ok(elapsedMs < 3500, `expected bounded state probe, received ${elapsedMs}ms`);
+    assert.equal(state.routeReachable, false);
+    assert.equal(state.routeHealth.status, "failed");
+    assert.ok(
+      state.readiness.checks.some((check: { name: string; ok: boolean }) => check.name === "route-health" && !check.ok)
     );
   } finally {
     await hub.close();
@@ -116,7 +197,10 @@ test("reports failed route health when both routed paths return server errors", 
     });
     await hub.listen();
 
-    const response = await httpRequest(hub.address().port, "/__hub/api/apps/route-failed/state", { host: "localhost" });
+    const response = await httpRequest(hub.address().port, "/__hub/api/apps/route-failed/state", {
+      host: "localhost",
+      "x-relaybase-token": hub.runtime.token
+    });
     assert.equal(response.statusCode, 200);
     const state = JSON.parse(response.body).state;
     assert.equal(state.backendPortOpen, true);
@@ -288,7 +372,10 @@ test("manages process lifecycle and injects hub env", async () => {
     assert.equal(body.app, "managed");
     assert.match(body.baseUrl, /^http:\/\/managed\.localhost:/);
 
-    const stateResponse = await httpRequest(hub.address().port, "/__hub/api/apps/managed/state", { host: "localhost" });
+    const stateResponse = await httpRequest(hub.address().port, "/__hub/api/apps/managed/state", {
+      host: "localhost",
+      "x-relaybase-token": hub.runtime.token
+    });
     assert.equal(stateResponse.statusCode, 200);
     const stateBody = JSON.parse(stateResponse.body);
     assert.equal(stateBody.state.id, "managed");
@@ -304,7 +391,10 @@ test("manages process lifecycle and injects hub env", async () => {
     assert.match(stateBody.state.logStreamUrl, /\/__hub\/api\/apps\/managed\/logs\/stream$/);
     assert.equal(stateBody.state.readiness.state, "ready");
 
-    const allStateResponse = await httpRequest(hub.address().port, "/__hub/api/state", { host: "localhost" });
+    const allStateResponse = await httpRequest(hub.address().port, "/__hub/api/state", {
+      host: "localhost",
+      "x-relaybase-token": hub.runtime.token
+    });
     assert.equal(allStateResponse.statusCode, 200);
     assert.ok(
       JSON.parse(allStateResponse.body).apps.some(
@@ -392,7 +482,9 @@ test("daemon port policy reserves unique dynamic ports and preserves routes acro
     assert.equal(restarted.status, "running");
     assert.ok(restarted.assignedPort);
     assert.notEqual(restarted.assignedPort, second.assignedPort);
-    const stateResponse = await apiRequest(hub.address().port, "GET", "/__hub/api/apps/port-a/state");
+    const stateResponse = await apiRequest(hub.address().port, "GET", "/__hub/api/apps/port-a/state", undefined, {
+      "x-relaybase-token": hub.runtime.token
+    });
     const state = JSON.parse(stateResponse.body).state;
     assert.equal(state.runtime.status, "running");
     assert.equal(state.routeReachable, true);
@@ -798,7 +890,10 @@ test("does not report stopped when stopCommand fails, times out, or verifyStoppe
         healthUrl: "/health",
         stopCommand: hookCommand(scenario.stopMode, marker, "stop"),
         ...(scenario.verifyMode ? { verifyStoppedCommand: hookCommand(scenario.verifyMode, marker, "verify") } : {}),
-        stopTimeoutMs: 200
+        // A Node hook needs more than 200 ms to start reliably on Windows;
+        // retain the hang-path assertion while avoiding a cold-start timeout
+        // being misclassified as the explicit failure scenario.
+        stopTimeoutMs: 1_000
       });
 
       const runtime = await hub.runtime.processes.start(scenario.id);
@@ -924,7 +1019,8 @@ test("HTTP API state and apps responses keep current contract and correlation he
   try {
     await hub.listen();
     const stateResponse = await apiRequest(hub.address().port, "GET", "/__hub/api/state", undefined, {
-      "x-relaybase-correlation-id": "contract-success"
+      "x-relaybase-correlation-id": "contract-success",
+      "x-relaybase-token": hub.runtime.token
     });
     assert.equal(stateResponse.statusCode, 200);
     assert.equal(stateResponse.headers["x-relaybase-correlation-id"], "contract-success");
@@ -932,7 +1028,9 @@ test("HTTP API state and apps responses keep current contract and correlation he
     assert.ok(Array.isArray(stateBody.apps));
     assert.equal("relaybaseError" in stateBody, false);
 
-    const appsResponse = await apiRequest(hub.address().port, "GET", "/__hub/api/apps");
+    const appsResponse = await apiRequest(hub.address().port, "GET", "/__hub/api/apps", undefined, {
+      "x-relaybase-token": hub.runtime.token
+    });
     assert.equal(appsResponse.statusCode, 200);
     assert.ok(Array.isArray(JSON.parse(appsResponse.body).apps));
   } finally {
@@ -1000,7 +1098,9 @@ test("HTTP API state includes component groups and manifest metadata diagnostics
     });
     await hub.listen();
 
-    const response = await apiRequest(hub.address().port, "GET", "/__hub/api/state");
+    const response = await apiRequest(hub.address().port, "GET", "/__hub/api/state", undefined, {
+      "x-relaybase-token": hub.runtime.token
+    });
     assert.equal(response.statusCode, 200);
     const body = JSON.parse(response.body);
     assert.ok(Array.isArray(body.apps));
@@ -1163,10 +1263,158 @@ test("HTTP lifecycle operations expose async polling and keep synchronous compat
     assert.equal(syncBody.operation.status, "succeeded");
     assert.equal(syncBody.runtime.status, "running");
     assert.equal(syncBody.state.id, "sync-app");
+
+    const unauthorizedOperations = await apiRequest(hub.address().port, "GET", "/__hub/api/operations");
+    assert.equal(unauthorizedOperations.statusCode, 401);
+    assert.equal(JSON.parse(unauthorizedOperations.body).code, "UNAUTHORIZED_OPERATION_INVENTORY");
+
+    const operationListResponse = await apiRequest(
+      hub.address().port,
+      "GET",
+      "/__hub/api/operations?status=succeeded&type=start&targetId=sync-app&retryable=false&limit=1",
+      undefined,
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(operationListResponse.statusCode, 200);
+    const operationList = JSON.parse(operationListResponse.body);
+    assert.equal(operationList.count, 1);
+    assert.equal(operationList.operations[0].operationId, syncBody.operationId);
+    assert.equal(operationList.operations[0].appId, "sync-app");
+    assert.equal(operationList.filters.limit, 1);
+
+    const invalidOperationList = await apiRequest(
+      hub.address().port,
+      "GET",
+      "/__hub/api/operations?limit=201",
+      undefined,
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(invalidOperationList.statusCode, 400);
+    assert.equal(JSON.parse(invalidOperationList.body).code, "OPERATION_LIMIT_INVALID");
   } finally {
     await hub.runtime.processes.stop("async-app").catch(() => undefined);
     await hub.runtime.processes.stop("sync-app").catch(() => undefined);
     await hub.close();
+  }
+});
+
+test("server close bounds blocked lifecycle work and preserves shutdown recovery in the reopened ledger", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-api-op-shutdown-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
+  let release: (() => void) | undefined;
+  let runSettled = false;
+  let abortObserved = false;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await hub.listen();
+  const handle = hub.runtime.operations.enqueueLifecycle({
+    operationType: "restart",
+    targetId: "blocked-app",
+    correlationId: "server-close-blocked-operation",
+    run: async ({ signal }) => {
+      await Promise.race([
+        blocked,
+        new Promise<void>((resolve) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              abortObserved = true;
+              resolve();
+            },
+            { once: true }
+          );
+        })
+      ]);
+      runSettled = true;
+      if (signal.aborted) {
+        throw new Error("server shutdown aborted blocked lifecycle work");
+      }
+      return { status: "running" };
+    },
+    evaluate: () => ({ status: "succeeded" })
+  });
+
+  const runningDeadline = Date.now() + 2_000;
+  while (hub.runtime.operations.get(handle.operationId)?.status !== "running" && Date.now() < runningDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(hub.runtime.operations.get(handle.operationId)?.status, "running");
+
+  const closeStartedAt = Date.now();
+  await hub.close();
+  assert.ok(Date.now() - closeStartedAt < 3_500, "server close exceeded the bounded lifecycle shutdown budget");
+  assert.equal(abortObserved, true);
+  assert.equal(runSettled, true);
+
+  const reopened = await createRelaybaseServer({ port: 0, stateDir });
+  try {
+    await reopened.listen();
+    const recovered = reopened.runtime.operations.get(handle.operationId);
+    assert.equal(recovered?.status, "failed");
+    assert.equal(recovered?.error?.code, "LIFECYCLE_OPERATION_SHUTDOWN");
+    assert.deepEqual(
+      reopened.runtime.operations
+        .list({ statuses: ["failed"], retryableOnly: true, targetId: "blocked-app" })
+        .map((operation) => operation.operationId),
+      [handle.operationId]
+    );
+  } finally {
+    const lateResult = await handle.done;
+    assert.equal(lateResult.status, "failed");
+    release?.();
+    await reopened.close();
+  }
+});
+
+test("server shutdown aborts an in-flight process start before closing lifecycle dependencies", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-api-process-shutdown-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
+  await hub.runtime.registry.upsertManifest({
+    id: "shutdown-start",
+    name: "Shutdown Start",
+    command: `"${process.execPath}" -e "setInterval(() => {}, 1000)"`,
+    cwd: rootDir,
+    protocol: "http",
+    healthUrl: "/health",
+    healthTimeoutMs: 12_000
+  });
+  await hub.listen();
+
+  const response = await apiRequest(
+    hub.address().port,
+    "POST",
+    "/__hub/api/apps/shutdown-start/start?async=true",
+    undefined,
+    { "x-relaybase-token": hub.runtime.token }
+  );
+  assert.equal(response.statusCode, 202);
+  const operationId = JSON.parse(response.body).operationId as string;
+  let assignedPort: number | undefined;
+  const startDeadline = Date.now() + 3_000;
+  while (Date.now() < startDeadline) {
+    const status = (await hub.runtime.processes.listStatuses()).find((app) => app.id === "shutdown-start")?.runtime;
+    assignedPort = status?.assignedPort;
+    if (assignedPort && status?.status === "starting") {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(typeof assignedPort, "number");
+
+  const closeStartedAt = Date.now();
+  await hub.close();
+  assert.ok(Date.now() - closeStartedAt < 13_000, "process lifecycle cancellation exceeded shutdown budget");
+  assert.equal(hub.runtime.operations.get(operationId)?.status, "failed");
+  assert.equal(hub.runtime.operations.get(operationId)?.error?.code, "LIFECYCLE_OPERATION_SHUTDOWN");
+  assert.equal(await isPortOpen(assignedPort!), false);
+
+  const reopened = await createRelaybaseServer({ port: 0, stateDir });
+  try {
+    await reopened.listen();
+    assert.equal(reopened.runtime.operations.get(operationId)?.error?.code, "LIFECYCLE_OPERATION_SHUTDOWN");
+  } finally {
+    await reopened.close();
   }
 });
 
@@ -1538,7 +1786,10 @@ test("reports failed stop when backend port remains open", async () => {
     assert.equal(stopped.stopVerification?.backendPort, stalePort);
     assert.equal(stopped.stopVerification?.backendPortOpen, true);
 
-    const stateResponse = await httpRequest(hub.address().port, "/__hub/api/apps/stale/state", { host: "localhost" });
+    const stateResponse = await httpRequest(hub.address().port, "/__hub/api/apps/stale/state", {
+      host: "localhost",
+      "x-relaybase-token": hub.runtime.token
+    });
     const state = JSON.parse(stateResponse.body).state;
     assert.equal(state.stopVerification.ok, false);
     assert.equal(state.stopVerification.backendPortOpen, true);
@@ -1920,6 +2171,24 @@ async function createConditionalHttpUpstream(
     const result = handler(request);
     response.writeHead(result.statusCode, { "content-type": "application/json" });
     response.end(result.body);
+  });
+  await listen(server);
+  return {
+    port: (server.address() as net.AddressInfo).port,
+    close: () => closeServer(server)
+  };
+}
+
+async function createDelayedHttpUpstream(
+  delayMs: number,
+  handler: (request: http.IncomingMessage) => { statusCode: number; body: string }
+): Promise<{ port: number; close(): Promise<void> }> {
+  const server = http.createServer((request, response) => {
+    setTimeout(() => {
+      const result = handler(request);
+      response.writeHead(result.statusCode, { "content-type": "application/json" });
+      response.end(result.body);
+    }, delayMs);
   });
   await listen(server);
   return {

@@ -1,6 +1,6 @@
 # TUI Evidence Report
 
-Generated: 2026-06-23T19:15:39.710Z
+Generated: 2026-07-11T23:10:33.389Z
 Verdict: PASS
 Fixture: default
 Artifact root: C:\Users\wamin\Desktop\development\relaybase\artifacts\tui-verification\default
@@ -23,13 +23,16 @@ Cleanup: daemon and fixture processes stopped
 | daemonUnavailable | passed |
 | directLaunch | passed |
 | bridgeLaunch | passed |
+| bridgeResponsiveLayout | passed |
 | daemonConnection | passed |
 | groupedPanes | passed |
+| styledOperatorShell | passed |
 | groupedEightPanes | not_applicable |
 | preferences | passed |
 | slashConfirmation | passed |
 | exportConfirmation | passed |
 | assistantConfirmation | passed |
+| usageMenu | passed |
 | noDestructiveBeforeConfirmation | passed |
 | recording | not_available |
 
@@ -50,6 +53,7 @@ Cleanup: daemon and fixture processes stopped
 - Slash stop confirmation transcript: C:\Users\wamin\Desktop\development\relaybase\artifacts\tui-verification\default\slash-stop-confirmation-transcript.txt
 - Export confirmation transcript: C:\Users\wamin\Desktop\development\relaybase\artifacts\tui-verification\default\export-confirmation-transcript.txt
 - Assistant confirmation transcript: C:\Users\wamin\Desktop\development\relaybase\artifacts\tui-verification\default\assistant-confirmation-transcript.txt
+- Usage menu transcript: C:\Users\wamin\Desktop\development\relaybase\artifacts\tui-verification\default\usage-menu-transcript.txt
 
 ## Notes
 

@@ -32,6 +32,19 @@ export async function handleAgentApiRequest(input: {
     return true;
   }
 
+  if (request.method === "GET" && route.length === 1 && route[0] === "usage") {
+    const url = new URL(request.url ?? "/", "http://localhost");
+    const scope = url.searchParams.get("scope") ?? "active-thread";
+    if (scope !== "active-thread") {
+      throw new AgentGatewayRequestError(400, "AGENT_USAGE_SCOPE_INVALID", "Agent usage scope is invalid.", {
+        retryable: false,
+        userAction: "Use scope=active-thread."
+      });
+    }
+    sendJson(response, 200, { agent: { usage: runtime.agentGateway.getActiveUsage() } });
+    return true;
+  }
+
   if (request.method === "PUT" && route.length === 1 && route[0] === "config") {
     const body = await readJsonBody(request);
     sendJson(response, 200, { agent: { config: runtime.agentGateway.updateConfig(body) } });
@@ -94,9 +107,61 @@ export async function handleAgentApiRequest(input: {
     return true;
   }
 
+  if (request.method === "GET" && route.length === 3 && route[0] === "sessions" && route[2] === "runs") {
+    sendJson(response, 200, { agent: { runs: runtime.agentGateway.listRuns(route[1]) } });
+    return true;
+  }
+
+  if (
+    request.method === "GET" &&
+    route.length === 4 &&
+    route[0] === "sessions" &&
+    route[2] === "runs" &&
+    route[3] === "active"
+  ) {
+    sendJson(response, 200, { agent: { run: runtime.agentGateway.activeRun(route[1]) ?? null } });
+    return true;
+  }
+
+  if (request.method === "GET" && route.length === 4 && route[0] === "sessions" && route[2] === "runs") {
+    sendJson(response, 200, { agent: { run: runtime.agentGateway.getRun(route[1], route[3]) } });
+    return true;
+  }
+
+  if (
+    request.method === "POST" &&
+    route.length === 5 &&
+    route[0] === "sessions" &&
+    route[2] === "runs" &&
+    route[4] === "cancel"
+  ) {
+    sendJson(response, 200, { agent: { run: runtime.agentGateway.cancelRun(route[1], route[3]) } });
+    return true;
+  }
+
+  if (
+    request.method === "POST" &&
+    route.length === 5 &&
+    route[0] === "sessions" &&
+    route[2] === "runs" &&
+    route[4] === "retry"
+  ) {
+    const body = await readJsonBody(request);
+    const idempotencyKey = requestIdempotencyKey(request, body);
+    const result = await runtime.agentGateway.retryRun(runtime, route[1], route[3], {
+      ...(idempotencyKey ? { idempotencyKey } : {})
+    });
+    sendJson(response, 202, { agent: result });
+    return true;
+  }
+
   if (request.method === "POST" && route.length === 3 && route[0] === "sessions" && route[2] === "messages") {
     const body = await readJsonBody(request);
-    const result = await runtime.agentGateway.addMessage(runtime, route[1], body as unknown as AgentMessageRequest);
+    const idempotencyKey = requestIdempotencyKey(request, body);
+    const result = await runtime.agentGateway.addMessage(runtime, route[1], {
+      ...(body as unknown as AgentMessageRequest),
+      ...(idempotencyKey ? { idempotencyKey } : {})
+    });
     sendJson(response, 202, { agent: result });
     return true;
   }
@@ -166,8 +231,8 @@ async function streamAgentSessionEvents(
     {
       sessionId,
       reconnect: {
-        replay: "snapshot_only",
-        requiresSessionRefresh: true,
+        replay: "events_after_sequence",
+        requiresSessionRefresh: false,
         lastEventId: headerText(request.headers["last-event-id"]) || null,
         afterSequence
       }
@@ -176,11 +241,19 @@ async function streamAgentSessionEvents(
   );
 
   for (const event of runtime.agentGateway.sessionEvents(sessionId, afterSequence)) {
-    send(event.type, event.id, event);
+    send(event.type, String(event.sequence), event);
   }
 
+  send("stream.replay_completed", `agent-replay-${afterSequence}`, {
+    id: `agent-replay-${afterSequence}`,
+    sequence: 0,
+    sessionId,
+    type: "stream.replay_completed",
+    data: { afterSequence }
+  });
+
   const unsubscribe = runtime.agentGateway.subscribeSession(sessionId, (event) => {
-    send(event.type, event.id, event);
+    send(event.type, String(event.sequence), event);
   });
   const heartbeat = setInterval(() => {
     if (!closed && !response.destroyed) {
@@ -224,6 +297,20 @@ function sequenceFromEventId(value: string): string | undefined {
   }
   const match = value.match(/(?:^|:)(\d+)$/);
   return match?.[1] ?? (/^\d+$/.test(value) ? value : undefined);
+}
+
+function requestIdempotencyKey(request: http.IncomingMessage, body: Record<string, unknown>): string | undefined {
+  const headerKey = headerText(request.headers["idempotency-key"]).trim();
+  const bodyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "";
+  if (headerKey && bodyKey && headerKey !== bodyKey) {
+    throw new AgentGatewayRequestError(
+      400,
+      "AGENT_IDEMPOTENCY_KEY_CONFLICT",
+      "Idempotency-Key header and body idempotencyKey must match when both are provided.",
+      { retryable: false, userAction: "Send one stable idempotency key for the submission." }
+    );
+  }
+  return headerKey || bodyKey || undefined;
 }
 
 async function readJsonBody(request: http.IncomingMessage): Promise<Record<string, unknown>> {

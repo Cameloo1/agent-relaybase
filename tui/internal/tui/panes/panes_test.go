@@ -37,6 +37,7 @@ func TestPaneManagerMapsFrontendBackendGroupToTwoPanes(t *testing.T) {
 
 func TestPaneManagerRendersFourGroupsAsEightPanes(t *testing.T) {
 	manager := NewManager()
+	manager.Resize(160, 40)
 	manager.ApplyState(groupedState(4))
 
 	panes := manager.VisiblePanes()
@@ -50,6 +51,7 @@ func TestPaneManagerRendersFourGroupsAsEightPanes(t *testing.T) {
 
 func TestPaneManagerPageNavigationWorks(t *testing.T) {
 	manager := NewManager()
+	manager.Resize(160, 40)
 	manager.ApplyState(groupedState(5))
 
 	if manager.PageCount() != 2 {
@@ -68,6 +70,8 @@ func TestPaneManagerPageNavigationWorks(t *testing.T) {
 func TestPaneManagerAppliesPersistedLastPage(t *testing.T) {
 	manager := NewManager()
 	manager.ApplyPreferences(nil, nil, nil, nil, 1)
+	// Bubble Tea normally reports terminal geometry before daemon state arrives.
+	manager.Resize(120, 23)
 	manager.ApplyState(groupedState(5))
 
 	if manager.Page() != 1 {
@@ -250,14 +254,101 @@ func TestPaneManagerFailedStoppedAndHiddenPanesHaveExpectedVisibility(t *testing
 	}
 }
 
-func TestPaneManagerNarrowTerminalUsesDegradedSingleColumnLayout(t *testing.T) {
+func TestPaneManagerNarrowTerminalUsesOneUsablePanePerPage(t *testing.T) {
 	manager := NewManager()
 	manager.Resize(50, 20)
 	manager.ApplyState(groupedState(4))
 
 	layout := manager.Layout()
-	if !layout.Narrow || layout.Columns != 1 || layout.Rows != 8 {
-		t.Fatalf("expected narrow 8-pane layout to degrade to one column, got %#v", layout)
+	if layout.Columns != 1 || layout.Rows != 1 || len(manager.CurrentPagePanes()) != 1 || manager.PageCount() != 8 {
+		t.Fatalf("expected narrow layout to page one usable pane at a time, layout=%#v visible=%d pages=%d", layout, len(manager.CurrentPagePanes()), manager.PageCount())
+	}
+}
+
+func TestPaneManagerCapacityPreservesScrollableFullMetadataGeometry(t *testing.T) {
+	tests := []struct {
+		name       string
+		width      int
+		height     int
+		capacity   int
+		pageCount  int
+		secondPage int
+	}{
+		{name: "narrow", width: 70, height: 13, capacity: 1, pageCount: 8, secondPage: 1},
+		{name: "medium_80", width: 80, height: 13, capacity: 2, pageCount: 4, secondPage: 2},
+		{name: "medium_100", width: 100, height: 18, capacity: 6, pageCount: 2, secondPage: 2},
+		{name: "medium_110", width: 110, height: 19, capacity: 6, pageCount: 2, secondPage: 2},
+		{name: "wide_120", width: 120, height: 23, capacity: 8, pageCount: 1, secondPage: 0},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := NewManager()
+			manager.Resize(test.width, test.height)
+			manager.ApplyState(fullMetadataState(8))
+
+			if got := CalculatePageCapacity(test.width, test.height); got != test.capacity {
+				t.Fatalf("capacity=%d, want %d", got, test.capacity)
+			}
+			if got := len(manager.CurrentPagePanes()); got != test.capacity {
+				t.Fatalf("visible panes=%d, want %d", got, test.capacity)
+			}
+			if got := manager.PageCount(); got != test.pageCount {
+				t.Fatalf("page count=%d, want %d", got, test.pageCount)
+			}
+			if manager.Layout().PaneHeight < 9 {
+				t.Fatalf("pane height=%d cannot hold full metadata plus a log row", manager.Layout().PaneHeight)
+			}
+			if test.secondPage > 0 {
+				manager.NextPage()
+				if got := len(manager.CurrentPagePanes()); got != test.secondPage {
+					t.Fatalf("second page panes=%d, want %d", got, test.secondPage)
+				}
+			}
+		})
+	}
+}
+
+func TestPaneManagerResizeKeepsSelectedPaneAcrossCapacityChanges(t *testing.T) {
+	manager := NewManager()
+	manager.Resize(120, 23)
+	manager.ApplyState(fullMetadataState(8))
+	want := manager.VisiblePanes()[7].ID
+	if !manager.SelectPane(want) {
+		t.Fatalf("could not select %q", want)
+	}
+
+	manager.Resize(70, 13)
+	if got := manager.SelectedPaneID(); got != want {
+		t.Fatalf("resize changed selected pane to %q, want %q", got, want)
+	}
+	if manager.Page() != 7 || len(manager.CurrentPagePanes()) != 1 {
+		t.Fatalf("narrow resize did not move selection to its single-pane page: page=%d panes=%d", manager.Page(), len(manager.CurrentPagePanes()))
+	}
+}
+
+func TestPaneManagerCloseAndUnpinReflowCurrentPage(t *testing.T) {
+	manager := NewManager()
+	manager.Resize(100, 18)
+	manager.ApplyState(groupedState(2))
+	if manager.Layout().Rows != 2 {
+		t.Fatalf("four-pane fixture rows=%d, want 2", manager.Layout().Rows)
+	}
+	manager.CloseSelected()
+	manager.CloseSelected()
+	if len(manager.CurrentPagePanes()) != 2 || manager.Layout().Rows != 1 || manager.Layout().PaneHeight != 18 {
+		t.Fatalf("closing panes did not reflow the page: panes=%d layout=%#v", len(manager.CurrentPagePanes()), manager.Layout())
+	}
+
+	stopped := NewManager()
+	stopped.Resize(80, 14)
+	stopped.ApplyState(componentState("notes", "notes", "frontend", "running"))
+	stopped.TogglePinSelected()
+	state := componentState("notes", "notes", "frontend", "stopped")
+	stopped.ApplyState(state)
+	stopped.TogglePinSelected()
+	if len(stopped.CurrentPagePanes()) != 0 {
+		t.Fatalf("unpinning a stopped pane left it visible: %#v", stopped.CurrentPagePanes())
 	}
 }
 
@@ -365,9 +456,13 @@ func TestPaneManagerFollowModeAppendsAndScrolls(t *testing.T) {
 
 func TestPaneManagerNonFollowModePreservesScrollPosition(t *testing.T) {
 	manager := NewManager()
+	manager.Resize(80, 12)
 	manager.ApplyState(componentState("notes", "notes", "frontend", "running"))
+	for sequence := 1; sequence <= 10; sequence++ {
+		manager.AppendLog(relaybaseclient.LogEvent{Sequence: int64(sequence), AppID: "notes", GroupID: "notes", ComponentRole: "frontend", Stream: "stdout", Message: fmt.Sprintf("line %d", sequence)})
+	}
 	manager.ToggleFollowSelected()
-	manager.AppendLog(relaybaseclient.LogEvent{Sequence: 1, AppID: "notes", GroupID: "notes", ComponentRole: "frontend", Stream: "stdout", Message: "one"})
+	manager.AppendLog(relaybaseclient.LogEvent{Sequence: 11, AppID: "notes", GroupID: "notes", ComponentRole: "frontend", Stream: "stdout", Message: "eleven"})
 
 	pane := manager.VisiblePanes()[0]
 	if pane.ScrollOffset != 1 {
@@ -516,6 +611,31 @@ func groupedState(groupCount int) *relaybaseclient.RelaybaseState {
 		}
 		state.Groups = append(state.Groups, relaybaseclient.AppGroup{GroupID: groupID, DisplayName: displayName})
 		state.Components = append(state.Components, frontend, backend)
+	}
+	return state
+}
+
+func fullMetadataState(componentCount int) *relaybaseclient.RelaybaseState {
+	state := &relaybaseclient.RelaybaseState{}
+	for index := 1; index <= componentCount; index++ {
+		appID := fmt.Sprintf("app-%d", index)
+		role := "frontend"
+		if index%2 == 0 {
+			role = "backend"
+		}
+		state.Components = append(state.Components, relaybaseclient.AppComponent{
+			AppID:       appID,
+			GroupID:     appID,
+			Role:        role,
+			PaneLabel:   role,
+			PaneOrder:   index,
+			DisplayName: fmt.Sprintf("App %d", index),
+			Status:      "failed",
+			Route:       relaybaseclient.RouteInfo{HumanURL: fmt.Sprintf("http://app-%d.localhost:7777", index), Reachable: true},
+			PID:         2000 + index,
+			Port:        8000 + index,
+			LastError:   "health check failed",
+		})
 	}
 	return state
 }

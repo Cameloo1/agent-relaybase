@@ -226,7 +226,7 @@ test("AGENT-FOLDER-START-005 setup/start tool edge cases gate mutations and neve
     { ...missingContext, approved: true }
   );
   assert.equal(nonexistent.status, "diagnostic");
-  assert.equal(nonexistent.diagnostic?.code, "AGENT_TOOL_FAILED");
+  assert.equal(nonexistent.diagnostic?.code, "PROJECT_ROOT_NOT_GRANTED");
   assert.equal(missingContext.calls.register, 0);
   assert.equal(missingContext.calls.start, 0);
 
@@ -234,7 +234,12 @@ test("AGENT-FOLDER-START-005 setup/start tool edge cases gate mutations and neve
     "package.json": "{not json"
   });
   const invalidPackageContext = fakeToolContext({
-    tuiContext: { currentCwd: invalidPackageProject, daemonHasZeroApps: true, diagnostics: [] }
+    tuiContext: {
+      currentCwd: invalidPackageProject,
+      authorizedProjectRoots: [invalidPackageProject],
+      daemonHasZeroApps: true,
+      diagnostics: []
+    }
   });
   const invalidPackage = await executeRelaybaseAgentTool(
     "setup_and_start_project",
@@ -251,7 +256,14 @@ test("AGENT-FOLDER-START-005 setup/start tool edge cases gate mutations and neve
   const corruptManifest = await executeRelaybaseAgentTool(
     "setup_and_start_project",
     { phase: "register_manifest", cwd: corruptManifestProject },
-    { ...fakeToolContext(), approved: true }
+    fakeToolContext({
+      tuiContext: {
+        currentCwd: corruptManifestProject,
+        authorizedProjectRoots: [corruptManifestProject],
+        daemonHasZeroApps: true,
+        diagnostics: []
+      }
+    })
   );
   assert.equal(corruptManifest.status, "diagnostic");
   assert.equal(corruptManifest.diagnostic?.code, "SETUP_AND_START_MANIFEST_INVALID");
@@ -267,7 +279,12 @@ test("AGENT-FOLDER-START-005 setup/start tool edge cases gate mutations and neve
     healthUrl: "/"
   });
   const unregisteredContext = fakeToolContext({
-    tuiContext: { currentCwd: unregisteredProject, daemonHasZeroApps: true, diagnostics: [] }
+    tuiContext: {
+      currentCwd: unregisteredProject,
+      authorizedProjectRoots: [unregisteredProject],
+      daemonHasZeroApps: true,
+      diagnostics: []
+    }
   });
   const startBeforeRegister = await executeRelaybaseAgentTool(
     "setup_and_start_project",
@@ -285,12 +302,12 @@ test("AGENT-FOLDER-START-005 setup/start tool edge cases gate mutations and neve
   );
   assert.equal(registerPreview.status, "approval_required");
   assert.equal(unregisteredContext.calls.register, 0);
+  const registerArguments = registerPreview.approval?.arguments as Record<string, unknown>;
 
-  const registered = await executeRelaybaseAgentTool(
-    "setup_and_start_project",
-    { phase: "register_manifest", cwd: unregisteredProject, manifestPath: unregisteredManifest },
-    { ...unregisteredContext, approved: true }
-  );
+  const registered = await executeRelaybaseAgentTool("setup_and_start_project", registerArguments, {
+    ...unregisteredContext,
+    approved: true
+  });
   assert.equal(registered.status, "succeeded");
   assert.equal(unregisteredContext.calls.register, 1);
 
@@ -319,7 +336,12 @@ test("AGENT-FOLDER-START-005 setup/start tool edge cases gate mutations and neve
         message: "ready token=folder-start-secret OPENROUTER_API_KEY=sk-or-folder-start-secret"
       }
     ],
-    tuiContext: { currentCwd: spacesProject, daemonHasZeroApps: false, diagnostics: [] }
+    tuiContext: {
+      currentCwd: spacesProject,
+      authorizedProjectRoots: [spacesProject],
+      daemonHasZeroApps: false,
+      diagnostics: []
+    }
   });
   const startPreview = await executeRelaybaseAgentTool(
     "setup_and_start_project",
@@ -357,7 +379,7 @@ test("AGENT-FOLDER-START-005 setup/start tool edge cases gate mutations and neve
   await fs.rm(staleProject, { recursive: true, force: true });
   const staleResult = await executeRelaybaseAgentTool(
     "setup_and_start_project",
-    { phase: "start_registered", cwd: staleProject, appId: "stale-edge" },
+    { phase: "start_registered", appId: "stale-edge" },
     { ...staleContext, approved: true }
   );
   assert.equal(staleResult.status, "failed");
@@ -666,6 +688,11 @@ function fakeToolContext(
       daemonHasZeroApps: apps.length === 0,
       diagnostics: options.diagnostics ?? []
     },
+    projectRootGrants: options.tuiContext?.authorizedProjectRoots?.map((root, index) => ({
+      grantId: `edge_fixture_${index}`,
+      canonicalRoot: path.resolve(root),
+      source: "user_selected_folder" as const
+    })),
     emit: options.emit,
     calls
   };

@@ -1,6 +1,6 @@
 # RA012D OpenRouter Live Smoke
 
-Status: FAIL
+Status: PASS
 
 ## Scope
 
@@ -8,11 +8,21 @@ This smoke uses the actual Relaybase Agent Gateway, daemon Operator Agent runtim
 
 ## Result
 
-- Failure: [object Object]
+- Model: google/gemini-3.1-flash-lite
+- Reasoning: enabled (medium)
+- Fork required: no
 
 ## Checks
 
-- Live smoke did not reach acceptance. See artifacts for redacted diagnostics.
+- gatewayRuntime: passed - created token-gated Agent Gateway session and runs through daemon HTTP API
+- liveModel: passed - real model response received from google/gemini-3.1-flash-lite
+- reasoning: passed - reasoning provider data enabled with medium effort
+- readOnlyTool: passed - list_apps emitted tool.call_requested, tool.started, and tool.completed
+- streaming: passed - session SSE captured 58 events
+- setupPlanning: passed - detect_project, plan_app_setup, and preview_setup_writes ran without file changes
+- approvalGate: passed - start_app required approval, was rejected, and did not start the app
+- sessionAudit: passed - session and audit artifacts were written under disposable state
+- secretScan: passed - artifact secret scan completed without leaks
 
 ## Artifacts
 
@@ -28,9 +38,9 @@ This smoke uses the actual Relaybase Agent Gateway, daemon Operator Agent runtim
 
 ## Daemon Log Summary
 
-- started daemon http://127.0.0.1:58256
-- stateDir C:\Users\wamin\AppData\Local\Temp\relaybase-agent-live-smoke-eLk78A\state
-- sampleProject C:\Users\wamin\AppData\Local\Temp\relaybase-agent-live-smoke-eLk78A\sample-app
+- started daemon http://127.0.0.1:58049
+- stateDir C:\Users\wamin\AppData\Local\Temp\relaybase-agent-live-smoke-p7Ep4w\state
+- sampleProject C:\Users\wamin\AppData\Local\Temp\relaybase-agent-live-smoke-p7Ep4w\sample-app
 - registered sample app through daemon registry
 - configured Agent Gateway for model google/gemini-3.1-flash-lite
-- created agent session 823f4540-feaa-4249-9396-e9005df0873b
+- created agent session 606ad714-ebaa-4135-b372-c195ed6b0681

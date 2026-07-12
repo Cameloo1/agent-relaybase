@@ -53,29 +53,30 @@ type Pane struct {
 }
 
 type PaneSnapshot struct {
-	ID           string
-	AppID        string
-	GroupID      string
-	Role         string
-	PaneLabel    string
-	DisplayName  string
-	Title        string
-	Status       string
-	RouteLabel   string
-	PID          int
-	Port         int
-	LastError    string
-	Pinned       bool
-	Follow       bool
-	Focused      bool
-	Selected     bool
-	Color        string
-	Page         int
-	LogLines     []string
-	HasMore      bool
-	NextBefore   string
-	LogError     string
-	ScrollOffset int
+	ID            string
+	AppID         string
+	GroupID       string
+	Role          string
+	PaneLabel     string
+	DisplayName   string
+	Title         string
+	Status        string
+	RouteLabel    string
+	PID           int
+	Port          int
+	LastError     string
+	Pinned        bool
+	Follow        bool
+	Focused       bool
+	Selected      bool
+	Color         string
+	Page          int
+	LogLines      []string
+	LogLineModels []PaneLogLine
+	HasMore       bool
+	NextBefore    string
+	LogError      string
+	ScrollOffset  int
 }
 
 type LogTarget struct {
@@ -101,6 +102,7 @@ type Manager struct {
 	order         []string
 	selectedIndex int
 	page          int
+	pageSize      int
 	focusedID     string
 	layout        Layout
 	diagnostics   []Diagnostic
@@ -112,12 +114,17 @@ type Manager struct {
 }
 
 func NewManager() Manager {
+	initialLayout := CalculateLayout(80, 18, 1)
 	return Manager{
 		panes:         map[string]*Pane{},
 		order:         []string{},
 		selectedIndex: 0,
 		page:          0,
-		layout:        CalculateLayout(80, 18, 1),
+		layout:        initialLayout,
+		// Bubble Tea supplies the real terminal size before interactive use. Keep
+		// the historical eight-pane page convention until that first Resize so a
+		// persisted page is not reinterpreted through provisional geometry.
+		pageSize:      MaxPanesPerPage,
 		maxScrollback: DefaultMaxScrollback,
 		pinnedPrefs:   map[string]bool{},
 		hiddenPrefs:   map[string]bool{},
@@ -198,7 +205,7 @@ func (m *Manager) ApplyState(state *relaybaseclient.RelaybaseState) []Diagnostic
 			Color:        preserved.Color,
 			SortKey:      fmt.Sprintf("%s/%04d/%s/%s", groupDisplayName, normalized.PaneOrder, normalized.PaneLabel, normalized.AppID),
 		}
-		applyVisibility(existing, exists)
+		applyVisibility(existing)
 	}
 
 	for id, pane := range m.panes {
@@ -228,11 +235,11 @@ func (m *Manager) ApplyPreferences(pinned []string, hidden []string, order []str
 		pane.Pinned = m.pinnedPrefs[id]
 		pane.UserHidden = m.hiddenPrefs[id]
 		pane.Color = m.colorPrefs[id]
-		applyVisibility(pane, true)
+		applyVisibility(pane)
 	}
 	m.sortOrder()
 	m.page = maxInt(0, lastPage)
-	m.selectedIndex = m.page * MaxPanesPerPage
+	m.selectedIndex = m.page * m.pageCapacity()
 	if len(m.visibleIDs()) > 0 {
 		m.clampSelection()
 	}
@@ -240,7 +247,27 @@ func (m *Manager) ApplyPreferences(pinned []string, hidden []string, order []str
 }
 
 func (m *Manager) Resize(width int, height int) {
-	m.layout = CalculateLayout(width, height, len(m.CurrentPagePanes()))
+	oldHeights := map[string]int{}
+	for id, pane := range m.panes {
+		if pane != nil && !pane.Follow {
+			oldHeights[id] = m.logDisplayHeight(*pane, id == m.focusedID)
+		}
+	}
+	m.pageSize = CalculatePageCapacity(width, height)
+	if len(m.visibleIDs()) > 0 {
+		m.page = m.selectedIndex / m.pageCapacity()
+		m.clampSelection()
+	}
+	m.layout = CalculateLayout(width, height, len(m.currentPageIDs()))
+	for id, oldHeight := range oldHeights {
+		pane := m.panes[id]
+		if pane == nil || pane.Follow {
+			continue
+		}
+		newHeight := m.logDisplayHeight(*pane, id == m.focusedID)
+		pane.ScrollOffset += oldHeight - newHeight
+		m.clampPaneScrollOffset(id, pane)
+	}
 }
 
 func (m Manager) Layout() Layout {
@@ -280,8 +307,9 @@ func (m Manager) PageCount() int {
 	if count == 0 {
 		return 1
 	}
-	pages := count / MaxPanesPerPage
-	if count%MaxPanesPerPage != 0 {
+	pageSize := m.pageCapacity()
+	pages := count / pageSize
+	if count%pageSize != 0 {
 		pages++
 	}
 	if pages < 1 {
@@ -309,6 +337,15 @@ func (m Manager) SelectedPane() *PaneSnapshot {
 		return nil
 	}
 	snapshot := m.snapshotForPane(*pane, true, id == m.focusedID)
+	return &snapshot
+}
+
+func (m Manager) PaneSnapshot(id string) *PaneSnapshot {
+	pane := m.panes[id]
+	if pane == nil {
+		return nil
+	}
+	snapshot := m.snapshotForPane(*pane, id == m.SelectedPaneID(), id == m.focusedID)
 	return &snapshot
 }
 
@@ -368,7 +405,8 @@ func (m *Manager) MoveSelection(dx int, dy int) {
 		return
 	}
 
-	local := m.selectedIndex - m.page*MaxPanesPerPage
+	pageSize := m.pageCapacity()
+	local := m.selectedIndex - m.page*pageSize
 	if local < 0 || local >= len(ids) {
 		local = 0
 	}
@@ -382,7 +420,7 @@ func (m *Manager) MoveSelection(dx int, dy int) {
 	if next >= len(ids) {
 		next = len(ids) - 1
 	}
-	m.selectedIndex = m.page*MaxPanesPerPage + next
+	m.selectedIndex = m.page*pageSize + next
 	m.clampSelection()
 }
 
@@ -391,7 +429,7 @@ func (m *Manager) NextPage() {
 		return
 	}
 	m.page = clamp(m.page+1, 0, m.PageCount()-1)
-	m.selectedIndex = m.page * MaxPanesPerPage
+	m.selectedIndex = m.page * m.pageCapacity()
 	m.clampSelection()
 	m.refreshLayout()
 }
@@ -401,14 +439,14 @@ func (m *Manager) PreviousPage() {
 		return
 	}
 	m.page = clamp(m.page-1, 0, m.PageCount()-1)
-	m.selectedIndex = m.page * MaxPanesPerPage
+	m.selectedIndex = m.page * m.pageCapacity()
 	m.clampSelection()
 	m.refreshLayout()
 }
 
 func (m *Manager) SetPage(page int) {
 	m.page = clamp(page, 0, m.PageCount()-1)
-	m.selectedIndex = m.page * MaxPanesPerPage
+	m.selectedIndex = m.page * m.pageCapacity()
 	m.clampSelection()
 	m.refreshLayout()
 }
@@ -422,7 +460,7 @@ func (m *Manager) SelectPane(id string) bool {
 			continue
 		}
 		m.selectedIndex = index
-		m.page = index / MaxPanesPerPage
+		m.page = index / m.pageCapacity()
 		m.clampSelection()
 		m.refreshLayout()
 		return true
@@ -450,7 +488,11 @@ func (m *Manager) TogglePinSelected() {
 	if pane.Pinned {
 		pane.UserHidden = false
 		pane.Hidden = false
+	} else {
+		applyVisibility(pane)
 	}
+	m.clampSelection()
+	m.refreshLayout()
 }
 
 func (m *Manager) SetPanePinned(id string, pinned bool) bool {
@@ -464,9 +506,10 @@ func (m *Manager) SetPanePinned(id string, pinned bool) bool {
 		pane.Hidden = false
 	}
 	if !pinned {
-		applyVisibility(pane, true)
+		applyVisibility(pane)
 	}
 	m.clampSelection()
+	m.refreshLayout()
 	return true
 }
 
@@ -482,6 +525,7 @@ func (m *Manager) CloseSelected() {
 		m.focusedID = ""
 	}
 	m.clampSelection()
+	m.refreshLayout()
 }
 
 func (m Manager) CanReopen() bool {
@@ -501,7 +545,7 @@ func (m *Manager) ReopenSelectedOrFirstAvailable() bool {
 	for index, id := range m.visibleIDs() {
 		if id == pane.ID {
 			m.selectedIndex = index
-			m.page = index / MaxPanesPerPage
+			m.page = index / m.pageCapacity()
 			break
 		}
 	}
@@ -532,16 +576,46 @@ func (m *Manager) ToggleFollowSelected() {
 }
 
 func (m *Manager) ScrollSelected(delta int) {
-	pane := m.selectedPane()
+	m.ScrollPane(m.SelectedPaneID(), delta)
+}
+
+func (m *Manager) ScrollPane(id string, delta int) bool {
+	pane := m.panes[id]
 	if pane == nil {
-		return
+		return false
 	}
-	pane.ScrollOffset = clamp(pane.ScrollOffset+delta, 0, len(pane.Logs))
+	pane.ScrollOffset += delta
+	m.clampPaneScrollOffset(id, pane)
 	if pane.ScrollOffset > 0 {
 		pane.Follow = false
 	} else {
 		pane.Follow = true
 	}
+	return true
+}
+
+func (m Manager) Last20LogDisplayLines(id string) []string {
+	pane := m.panes[id]
+	if pane == nil || len(pane.Logs) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, minInt(CopyLogLineLimit, len(pane.Logs)))
+	for index := len(pane.Logs) - 1; index >= 0 && len(lines) < CopyLogLineLimit; index-- {
+		line, ok := ProjectLogEvent(pane.Logs[index])
+		if !ok {
+			continue
+		}
+		lines = append(lines, line.Text)
+	}
+	for left, right := 0, len(lines)-1; left < right; left, right = left+1, right-1 {
+		lines[left], lines[right] = lines[right], lines[left]
+	}
+	return lines
+}
+
+func (m Manager) Last20LogPayload(id string) (string, int) {
+	lines := m.Last20LogDisplayLines(id)
+	return strings.Join(lines, "\n"), len(lines)
 }
 
 func (m *Manager) SetPaneColor(id string, color string) bool {
@@ -594,8 +668,12 @@ func (m *Manager) RefreshLogTargets() []LogTarget {
 }
 
 func (m *Manager) OlderLogTarget() *LogTarget {
-	pane := m.selectedPane()
-	if pane == nil || pane.NextBefore == "" {
+	return m.OlderLogTargetForPane(m.SelectedPaneID())
+}
+
+func (m *Manager) OlderLogTargetForPane(id string) *LogTarget {
+	pane := m.panes[id]
+	if pane == nil || !pane.HasMore || pane.NextBefore == "" {
 		return nil
 	}
 	return &LogTarget{
@@ -605,6 +683,20 @@ func (m *Manager) OlderLogTarget() *LogTarget {
 		Mode:   modePrependOlder,
 		Limit:  DefaultLogFetchLimit,
 	}
+}
+
+// IsPaneAtOldestLogBoundary reports whether the current pane viewport has
+// reached its oldest retained display line. It intentionally uses projected
+// lines, so empty/raw log events cannot create a false scroll boundary.
+func (m Manager) IsPaneAtOldestLogBoundary(id string) bool {
+	pane := m.panes[id]
+	if pane == nil {
+		return false
+	}
+	lineCount := len(pane.projectedLogLines())
+	height := m.logDisplayHeight(*pane, id == m.focusedID)
+	maximumOffset := maxInt(0, lineCount-height)
+	return pane.ScrollOffset >= maximumOffset
 }
 
 func (m Manager) TargetsForLogEvent(event relaybaseclient.LogEvent) []LogTarget {
@@ -637,22 +729,24 @@ func (m *Manager) MergeSnapshot(target LogTarget, snapshot *relaybaseclient.LogS
 		events = eventsFromStrings(pane.AppID, pane.GroupID, pane.Role, snapshot.Logs)
 	}
 
+	beforeLineCount := len(pane.projectedLogLines())
 	switch target.Mode {
 	case modePrependOlder:
 		pane.Logs = mergeLogs(events, pane.Logs)
-		if len(events) > 0 {
-			pane.ScrollOffset += len(events)
-		}
 	default:
 		pane.Logs = mergeLogs(pane.Logs, events)
+		if !pane.Follow {
+			pane.ScrollOffset += maxInt(0, len(pane.projectedLogLines())-beforeLineCount)
+		}
 	}
 	pane.HasMore = snapshot.Page.HasMore || snapshot.Page.HasOlder
-	pane.NextBefore = firstNonEmpty(snapshot.Page.NextBefore, sequenceBefore(snapshot.Page.OldestSequence))
+	pane.NextBefore = firstNonEmpty(string(snapshot.Page.NextBefore), sequenceBefore(snapshot.Page.OldestSequence))
 	pane.LogError = ""
 	pane.trimLogs(m.maxScrollback)
 	if pane.Follow && target.Mode != modePrependOlder {
 		pane.ScrollOffset = 0
 	}
+	m.clampPaneScrollOffset(target.PaneID, pane)
 }
 
 func (m *Manager) MarkLogFetchFailed(target LogTarget, message string) {
@@ -670,6 +764,7 @@ func (m *Manager) AppendLog(event relaybaseclient.LogEvent) {
 			continue
 		}
 		pane.appendLog(event, m.maxScrollback)
+		m.clampPaneScrollOffset(id, pane)
 	}
 }
 
@@ -695,11 +790,12 @@ func (m *Manager) visibleIDs() []string {
 
 func (m *Manager) currentPageIDs() []string {
 	ids := m.visibleIDs()
-	start := m.page * MaxPanesPerPage
+	pageSize := m.pageCapacity()
+	start := m.page * pageSize
 	if start >= len(ids) {
 		start = 0
 	}
-	end := minInt(start+MaxPanesPerPage, len(ids))
+	end := minInt(start+pageSize, len(ids))
 	return ids[start:end]
 }
 
@@ -717,34 +813,33 @@ func (m Manager) snapshotsForIDs(ids []string) []PaneSnapshot {
 }
 
 func (m Manager) snapshotForPane(pane Pane, selected bool, focused bool) PaneSnapshot {
-	height := maxInt(m.layout.PaneHeight-5, 3)
-	if focused {
-		height = maxInt(m.layout.Height-6, 8)
-	}
+	logProjection := pane.logProjection(m.logDisplayHeight(pane, focused))
+	logLineModels := logProjection.Lines
 	return PaneSnapshot{
-		ID:           pane.ID,
-		AppID:        pane.AppID,
-		GroupID:      pane.GroupID,
-		Role:         pane.Role,
-		PaneLabel:    pane.PaneLabel,
-		DisplayName:  pane.DisplayName,
-		Title:        pane.Title,
-		Status:       pane.Status,
-		RouteLabel:   pane.Route.Label(),
-		PID:          pane.PID,
-		Port:         pane.Port,
-		LastError:    pane.LastError,
-		Pinned:       pane.Pinned,
-		Follow:       pane.Follow,
-		Focused:      focused,
-		Selected:     selected,
-		Color:        pane.Color,
-		Page:         m.page,
-		LogLines:     pane.logLines(height),
-		HasMore:      pane.HasMore,
-		NextBefore:   pane.NextBefore,
-		LogError:     pane.LogError,
-		ScrollOffset: pane.ScrollOffset,
+		ID:            pane.ID,
+		AppID:         pane.AppID,
+		GroupID:       pane.GroupID,
+		Role:          pane.Role,
+		PaneLabel:     pane.PaneLabel,
+		DisplayName:   pane.DisplayName,
+		Title:         pane.Title,
+		Status:        pane.Status,
+		RouteLabel:    pane.Route.Label(),
+		PID:           pane.PID,
+		Port:          pane.Port,
+		LastError:     pane.LastError,
+		Pinned:        pane.Pinned,
+		Follow:        pane.Follow,
+		Focused:       focused,
+		Selected:      selected,
+		Color:         pane.Color,
+		Page:          m.page,
+		LogLines:      paneLogLineTexts(logLineModels),
+		LogLineModels: logLineModels,
+		HasMore:       pane.HasMore,
+		NextBefore:    pane.NextBefore,
+		LogError:      pane.LogError,
+		ScrollOffset:  logProjection.ManagerScrollOffset,
 	}
 }
 
@@ -776,7 +871,7 @@ func (m *Manager) restoreSelection(selectedID string) {
 		for index, id := range ids {
 			if id == selectedID {
 				m.selectedIndex = index
-				m.page = index / MaxPanesPerPage
+				m.page = index / m.pageCapacity()
 				return
 			}
 		}
@@ -794,14 +889,22 @@ func (m *Manager) clampSelection() {
 	}
 	m.page = clamp(m.page, 0, m.PageCount()-1)
 	m.selectedIndex = clamp(m.selectedIndex, 0, len(ids)-1)
-	if m.selectedIndex/MaxPanesPerPage != m.page {
-		m.selectedIndex = m.page * MaxPanesPerPage
+	pageSize := m.pageCapacity()
+	if m.selectedIndex/pageSize != m.page {
+		m.selectedIndex = m.page * pageSize
 		m.selectedIndex = clamp(m.selectedIndex, 0, len(ids)-1)
 	}
 }
 
 func (m *Manager) refreshLayout() {
 	m.layout = CalculateLayout(m.layout.Width, m.layout.Height, len(m.CurrentPagePanes()))
+}
+
+func (m Manager) pageCapacity() int {
+	if m.pageSize > 0 {
+		return clamp(m.pageSize, 1, MaxPanesPerPage)
+	}
+	return CalculatePageCapacity(m.layout.Width, m.layout.Height)
 }
 
 func (m *Manager) normalizeComponent(component relaybaseclient.AppComponent, groupNames map[string]string) (relaybaseclient.AppComponent, bool) {
@@ -870,7 +973,7 @@ func paneID(component relaybaseclient.AppComponent) string {
 	return component.GroupID + ":" + component.AppID + ":" + component.Role + ":" + component.PaneLabel
 }
 
-func applyVisibility(pane *Pane, existed bool) {
+func applyVisibility(pane *Pane) {
 	if pane.Pinned {
 		pane.Hidden = false
 		return
@@ -884,10 +987,11 @@ func applyVisibility(pane *Pane, existed bool) {
 		pane.Hidden = false
 	case "stopped":
 		pane.Hidden = true
-	case "failed":
-		if !existed {
-			pane.Hidden = false
-		}
+	case "failed", "degraded":
+		// A daemon-reported failure must become observable even when the pane was
+		// previously auto-hidden while stopped. Explicit user-hidden state is
+		// handled above and remains authoritative.
+		pane.Hidden = false
 	default:
 		if shouldAutoOpen(pane.Status) {
 			pane.Hidden = false
@@ -964,9 +1068,10 @@ func paneMatchesLog(pane Pane, event relaybaseclient.LogEvent) bool {
 }
 
 func (pane *Pane) appendLog(event relaybaseclient.LogEvent, maxScrollback int) {
+	beforeLineCount := len(pane.projectedLogLines())
 	pane.Logs = mergeLogs(pane.Logs, []relaybaseclient.LogEvent{event})
 	if !pane.Follow {
-		pane.ScrollOffset++
+		pane.ScrollOffset += maxInt(0, len(pane.projectedLogLines())-beforeLineCount)
 	} else {
 		pane.ScrollOffset = 0
 	}
@@ -982,24 +1087,54 @@ func (pane *Pane) trimLogs(maxScrollback int) {
 	}
 	removed := len(pane.Logs) - maxScrollback
 	pane.Logs = pane.Logs[removed:]
-	pane.ScrollOffset = maxInt(0, pane.ScrollOffset-removed)
 }
 
 func (pane Pane) logLines(limit int) []string {
-	if limit <= 0 {
-		return nil
+	return paneLogLineTexts(pane.logLineModels(limit))
+}
+
+func (pane Pane) logLineModels(limit int) []PaneLogLine {
+	return pane.logProjection(limit).Lines
+}
+
+func (pane Pane) projectedLogLines() []PaneLogLine {
+	return projectLogEvents(pane.Logs)
+}
+
+func (pane Pane) logProjection(height int) LogViewportProjection {
+	return ProjectLogViewport(pane.projectedLogLines(), 1, maxInt(height, 1), pane.ScrollOffset)
+}
+
+func (m Manager) logDisplayHeight(pane Pane, focused bool) int {
+	containerHeight := maxInt(m.layout.PaneHeight, 6)
+	if focused {
+		containerHeight = maxInt(m.layout.Height, 8)
 	}
-	if len(pane.Logs) == 0 {
-		return nil
+	linesBeforeLogs := 2
+	if pane.Route.Label() != "" {
+		linesBeforeLogs++
 	}
-	end := len(pane.Logs) - pane.ScrollOffset
-	end = clamp(end, 0, len(pane.Logs))
-	start := maxInt(0, end-limit)
-	lines := []string{}
-	for _, event := range pane.Logs[start:end] {
-		lines = append(lines, event.DisplayLine())
+	if pane.PID > 0 || pane.Port > 0 {
+		linesBeforeLogs++
 	}
-	return lines
+	linesBeforeLogs++ // pane controls
+	if pane.LastError != "" {
+		linesBeforeLogs++
+	}
+	linesBeforeLogs++ // spacer before the log viewport
+	logHeight := maxInt(1, containerHeight-linesBeforeLogs-2)
+	if pane.LogError != "" {
+		logHeight = maxInt(1, logHeight-1)
+	}
+	return logHeight
+}
+
+func (m Manager) clampPaneScrollOffset(id string, pane *Pane) {
+	if pane == nil {
+		return
+	}
+	maximumOffset := maxInt(0, len(pane.projectedLogLines())-m.logDisplayHeight(*pane, id == m.focusedID))
+	pane.ScrollOffset = clamp(pane.ScrollOffset, 0, maximumOffset)
 }
 
 func mergeLogs(first []relaybaseclient.LogEvent, second []relaybaseclient.LogEvent) []relaybaseclient.LogEvent {
@@ -1051,36 +1186,60 @@ func CalculateLayout(width int, height int, paneCount int) Layout {
 		height = 18
 	}
 	count := clamp(paneCount, 1, MaxPanesPerPage)
-	narrow := width < 64 || height < 14
-
-	columns := 1
-	rows := 1
-	if narrow {
-		rows = count
-	} else {
-		switch {
-		case count <= 1:
-			columns, rows = 1, 1
-		case count <= 2:
-			columns, rows = 2, 1
-		case count <= 4:
-			columns, rows = 2, 2
-		case count <= 6:
-			columns, rows = 3, 2
-		default:
-			columns, rows = 4, 2
-		}
+	preferredColumns := 1
+	switch {
+	case count <= 1:
+		preferredColumns = 1
+	case count <= 4:
+		preferredColumns = 2
+	case count <= 6:
+		preferredColumns = 3
+	default:
+		preferredColumns = 4
 	}
+
+	const minimumPaneWidth = 28
+	widthColumns := clamp(width/minimumPaneWidth, 1, 4)
+	columns := minInt(preferredColumns, widthColumns)
+	if height < 12 {
+		columns = 1
+	}
+	rows := (count + columns - 1) / columns
+	narrow := columns == 1 && count > 1
 
 	return Layout{
 		Width:      width,
 		Height:     height,
 		Columns:    columns,
 		Rows:       rows,
-		PaneWidth:  maxInt(20, width/columns),
+		PaneWidth:  maxInt(12, width/columns),
 		PaneHeight: maxInt(6, height/rows),
 		Narrow:     narrow,
 	}
+}
+
+// CalculatePageCapacity returns the largest dashboard page that preserves a
+// complete full-metadata pane and at least one independently scrollable log
+// row in every visible pane. Narrow terminals deliberately show one pane per
+// page so controls, status, and logs remain usable instead of being clipped.
+func CalculatePageCapacity(width int, height int) int {
+	if width <= 0 {
+		width = 80
+	}
+	if height <= 0 {
+		height = 18
+	}
+	if width < 80 {
+		return 1
+	}
+
+	const minimumScrollablePaneHeight = 9
+	for count := MaxPanesPerPage; count >= 1; count-- {
+		if CalculateLayout(width, height, count).PaneHeight >= minimumScrollablePaneHeight {
+			return count
+		}
+	}
+	return 1
 }
 
 func firstNonEmpty(values ...string) string {

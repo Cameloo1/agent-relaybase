@@ -73,14 +73,20 @@ test("OpenRouter provider reports missing key as BLOCKED without leaking configu
 });
 
 test("OpenRouter provider validates model slug before network use", () => {
-  assert.throws(
-    () => resolveOpenRouterProviderOptions({ apiKey: "sk-or-test-secret" }),
-    (error) => error instanceof OpenRouterProviderError && error.code === "BLOCKED_OPENROUTER_MODEL_MISSING"
-  );
-  assert.throws(
-    () => resolveOpenRouterProviderOptions({ apiKey: "sk-or-test-secret", modelSlug: "bad slug" }),
-    (error) => error instanceof OpenRouterProviderError && error.code === "BLOCKED_OPENROUTER_MODEL_INVALID"
-  );
+  const previousModel = process.env.RELAYBASE_AGENT_MODEL;
+  delete process.env.RELAYBASE_AGENT_MODEL;
+  try {
+    assert.throws(
+      () => resolveOpenRouterProviderOptions({ apiKey: "sk-or-test-secret" }),
+      (error) => error instanceof OpenRouterProviderError && error.code === "BLOCKED_OPENROUTER_MODEL_MISSING"
+    );
+    assert.throws(
+      () => resolveOpenRouterProviderOptions({ apiKey: "sk-or-test-secret", modelSlug: "bad slug" }),
+      (error) => error instanceof OpenRouterProviderError && error.code === "BLOCKED_OPENROUTER_MODEL_INVALID"
+    );
+  } finally {
+    restoreEnv("RELAYBASE_AGENT_MODEL", previousModel);
+  }
 });
 
 test("agent smoke-openrouter command exits BLOCKED when key is missing", async () => {

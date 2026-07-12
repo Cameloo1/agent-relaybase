@@ -1,7 +1,8 @@
 import http from "node:http";
 import net from "node:net";
-import { handleApiRequest } from "./api.ts";
+import { enqueueLifecycleOperation, handleApiRequest } from "./api.ts";
 import { AgentGatewayService } from "./agent/gateway.ts";
+import { AppPackageService } from "./appPackageService.ts";
 import {
   appStateEventData,
   DaemonEventBus,
@@ -43,6 +44,7 @@ export interface RelaybaseRuntime {
   logStore: LogStore;
   exports: LogExportService;
   agentGateway: AgentGatewayService;
+  packages: AppPackageService;
   operations: OperationStore;
   events: DaemonEventBus;
   mcp: RelaybaseMcpService;
@@ -74,7 +76,8 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
     logStore,
     exports: undefined as unknown as LogExportService,
     agentGateway: new AgentGatewayService({ stateDir }),
-    operations: new OperationStore(),
+    packages: undefined as unknown as AppPackageService,
+    operations: new OperationStore({ stateDir }),
     events: new DaemonEventBus(),
     processes: new ProcessManager(registry, {
       hubHost: host,
@@ -85,6 +88,12 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
       stopPortOpenProbe: options.stopPortOpenProbe
     })
   } as RelaybaseRuntime;
+  runtime.packages = new AppPackageService({
+    stateDir,
+    registry,
+    listAppStatuses: () => runtime.processes.listStatuses(),
+    enqueueLifecycle: ({ appId, correlationId }) => enqueueLifecycleOperation(runtime, appId, "start", correlationId)
+  });
   runtime.exports = new LogExportService(runtime);
   runtime.mcp = new RelaybaseMcpService(runtime);
   wireDaemonEvents(runtime);
@@ -301,7 +310,7 @@ async function handleHub(
   const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
 
   if (pathname === "/__hub" || pathname === "/__hub/") {
-    sendHtml(response, 200, dashboardHtml({ token: runtime.token, apps: await runtime.processes.listStatuses() }));
+    sendHtml(response, 200, dashboardHtml({ apps: await runtime.processes.listStatuses() }));
     return;
   }
 
@@ -395,6 +404,9 @@ async function close(
   httpServer: http.Server,
   sockets: Set<net.Socket>
 ): Promise<void> {
+  runtime.packages.requestAbortAll();
+  await runtime.operations.shutdown();
+  await runtime.packages.shutdown();
   await runtime.mcp.close();
   await runtime.logStore.close();
 

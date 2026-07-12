@@ -41,6 +41,45 @@ interface RuntimeEntry {
   stopVerification?: StopVerification;
 }
 
+function throwIfLifecycleAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw lifecycleAbortError(signal);
+  }
+}
+
+function lifecycleAbortError(signal: AbortSignal): Error {
+  const reason = typeof signal.reason === "string" && signal.reason.trim() ? signal.reason : "daemon_shutdown";
+  const error = new Error(`Lifecycle operation was cancelled: ${reason}.`);
+  error.name = "AbortError";
+  return error;
+}
+
+function waitForHealthyOrAbort(work: () => Promise<boolean>, signal?: AbortSignal): Promise<boolean> {
+  if (!signal) {
+    return work();
+  }
+  if (signal.aborted) {
+    return Promise.resolve(false);
+  }
+  return new Promise<boolean>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => resolve(false));
+    signal.addEventListener("abort", onAbort, { once: true });
+    void work().then(
+      (healthy) => finish(() => resolve(healthy)),
+      (error) => finish(() => reject(error))
+    );
+  });
+}
+
 interface SpawnSpec {
   command: string;
   args: string[];
@@ -65,6 +104,10 @@ export interface ProcessManagerOptions {
   portRangeEnd?: number;
   stopPortOpenProbe?: (port: number, host: string) => Promise<boolean>;
   logStore?: LogStore;
+}
+
+export interface LifecycleRunOptions {
+  signal?: AbortSignal;
 }
 
 export class ProcessManager {
@@ -95,7 +138,7 @@ export class ProcessManager {
     this.mcp = new ChildMcpSupervisor();
   }
 
-  async start(id: string): Promise<RuntimeView> {
+  async start(id: string, options: LifecycleRunOptions = {}): Promise<RuntimeView> {
     const active = this.#mutations.get(id);
     if (active) {
       if (active.action === "start") {
@@ -107,14 +150,15 @@ export class ProcessManager {
       return this.#view(entry, id);
     }
 
-    const promise = this.#startLocked(id).finally(() => {
+    const promise = this.#startLocked(id, options.signal).finally(() => {
       this.#mutations.delete(id);
     });
     this.#mutations.set(id, { action: "start", promise });
     return promise;
   }
 
-  async #startLocked(id: string): Promise<RuntimeView> {
+  async #startLocked(id: string, signal?: AbortSignal): Promise<RuntimeView> {
+    throwIfLifecycleAborted(signal);
     const app = await this.registry.get(id);
     if (!app) {
       throw new Error(`Unknown app: ${id}`);
@@ -156,9 +200,20 @@ export class ProcessManager {
         "preStart",
         app.preStartCommand,
         app.preStartTimeoutMs ?? 120_000,
-        env
+        env,
+        signal
       );
       attempt.hooks.push(preStart);
+      if (signal?.aborted) {
+        entry.status = "errored";
+        entry.health = "unhealthy";
+        entry.phase = "errored";
+        entry.lastError = "Lifecycle start was cancelled during daemon shutdown.";
+        this.#finishAttempt(attempt, "failed", entry.phase, entry.lastError);
+        this.#releasePortReservation(app.id, assignedPort);
+        entry.assignedPort = undefined;
+        throw lifecycleAbortError(signal);
+      }
       if (preStart.status !== "succeeded") {
         const message = preStart.error ?? `preStartCommand failed with exit code ${preStart.exitCode ?? "unknown"}.`;
         entry.status = "errored";
@@ -191,6 +246,9 @@ export class ProcessManager {
       env
     );
     await this.mcp.startApp(app);
+    if (signal?.aborted) {
+      return this.#cancelStartedApp(app, entry, child, attempt, signal);
+    }
 
     child.stdout.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stdout", "start", app, env));
     child.stderr.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stderr", "start", app, env));
@@ -224,13 +282,13 @@ export class ProcessManager {
     });
 
     entry.phase = "waiting_for_health";
-    const healthy = await waitForHealthy(
-      app,
-      assignedPort,
-      this.hubHost,
-      app.healthTimeoutMs ?? app.startTimeoutMs ?? 8000
+    const healthy = await waitForHealthyOrAbort(
+      () => waitForHealthy(app, assignedPort, this.hubHost, app.healthTimeoutMs ?? app.startTimeoutMs ?? 8000),
+      signal
     );
-    if (child.exitCode !== null) {
+    if (signal?.aborted) {
+      return this.#cancelStartedApp(app, entry, child, attempt, signal);
+    } else if (child.exitCode !== null) {
       entry.status = "errored";
       entry.health = "unhealthy";
       entry.phase = "errored";
@@ -255,7 +313,7 @@ export class ProcessManager {
     return this.#view(entry, id);
   }
 
-  async stop(id: string): Promise<RuntimeView> {
+  async stop(id: string, options: LifecycleRunOptions = {}): Promise<RuntimeView> {
     const active = this.#mutations.get(id);
     if (active) {
       if (active.action === "stop") {
@@ -267,14 +325,14 @@ export class ProcessManager {
       return this.#view(entry, id);
     }
 
-    const promise = this.#stopLocked(id).finally(() => {
+    const promise = this.#stopLocked(id, options.signal).finally(() => {
       this.#mutations.delete(id);
     });
     this.#mutations.set(id, { action: "stop", promise });
     return promise;
   }
 
-  async #stopLocked(id: string): Promise<RuntimeView> {
+  async #stopLocked(id: string, signal?: AbortSignal): Promise<RuntimeView> {
     const app = await this.registry.get(id);
     const entry = this.#runtime.get(id);
     if (!app) {
@@ -294,7 +352,7 @@ export class ProcessManager {
       stopped.cleanupStatus = app.stopCommand ? "pending" : "not_needed";
       this.#runtime.set(id, stopped);
       stopped.mcpDrain = await this.mcp.stopApp(id);
-      return this.#finalizeStop(app, stopped, attempt, assignedPort);
+      return this.#finalizeStop(app, stopped, attempt, assignedPort, signal);
     }
 
     const assignedPort = entry.assignedPort;
@@ -307,10 +365,10 @@ export class ProcessManager {
 
     await this.#terminateChild(entry.child);
     entry.stoppedAt = new Date().toISOString();
-    return this.#finalizeStop(app, entry, attempt, assignedPort);
+    return this.#finalizeStop(app, entry, attempt, assignedPort, signal);
   }
 
-  async restart(id: string): Promise<RuntimeView> {
+  async restart(id: string, options: LifecycleRunOptions = {}): Promise<RuntimeView> {
     const active = this.#mutations.get(id);
     if (active) {
       if (active.action === "restart") {
@@ -323,8 +381,9 @@ export class ProcessManager {
     }
 
     const promise = (async () => {
-      await this.#stopLocked(id);
-      return this.#startLocked(id);
+      await this.#stopLocked(id, options.signal);
+      throwIfLifecycleAborted(options.signal);
+      return this.#startLocked(id, options.signal);
     })().finally(() => {
       this.#mutations.delete(id);
     });
@@ -479,7 +538,8 @@ export class ProcessManager {
     app: AppRecord,
     entry: RuntimeEntry,
     attempt: LifecycleAttempt,
-    assignedPort?: number
+    assignedPort?: number,
+    signal?: AbortSignal
   ): Promise<RuntimeView> {
     const env = this.#appEnv(app, assignedPort ?? app.upstreamPort ?? 0);
     let stopHook: LifecycleHookAttempt | undefined;
@@ -487,7 +547,7 @@ export class ProcessManager {
     let failureReason: string | undefined;
 
     if (app.stopCommand) {
-      stopHook = await this.#runHook(app, entry, "stop", app.stopCommand, app.stopTimeoutMs ?? 60_000, env);
+      stopHook = await this.#runHook(app, entry, "stop", app.stopCommand, app.stopTimeoutMs ?? 60_000, env, signal);
       attempt.hooks.push(stopHook);
       if (stopHook.status !== "succeeded") {
         entry.cleanupStatus = stopHook.timedOut ? "timeout" : "failed";
@@ -506,7 +566,8 @@ export class ProcessManager {
         "verifyStopped",
         app.verifyStoppedCommand,
         app.stopTimeoutMs ?? 60_000,
-        env
+        env,
+        signal
       );
       attempt.hooks.push(verifyHook);
       if (verifyHook.status !== "succeeded") {
@@ -518,10 +579,12 @@ export class ProcessManager {
 
     const checkedAt = new Date().toISOString();
     const shouldCheckPort = Boolean(assignedPort && this.#ownsBackendPort(app, entry));
-    let portStillOpen = shouldCheckPort && assignedPort ? !(await this.#waitForPortClosed(assignedPort, 3000)) : false;
+    const portCloseTimeoutMs = signal?.aborted ? 500 : 3000;
+    let portStillOpen =
+      shouldCheckPort && assignedPort ? !(await this.#waitForPortClosed(assignedPort, portCloseTimeoutMs)) : false;
     if (!failureReason && portStillOpen && assignedPort && process.platform === "win32" && !app.stopCommand) {
       this.#killPortOwner(assignedPort);
-      portStillOpen = !(await this.#waitForPortClosed(assignedPort, 3000));
+      portStillOpen = !(await this.#waitForPortClosed(assignedPort, portCloseTimeoutMs));
     }
     if (!failureReason && portStillOpen && assignedPort) {
       entry.cleanupStatus = "verification_failed";
@@ -571,7 +634,8 @@ export class ProcessManager {
   async #cleanupAfterFailedStart(
     app: AppRecord,
     entry: RuntimeEntry,
-    child: ChildProcessWithoutNullStreams
+    child: ChildProcessWithoutNullStreams,
+    options: { shutdown?: boolean } = {}
   ): Promise<void> {
     entry.mcpDrain = await this.mcp.stopApp(app.id);
     await this.#terminateChild(child);
@@ -592,7 +656,7 @@ export class ProcessManager {
       entry,
       "stop",
       app.stopCommand,
-      app.stopTimeoutMs ?? 60_000,
+      options.shutdown ? Math.min(app.stopTimeoutMs ?? 60_000, 1_500) : (app.stopTimeoutMs ?? 60_000),
       this.#appEnv(app, entry.assignedPort ?? 0)
     );
     entry.lastStartAttempt?.hooks.push(hook);
@@ -611,13 +675,30 @@ export class ProcessManager {
     }
   }
 
+  async #cancelStartedApp(
+    app: AppRecord,
+    entry: RuntimeEntry,
+    child: ChildProcessWithoutNullStreams,
+    attempt: LifecycleAttempt,
+    signal: AbortSignal
+  ): Promise<never> {
+    entry.status = "errored";
+    entry.health = "unhealthy";
+    entry.phase = "errored";
+    entry.lastError = "Lifecycle start was cancelled during daemon shutdown.";
+    this.#finishAttempt(attempt, "failed", entry.phase, entry.lastError);
+    await this.#cleanupAfterFailedStart(app, entry, child, { shutdown: true });
+    throw lifecycleAbortError(signal);
+  }
+
   async #runHook(
     app: AppRecord,
     entry: RuntimeEntry,
     name: LifecycleHookName,
     command: string,
     timeoutMs: number,
-    env: NodeJS.ProcessEnv
+    env: NodeJS.ProcessEnv,
+    signal?: AbortSignal
   ): Promise<LifecycleHookAttempt> {
     const hook: LifecycleHookAttempt = {
       name,
@@ -627,6 +708,12 @@ export class ProcessManager {
       stdout: [],
       stderr: []
     };
+    if (signal?.aborted) {
+      hook.status = "failed";
+      hook.endedAt = new Date().toISOString();
+      hook.error = `${name} hook was cancelled during daemon shutdown.`;
+      return hook;
+    }
     const spec = this.#spawnSpec(command);
 
     await new Promise<void>((resolve) => {
@@ -640,8 +727,16 @@ export class ProcessManager {
       const timer = setTimeout(() => {
         hook.timedOut = true;
         hook.error = `${name} hook timed out after ${timeoutMs}ms.`;
-        this.#terminateChild(child);
+        void this.#terminateChild(child);
       }, timeoutMs);
+      const abort = () => {
+        hook.error = `${name} hook was cancelled during daemon shutdown.`;
+        void this.#terminateChild(child);
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) {
+        abort();
+      }
 
       child.stdout.on("data", (chunk) => {
         const text = this.#redact(chunk.toString(), env);
@@ -656,19 +751,20 @@ export class ProcessManager {
       child.once("error", (error) => {
         hook.error = error.message;
       });
-      const finish = (code: number | null, signal: NodeJS.Signals | null) => {
+      const finish = (code: number | null, exitSignal: NodeJS.Signals | null) => {
         if (settled) {
           return;
         }
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
         hook.exitCode = code;
-        hook.signal = signal;
+        hook.signal = exitSignal;
         hook.endedAt = new Date().toISOString();
         hook.status = code === 0 && !hook.timedOut && !hook.error ? "succeeded" : "failed";
         hook.error ??=
           hook.status === "failed"
-            ? `${name} hook exited with code ${code ?? "null"} signal ${signal ?? "null"}.`
+            ? `${name} hook exited with code ${code ?? "null"} signal ${exitSignal ?? "null"}.`
             : undefined;
         resolve();
       };

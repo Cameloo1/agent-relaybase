@@ -54,7 +54,9 @@ export function diagnosticsForAgentConfig(config: AgentConfig): AgentDiagnostic[
       checkedAt: now,
       userAction: "Set RELAYBASE_AGENT_ENABLED=1 in .env or enable the agent in daemon config."
     });
-  } else if (!config.provider.remoteModelEnabled) {
+    return diagnostics;
+  }
+  if (!config.provider.remoteModelEnabled) {
     diagnostics.push({
       id: "agent.config.remote_model_disabled",
       severity: "error",
@@ -63,6 +65,7 @@ export function diagnosticsForAgentConfig(config: AgentConfig): AgentDiagnostic[
       checkedAt: now,
       userAction: "Set RELAYBASE_AGENT_REMOTE_MODEL_ENABLED=1 in .env before sending natural-language model requests."
     });
+    return diagnostics;
   }
   if (!config.provider.apiKeySource.configured) {
     diagnostics.push({

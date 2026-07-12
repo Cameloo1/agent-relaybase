@@ -9,6 +9,10 @@ const EXECUTION_CLAIM_PATTERN =
   /\b(?:(?:I|I've|I have|we|we've|we have|Relaybase|the daemon|the tool|tool)\s+(?:have\s+)?(?:started|stopped|restarted|patched|wrote|created|updated|exported|opened|proved|repaired)|(?:started|stopped|restarted|patched|wrote|created|updated|exported|opened|proved|repaired)\b[\s\S]{0,80}\b(?:successfully|complete|completed|done|finished|applied))\b/i;
 const PREVIEW_ONLY_WRITE_CLAIM_PATTERN =
   /\b(?:preview|dry[- ]?run|plan)\s+(?:has\s+|have\s+)?(?:wrote|written|created|updated|applied)\b|\b(?:wrote|written|created|updated|applied)\b[\s\S]{0,80}\b(?:during|in|from)\s+(?:the\s+)?(?:preview|dry[- ]?run|plan)\b/i;
+const PROSE_APPROVAL_REQUEST_PATTERN =
+  /\b(?:need|needs|require|requires|required)\s+(?:your\s+)?(?:approval|confirmation)|\bwould\s+you\s+like\s+me\s+to\s+proceed\b|\bplease\s+(?:confirm|approve)\b/i;
+const APPROVAL_GATED_TOPIC_PATTERN =
+  /\b(?:apply|setup|write|create|update|register|manifest|start|stop|restart|repair|export|open|prove|file|files|changes)\b/i;
 const UNSUPPORTED_PORT_STRATEGY_PATTERN = /\b(assume|invent|guess)\b[\s\S]*\b(port|framework|flag)\b/i;
 const SHELL_META_PATTERN = /[&|<>]|`|\$\(|;\s*\S/;
 
@@ -49,7 +53,12 @@ export function userMessageGuardrail(content: string): AgentDiagnostic | undefin
   );
 }
 
-export function outputGuardrail(output: string, toolResultCount: number): AgentDiagnostic | undefined {
+export function outputGuardrail(
+  output: string,
+  toolResultCount: number,
+  userMessage = "",
+  completedToolNames: string[] = []
+): AgentDiagnostic | undefined {
   if (toolResultCount === 0 && EXECUTION_CLAIM_PATTERN.test(output)) {
     return diagnostic(
       "AGENT_EXECUTION_CLAIM_WITHOUT_TOOL_RESULT",
@@ -64,6 +73,18 @@ export function outputGuardrail(output: string, toolResultCount: number): AgentD
       "Show the preview and ask for approval before saying files were written."
     );
   }
+  if (
+    toolResultCount > 0 &&
+    PROSE_APPROVAL_REQUEST_PATTERN.test(output) &&
+    APPROVAL_GATED_TOPIC_PATTERN.test(output) &&
+    !isReadOnlyPlanningResponse(userMessage, completedToolNames)
+  ) {
+    return diagnostic(
+      "AGENT_PROSE_APPROVAL_WITHOUT_TOOL_EVENT",
+      "The model asked for approval in prose instead of creating a daemon approval event.",
+      "Call the approval-gated Relaybase tool so the daemon can show a real approval preview."
+    );
+  }
   if (UNSUPPORTED_PORT_STRATEGY_PATTERN.test(output)) {
     return diagnostic(
       "AGENT_PORT_STRATEGY_INVENTED",
@@ -72,6 +93,25 @@ export function outputGuardrail(output: string, toolResultCount: number): AgentD
     );
   }
   return undefined;
+}
+
+function isReadOnlyPlanningResponse(userMessage: string, completedToolNames: string[]): boolean {
+  const normalized = userMessage.toLowerCase();
+  const explicitlyReadOnly =
+    /\b(?:inspect|propose|preview|dry[- ]?run|show\s+me\s+(?:the\s+)?(?:plan|preview))\b/.test(normalized) ||
+    /\b(?:do\s+not|don't|without)\s+(?:write|apply|start|register|change|modify|create)\b/.test(normalized);
+  if (!explicitlyReadOnly) {
+    return false;
+  }
+  if (
+    /\bcall\s+(?:setup_and_start_project|apply_setup_plan|register_manifest|start_app|stop_app|restart_app)\b/.test(
+      normalized
+    )
+  ) {
+    return false;
+  }
+  const approvalTools = new Set(approvalRequiredToolNames());
+  return completedToolNames.every((toolName) => !approvalTools.has(toolName));
 }
 
 export function stableArgumentsHash(input: Record<string, unknown>): string {

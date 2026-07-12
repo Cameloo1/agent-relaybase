@@ -1,5 +1,6 @@
 import http from "node:http";
 import { buildAppComponentState } from "./appComponents.ts";
+import { isHealthyHttpStatus } from "./health.ts";
 import type { RelaybaseRuntime } from "./server.ts";
 import { isPortOpen } from "./ports.ts";
 import type { RelaybaseState } from "./apiTypes.ts";
@@ -15,6 +16,10 @@ import type {
 } from "./types.ts";
 
 const DEFAULT_READINESS_TIMEOUT_MS = 8000;
+// State snapshots feed interactive clients. They must not inherit a full app
+// startup budget from a slow or wedged route; explicit lifecycle proof already
+// owns the longer readiness wait.
+const MAX_ROUTE_PROBE_TIMEOUT_MS = 2_000;
 
 export async function getRelaybaseState(runtime: RelaybaseRuntime): Promise<RelaybaseState> {
   const generatedAt = new Date().toISOString();
@@ -106,10 +111,9 @@ async function buildAppState(
   const runtimeView = status?.runtime ?? stoppedRuntime();
   const backendPort = runtimeView.assignedPort ?? status?.upstreamPort;
   const backendPortOpen = backendPort ? await isPortOpen(backendPort, runtime.host) : false;
+  const timeoutMs = status?.healthTimeoutMs ?? status?.startTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
   const routeHealth =
-    status && status.protocol !== "tcp"
-      ? await checkRouteHealth(runtime, status, DEFAULT_READINESS_TIMEOUT_MS)
-      : undefined;
+    status && status.protocol !== "tcp" ? await checkRouteHealth(runtime, status, timeoutMs) : undefined;
   const routeReachable = status?.protocol === "tcp" ? backendPortOpen : Boolean(routeHealth?.ok);
   const recentLogs = status ? (await runtime.processes.logs(id)).slice(-50) : [];
 
@@ -126,7 +130,7 @@ async function buildAppState(
     ...(routeHealth ? { routeHealth } : {}),
     recentLogs,
     readinessCheckedAt: checkedAt,
-    timeoutMs: DEFAULT_READINESS_TIMEOUT_MS
+    timeoutMs
   });
 
   const routeFailure = routeHealth ? routeFailureDetail(routeHealth) : undefined;
@@ -348,14 +352,14 @@ async function checkRoute(
         port: runtime.port,
         path: input.path,
         method: "GET",
-        timeout: Math.min(input.timeoutMs, 1000),
+        timeout: routeProbeTimeoutMs(input.timeoutMs),
         headers: input.headers
       },
       (response) => {
         response.resume();
         const statusCode = response.statusCode ?? 0;
         resolve({
-          ok: statusCode >= 200 && statusCode < 500,
+          ok: isHealthyHttpStatus(statusCode),
           url: input.url,
           statusCode
         });
@@ -369,6 +373,10 @@ async function checkRoute(
     request.once("error", (error) => resolve({ ok: false, url: input.url, error: error.message }));
     request.end();
   });
+}
+
+function routeProbeTimeoutMs(timeoutMs: number): number {
+  return Math.min(Math.max(250, Math.min(timeoutMs, MAX_ROUTE_PROBE_TIMEOUT_MS)), timeoutMs);
 }
 
 function routeFailureDetail(routeHealth: RouteHealth): string | undefined {

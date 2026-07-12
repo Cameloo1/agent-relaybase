@@ -439,8 +439,96 @@ test("CLI rejects unknown options and serves command scoped help", async () => {
 
   const startHelp = await runRelaybaseCli(["start", "--help"]);
   assert.equal(startHelp.code, 0);
-  assert.match(startHelp.stdout, /Usage:\s+relaybase start <app-id>/);
+  assert.match(startHelp.stdout, /relaybase start \[--port <number>\]/);
+  assert.match(startHelp.stdout, /relaybase start <app-id>/);
+  assert.doesNotMatch(startHelp.stdout, /npm link|relaybase\.ps1|prefix repair/i);
   assert.equal(startHelp.stderr, "");
+
+  const checkHelp = await runRelaybaseCli(["check", "--help"]);
+  assert.equal(checkHelp.code, 0);
+  assert.match(checkHelp.stdout, /Relaybase check/);
+  assert.match(checkHelp.stdout, /read-only/);
+
+  const verifyHelp = await runRelaybaseCli(["verify", "--help"]);
+  assert.equal(verifyHelp.code, 0);
+  assert.match(verifyHelp.stdout, /Relaybase verify/);
+  assert.match(verifyHelp.stdout, /--live/);
+  assert.match(verifyHelp.stdout, /--full/);
+
+  const prefixRepairHelp = await runRelaybaseCli(["repair-prefix", "--help"]);
+  assert.equal(prefixRepairHelp.code, 0);
+  assert.match(prefixRepairHelp.stdout, /relaybase repair-prefix \[--plan\|--diagnose\]/);
+  assert.match(prefixRepairHelp.stdout, /Ordinary start and check commands never perform this repair/);
+});
+
+test("CLI bundled start, check, and verify expose safe executable plans", async () => {
+  const startPlan = await runRelaybaseCli(["start", "--plan", "--port", "17782", "--", "--smoke-render"]);
+  assert.equal(startPlan.code, 0);
+  assert.match(startPlan.stdout, /relaybase start/);
+  assert.match(startPlan.stdout, /Launch TUI through Node bridge/);
+  assert.match(startPlan.stdout, /--smoke-render/);
+  assert.doesNotMatch(startPlan.stdout, /npm(?:\.cmd)? link|npm-cli\.js link|relaybase\.ps1|package-check/i);
+
+  const npmStartPlan = await runCommand(
+    process.execPath,
+    ["scripts/relaybase-start.mjs", "--plan", "--", "--smoke-render"],
+    { timeoutMs: 30_000 }
+  );
+  assert.equal(npmStartPlan.code, 0);
+  assert.match(npmStartPlan.stdout, /Launch TUI through Node bridge/);
+  assert.doesNotMatch(npmStartPlan.stdout, /npm(?:\.cmd)? link|npm-cli\.js link|relaybase\.ps1|package-check/i);
+  const npmStartSource = await fs.readFile(path.join(rootDir, "scripts", "relaybase-start.mjs"), "utf8");
+  assert.doesNotMatch(npmStartSource, /npm(?:\.cmd)? link|unlinkSync|relaybase\.ps1|RELAYBASE_SKIP_PREFIX_REPAIR/);
+
+  const checkPlan = await runRelaybaseCli(["check", "--plan"]);
+  assert.equal(checkPlan.code, 0);
+  assert.match(checkPlan.stdout, /relaybase check/);
+  assert.match(checkPlan.stdout, /TUI\/toolchain doctor/);
+  assert.match(checkPlan.stdout, /Project and daemon health/);
+  assert.doesNotMatch(
+    checkPlan.stdout,
+    /package-check|npm pack|npm(?:\.cmd)? link|relaybase\.ps1|agent:smoke:openrouter/i
+  );
+
+  const prefixRepairPlan = await runRelaybaseCli(["repair-prefix", "--plan"]);
+  assert.equal(prefixRepairPlan.code, 0);
+  assert.match(prefixRepairPlan.stdout, /relaybase repair-prefix/);
+  assert.match(prefixRepairPlan.stdout, /npm-cli\.js link|npm\.cmd link|npm link/);
+  assert.match(prefixRepairPlan.stdout, /relaybase\.ps1/);
+
+  const leftoverOpenRouterEnv = {
+    OPENROUTER_API_KEY: "sk-or-leftover-plan-secret",
+    RELAYBASE_AGENT_MODEL: "openrouter/leftover-model",
+    RELAYBASE_AGENT_ENABLED: "1",
+    RELAYBASE_AGENT_REMOTE_MODEL_ENABLED: "1"
+  };
+
+  const verifyPlan = await runRelaybaseCli(["verify", "--plan"], { env: leftoverOpenRouterEnv });
+  assert.equal(verifyPlan.code, 0);
+  assert.match(verifyPlan.stdout, /npm run format:check/);
+  assert.match(verifyPlan.stdout, /npm run test:jest/);
+  assert.doesNotMatch(verifyPlan.stdout, /agent:smoke:openrouter/);
+  assert.doesNotMatch(verifyPlan.stdout, /leftover/);
+
+  const allPlan = await runRelaybaseCli(["verify", "--plan", "--all"], { env: leftoverOpenRouterEnv });
+  assert.equal(allPlan.code, 0);
+  assert.match(allPlan.stdout, /npm run tui:smoke:8pane/);
+  assert.match(allPlan.stdout, /npm run release:check/);
+  assert.doesNotMatch(allPlan.stdout, /agent:smoke:openrouter/);
+  assert.doesNotMatch(allPlan.stdout, /leftover/);
+
+  const checkPlanWithLeftoverEnv = await runRelaybaseCli(["check", "--plan"], { env: leftoverOpenRouterEnv });
+  assert.equal(checkPlanWithLeftoverEnv.code, 0);
+  assert.doesNotMatch(checkPlanWithLeftoverEnv.stdout, /agent:smoke:openrouter|leftover/);
+
+  const fullLivePlan = await runRelaybaseCli(["verify", "--plan", "--full", "--live", "--release", "--race"], {
+    env: leftoverOpenRouterEnv
+  });
+  assert.equal(fullLivePlan.code, 0);
+  assert.match(fullLivePlan.stdout, /npm run tui:smoke:8pane/);
+  assert.match(fullLivePlan.stdout, /npm run release:check/);
+  assert.match(fullLivePlan.stdout, /npm run tui:race/);
+  assert.match(fullLivePlan.stdout, /npm run agent:smoke:openrouter/);
 });
 
 test("configure generates a Docker Compose profile, override, lifecycle hooks, and evidence contract", async () => {
@@ -1178,13 +1266,17 @@ async function runRelaybaseCliJson(args: string[]): Promise<Record<string, any>>
   return JSON.parse(result.stdout) as Record<string, any>;
 }
 
-function runRelaybaseCli(args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runRelaybaseCli(
+  args: string[],
+  options: { env?: NodeJS.ProcessEnv } = {}
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
       ["--experimental-strip-types", path.join(rootDir, "src", "cli.ts"), ...args],
       {
         cwd: rootDir,
+        env: { ...process.env, ...options.env },
         windowsHide: true
       }
     );

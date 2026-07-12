@@ -113,14 +113,21 @@ func TestPathRichNaturalPhrasesRouteToAgentGateway(t *testing.T) {
 			input:          `add "C:\Users\wamin\Desktop\development\My App" using npm run dev`,
 			wantPath:       `C:\Users\wamin\Desktop\development\My App`,
 			wantAgentInput: `add C:\Users\wamin\Desktop\development\My App using npm run dev`,
-			wantSlash:      `/add app "C:\Users\wamin\Desktop\development\My App" using npm run dev`,
+			wantSlash:      `/add "C:\Users\wamin\Desktop\development\My App" using npm run dev`,
+		},
+		{
+			name:           "add path without command",
+			input:          `add C:\Users\wamin\Desktop\development\ratemygithub`,
+			wantPath:       `C:\Users\wamin\Desktop\development\ratemygithub`,
+			wantAgentInput: `add C:\Users\wamin\Desktop\development\ratemygithub`,
+			wantSlash:      `/configure C:\Users\wamin\Desktop\development\ratemygithub --dry-run`,
 		},
 		{
 			name:           "use command in path",
 			input:          `use npm run dev in .\apps\notes`,
 			wantPath:       `.\apps\notes`,
 			wantAgentInput: `add .\apps\notes using npm run dev`,
-			wantSlash:      `/add app .\apps\notes using npm run dev`,
+			wantSlash:      `/add .\apps\notes using npm run dev`,
 		},
 		{
 			name:           "current folder",

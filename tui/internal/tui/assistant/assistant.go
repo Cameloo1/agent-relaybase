@@ -192,17 +192,7 @@ func ParseInput(input string) (ParsedInput, error) {
 }
 
 func isKnownSlashCommand(raw string) bool {
-	fields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(raw, "/")))
-	if len(fields) == 0 {
-		return false
-	}
-	switch strings.ToLower(fields[0]) {
-	case "add", "launch", "stop", "restart", "logs", "page", "pane", "pin", "unpin", "theme", "help", "confirm", "cancel",
-		"daemon", "thread", "register", "configure", "open", "prove", "health", "repair", "manifest", "port", "component":
-		return true
-	default:
-		return false
-	}
+	return slash.IsKnownPrefix(raw)
 }
 
 func canParseSlashPrefixedNatural(raw string) bool {
@@ -304,6 +294,8 @@ func parseFolderAgentInput(input string) (ParsedInput, bool) {
 	} else if after, ok := cutNormalizedPrefix(raw, normalized, "add "); ok {
 		if path, command, ok := cutCaseInsensitive(after, " using "); ok {
 			intent = folderIntent{kind: "add", path: path, command: command}
+		} else if pathLooksLikeFolderTarget(after) || isCurrentFolderPhrase(normalize(after)) {
+			intent = folderIntent{kind: "add", path: after}
 		}
 	} else if after, ok := cutNormalizedPrefix(raw, normalized, "use "); ok {
 		if command, path, ok := cutCaseInsensitive(after, " in "); ok {
@@ -458,7 +450,7 @@ func folderSlashFallback(kind string, path string, command string) string {
 	switch kind {
 	case "add":
 		if command != "" {
-			return "/add app " + pathArg + " using " + command
+			return "/add " + pathArg + " using " + command
 		}
 		return "/configure " + pathArg + " --dry-run"
 	case "open":

@@ -151,6 +151,15 @@ type AgentDiagnosticsFailedMsg struct {
 	Err error
 }
 
+type AgentUsageLoadedMsg struct {
+	Usage      *relaybaseclient.AgentUsageSnapshot
+	Generation uint64
+}
+type AgentUsageFailedMsg struct {
+	Err        error
+	Generation uint64
+}
+
 type AgentSessionCreatedMsg struct {
 	Session *relaybaseclient.AgentSession
 }
@@ -224,24 +233,34 @@ type AgentSessionContextPreviewFailedMsg struct {
 }
 
 type AgentMessageSentMsg struct {
-	Result *relaybaseclient.AgentMessageResult
+	Result     *relaybaseclient.AgentMessageResult
+	SessionID  string
+	Generation uint64
 }
 
 type AgentMessageSendFailedMsg struct {
-	Err error
+	Err        error
+	SessionID  string
+	Generation uint64
 }
 
 type AgentEventsConnectedMsg struct {
-	Stream *relaybaseclient.AgentEventStream
+	Stream     *relaybaseclient.AgentEventStream
+	SessionID  string
+	Generation uint64
 }
 
 type AgentEventMsg struct {
-	Stream *relaybaseclient.AgentEventStream
-	Event  relaybaseclient.AgentRunEvent
+	Stream     *relaybaseclient.AgentEventStream
+	Event      relaybaseclient.AgentRunEvent
+	SessionID  string
+	Generation uint64
 }
 
 type AgentEventsDisconnectedMsg struct {
-	Err error
+	Err        error
+	SessionID  string
+	Generation uint64
 }
 
 type AgentApprovalResolvedMsg struct {
@@ -282,6 +301,16 @@ func FetchAgentDiagnosticsCmd(ctx context.Context, client *relaybaseclient.Clien
 			return AgentDiagnosticsFailedMsg{Err: err}
 		}
 		return AgentDiagnosticsLoadedMsg{Diagnostics: diagnostics}
+	}
+}
+
+func FetchAgentUsageCmd(ctx context.Context, client *relaybaseclient.Client, generation uint64) tea.Cmd {
+	return func() tea.Msg {
+		value, err := client.GetActiveAgentUsage(ctx)
+		if err != nil {
+			return AgentUsageFailedMsg{Err: err, Generation: generation}
+		}
+		return AgentUsageLoadedMsg{Usage: value, Generation: generation}
 	}
 }
 
@@ -365,33 +394,33 @@ func FetchAgentSessionContextPreviewCmd(ctx context.Context, client *relaybasecl
 	}
 }
 
-func SendAgentMessageCmd(ctx context.Context, client *relaybaseclient.Client, sessionID string, request relaybaseclient.AgentMessageRequest) tea.Cmd {
+func SendAgentMessageCmd(ctx context.Context, client *relaybaseclient.Client, sessionID string, request relaybaseclient.AgentMessageRequest, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		result, err := client.SendAgentMessage(ctx, sessionID, request)
 		if err != nil {
-			return AgentMessageSendFailedMsg{Err: err}
+			return AgentMessageSendFailedMsg{Err: err, SessionID: sessionID, Generation: generation}
 		}
-		return AgentMessageSentMsg{Result: result}
+		return AgentMessageSentMsg{Result: result, SessionID: sessionID, Generation: generation}
 	}
 }
 
-func ConnectAgentEventsCmd(ctx context.Context, client *relaybaseclient.Client, sessionID string) tea.Cmd {
+func ConnectAgentEventsCmd(ctx context.Context, client *relaybaseclient.Client, sessionID string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		stream, err := client.StreamAgentSessionEvents(ctx, sessionID)
 		if err != nil {
-			return AgentEventsDisconnectedMsg{Err: err}
+			return AgentEventsDisconnectedMsg{Err: err, SessionID: sessionID, Generation: generation}
 		}
-		return AgentEventsConnectedMsg{Stream: stream}
+		return AgentEventsConnectedMsg{Stream: stream, SessionID: sessionID, Generation: generation}
 	}
 }
 
-func NextAgentEventCmd(ctx context.Context, stream *relaybaseclient.AgentEventStream) tea.Cmd {
+func NextAgentEventCmd(ctx context.Context, stream *relaybaseclient.AgentEventStream, sessionID string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		event, err := stream.Next(ctx)
 		if err != nil {
-			return AgentEventsDisconnectedMsg{Err: err}
+			return AgentEventsDisconnectedMsg{Err: err, SessionID: sessionID, Generation: generation}
 		}
-		return AgentEventMsg{Stream: stream, Event: event}
+		return AgentEventMsg{Stream: stream, Event: event, SessionID: sessionID, Generation: generation}
 	}
 }
 
