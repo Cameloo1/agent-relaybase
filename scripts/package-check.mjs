@@ -33,6 +33,12 @@ export function runPackageCheck(args = process.argv.slice(2), options = {}) {
     console.error("Relaybase package check: compiled runtime dist-runtime/cli.js is missing from the npm tarball.");
     return 1;
   }
+  if (!files.has("dist-runtime/daemonLauncher.js")) {
+    console.error(
+      "Relaybase package check: compiled runtime dist-runtime/daemonLauncher.js is missing from the npm tarball."
+    );
+    return 1;
+  }
   const forbidden = [...files].filter(
     (file) =>
       file.startsWith("reports/") ||

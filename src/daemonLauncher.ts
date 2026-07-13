@@ -17,6 +17,7 @@ export type DaemonEnsureCode =
   | "daemon_running"
   | "daemon_started"
   | "daemon_not_running"
+  | "daemon_runtime_missing"
   | "daemon_start_timeout"
   | "daemon_exited_early"
   | "daemon_spawn_failed"
@@ -47,6 +48,25 @@ export interface DaemonEnsureResult {
   signal?: NodeJS.Signals | null;
   error?: string;
   logTail?: string[];
+}
+
+export interface DaemonRuntimeInvocation {
+  cliPath: string;
+  nodeArgs: string[];
+}
+
+export function resolveDaemonRuntimeInvocation(moduleUrl: string): DaemonRuntimeInvocation {
+  const launcherPath = fileURLToPath(moduleUrl);
+  const extension = path.extname(launcherPath);
+  if (extension !== ".ts" && extension !== ".js") {
+    throw new Error(`Unsupported Relaybase daemon launcher extension: ${extension || "(none)"}`);
+  }
+
+  const cliPath = path.join(path.dirname(launcherPath), `cli${extension}`);
+  return {
+    cliPath,
+    nodeArgs: extension === ".ts" ? ["--experimental-strip-types", cliPath] : [cliPath]
+  };
 }
 
 export async function ensureDaemon(options: RelaybaseCommandOptions, allowStart: boolean): Promise<DaemonEnsureResult> {
@@ -80,11 +100,30 @@ export async function ensureDaemon(options: RelaybaseCommandOptions, allowStart:
     };
   }
 
-  const cliPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "cli.ts");
   const command = process.execPath;
+  const logPath = path.join(options.stateDir, "daemon.log");
+  const pidPath = path.join(options.stateDir, "daemon.pid");
+  const metadataPath = path.join(options.stateDir, "daemon.json");
+  const cwd = options.cwd;
+  let runtime: DaemonRuntimeInvocation;
+  try {
+    runtime = resolveDaemonRuntimeInvocation(import.meta.url);
+  } catch (error) {
+    return {
+      reachable: false,
+      started: false,
+      code: "daemon_runtime_missing",
+      userAction: userActionForDaemonCode("daemon_runtime_missing", options),
+      command,
+      cwd,
+      logPath,
+      pidPath,
+      metadataPath,
+      error: `Relaybase daemon runtime resolution failed: ${errorMessage(error)}`
+    };
+  }
   const args = [
-    "--experimental-strip-types",
-    cliPath,
+    ...runtime.nodeArgs,
     "serve",
     "--host",
     options.host,
@@ -93,10 +132,24 @@ export async function ensureDaemon(options: RelaybaseCommandOptions, allowStart:
     "--state-dir",
     options.stateDir
   ];
-  const logPath = path.join(options.stateDir, "daemon.log");
-  const pidPath = path.join(options.stateDir, "daemon.pid");
-  const metadataPath = path.join(options.stateDir, "daemon.json");
-  const cwd = options.cwd;
+
+  try {
+    await fs.access(runtime.cliPath);
+  } catch (error) {
+    return {
+      reachable: false,
+      started: false,
+      code: "daemon_runtime_missing",
+      userAction: userActionForDaemonCode("daemon_runtime_missing", options),
+      command,
+      args,
+      cwd,
+      logPath,
+      pidPath,
+      metadataPath,
+      error: `Relaybase daemon runtime is unavailable at ${runtime.cliPath}: ${errorMessage(error)}`
+    };
+  }
 
   try {
     await ensureDir(options.stateDir);
@@ -338,6 +391,8 @@ function userActionForDaemonCode(code: DaemonEnsureCode, options: RelaybaseComma
       return `Fix permissions for the Relaybase state directory: ${options.stateDir}`;
     case "daemon_spawn_failed":
       return "Inspect the daemon log and retry from a terminal that can run Node.";
+    case "daemon_runtime_missing":
+      return "Reinstall Relaybase. From a source checkout, run npm run build:runtime, then retry.";
     case "daemon_start_timeout":
       return "Inspect the daemon log and retry; Relaybase did not become reachable before timeout.";
     default:

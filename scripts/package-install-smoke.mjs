@@ -42,11 +42,32 @@ export function runPackageInstallSmoke(options = {}) {
       console.error("Installed CLI help did not expose the expected Relaybase start contract.");
       return 1;
     }
+    const daemonProbe = runCompiledDaemonProbe(workspace);
+    if (daemonProbe.status !== 0) return report(daemonProbe);
     console.log(`Disposable install smoke passed for ${target.goos}/${target.goarch} at version ${expected}.`);
     return 0;
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
+}
+
+function runCompiledDaemonProbe(workspace) {
+  const launcherPath = path.join(
+    workspace,
+    "node_modules",
+    "@cameloo",
+    "relaybase",
+    "dist-runtime",
+    "daemonLauncher.js"
+  );
+  const stateDir = path.join(workspace, "daemon-state");
+  const probePath = path.join(root, "scripts", "compiled-daemon-smoke.mjs");
+  return spawnSync(process.execPath, [probePath, launcherPath, stateDir], {
+    cwd: workspace,
+    encoding: "utf8",
+    shell: false,
+    timeout: 30_000
+  });
 }
 
 function pack(cwd, destination, cache) {

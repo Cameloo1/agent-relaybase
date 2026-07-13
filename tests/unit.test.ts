@@ -1304,7 +1304,7 @@ test("package check uses and removes a disposable OS-temp npm cache by default",
           stdout: JSON.stringify([
             {
               filename: "cameloo-relaybase-0.1.0.tgz",
-              files: [{ path: "dist-runtime/cli.js" }]
+              files: [{ path: "dist-runtime/cli.js" }, { path: "dist-runtime/daemonLauncher.js" }]
             }
           ]),
           stderr: ""
@@ -1350,7 +1350,7 @@ test("package check preserves a user-supplied npm cache override", async () => {
           stdout: JSON.stringify([
             {
               filename: "cameloo-relaybase-0.1.0.tgz",
-              files: [{ path: "dist-runtime/cli.js" }]
+              files: [{ path: "dist-runtime/cli.js" }, { path: "dist-runtime/daemonLauncher.js" }]
             }
           ]),
           stderr: ""
