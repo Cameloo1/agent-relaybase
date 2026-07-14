@@ -1484,6 +1484,7 @@ test("TUI smoke style evidence requires ANSI colors, complete panes, and no oute
     "STDOUT:",
     "\x1b[38;2;47;33;24m\x1b[38;2;125;106;95m\x1b[48;2;248;244;236mApps 2 active / 2 registered\u2514 pane one \u2518\x1b[0m",
     "\x1b[38;2;33;104;105m\x1b[38;2;40;122;61m\x1b[38;2;138;90;0m\x1b[38;2;155;28;49m\u2514 pane two \u2518\x1b[0m",
+    "Composer [Ctrl+G agent pane]",
     `\x1b[38;2;109;76;61m\x1b[48;2;248;244;236m${"─".repeat(fixture.smokeWidth)}\x1b[0m`,
     "",
     "STDERR:",
@@ -1496,6 +1497,7 @@ test("TUI smoke style evidence requires ANSI colors, complete panes, and no oute
   );
   assert.equal(transcriptHasStyledOperatorShell(styled.replace("pane two", "scroll 0/6"), fixture), false);
   assert.equal(transcriptHasStyledOperatorShell(styled.replace(/┘/g, ""), fixture), false);
+  assert.equal(transcriptHasStyledOperatorShell(styled.replace("Ctrl+G agent pane", "agent pane"), fixture), false);
   assert.equal(transcriptHasStyledOperatorShell(styled.replaceAll("38;2;109;76;61", "38;2;1;2;3"), fixture), false);
   assert.equal(transcriptHasStyledOperatorShell(styled.replaceAll("48;2;248;244;236", "48;2;1;2;3"), fixture), false);
 });
@@ -1503,18 +1505,20 @@ test("TUI smoke style evidence requires ANSI colors, complete panes, and no oute
 test("TUI smoke bridge evidence requires responsive complete panes at 110x32", () => {
   const fixture = smokeFixtureDefinition("8pane");
   const visible = fixture.apps
-    .slice(0, 6)
     .map((app) => `${app.displayName}: ${app.paneLabel}\n[stdout] ${app.id} smoke\n└─┘`)
     .join("\n");
-  const transcript = ["STDOUT:", "Page 1/2", visible, "", "STDERR:", ""].join("\n");
+  const transcript = ["STDOUT:", visible, "Composer [Ctrl+G agent pane]", "", "STDERR:", ""].join("\n");
 
   assert.equal(transcriptHasResponsiveBridgeLayout(transcript, fixture), true);
-  assert.equal(transcriptHasResponsiveBridgeLayout(transcript.replace("Page 1/2", "Page 1/1"), fixture), false);
   assert.equal(transcriptHasResponsiveBridgeLayout(transcript.replace(/└/g, ""), fixture), false);
   assert.equal(transcriptHasResponsiveBridgeLayout(transcript.replace(/┘/g, ""), fixture), false);
   assert.equal(
+    transcriptHasResponsiveBridgeLayout(transcript.replace("Ctrl+G agent pane", "agent pane"), fixture),
+    false
+  );
+  assert.equal(
     transcriptHasResponsiveBridgeLayout(
-      transcript.replace(`[stdout] ${fixture.apps[5].id}`, "[stdout] missing"),
+      transcript.replace(`[stdout] ${fixture.apps[7].id}`, "[stdout] missing"),
       fixture
     ),
     false
@@ -1588,7 +1592,8 @@ test("TUI smoke preference evidence requires full local UI preference surface", 
     },
     layout: {
       lastPage: 0,
-      density: "compact"
+      density: "compact",
+      agentPaneCollapsed: false
     }
   };
 

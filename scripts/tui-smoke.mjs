@@ -661,7 +661,8 @@ async function seedPreferenceFile(stateDir, apps = smokeFixtureDefinition().apps
     },
     layout: {
       lastPage: 0,
-      density: "compact"
+      density: "compact",
+      agentPaneCollapsed: false
     }
   });
   return filePath;
@@ -943,7 +944,8 @@ export function preferenceEvidenceLooksComplete(preferences) {
     typeof preferences.assistant?.barColor === "string" &&
     Number.isInteger(preferences.assistant?.historyRetentionDays) &&
     Number.isInteger(preferences.layout?.lastPage) &&
-    typeof preferences.layout?.density === "string"
+    typeof preferences.layout?.density === "string" &&
+    typeof preferences.layout?.agentPaneCollapsed === "boolean"
   );
 }
 
@@ -998,13 +1000,19 @@ function transcriptShowsEightPaneDetails(text, fixture) {
     const title = `${app.displayName}: ${app.paneLabel}`;
     return (
       new RegExp(escapeRegExp(title), "i").test(stripped) &&
-      new RegExp(escapeRegExp(app.logMessage), "i").test(stripped) &&
-      new RegExp(`route\\s+http://${escapeRegExp(app.id)}\\.localhost`, "i").test(stripped)
+      new RegExp(`\\[stdout\\]\\s+${escapeRegExp(app.id)}`, "i").test(stripped) &&
+      new RegExp(`route\\s+http://${escapeRegExp(app.id)}`, "i").test(stripped)
     );
   });
   const runningCount = (stripped.match(/status running/gi) ?? []).length;
-  const portCount = (stripped.match(/port \d+/gi) ?? []).length;
-  return expectedPanes && runningCount >= 8 && portCount >= 8;
+  const backendPortLabelCount = (stripped.match(/backend port/gi) ?? []).length;
+  return (
+    expectedPanes &&
+    runningCount >= 8 &&
+    backendPortLabelCount >= 8 &&
+    /Ctrl\+G agent pane/i.test(stripped) &&
+    /No Agent output yet\. Submit a request in Composer\./i.test(stripped)
+  );
 }
 
 function transcriptShowsConfirmation(text) {
@@ -1037,21 +1045,28 @@ export function transcriptHasStyledOperatorShell(text, fixture = smokeFixtureDef
   const completePaneBorders =
     (plain.match(/\u2514/g) ?? []).length >= fixture.expectedPaneCount &&
     (plain.match(/\u2518/g) ?? []).length >= fixture.expectedPaneCount;
-  const truthfulAppCounts = plain.includes(
-    `Apps ${fixture.expectedPaneCount} active / ${fixture.expectedPaneCount} registered`
-  );
+  const appCount = escapeRegExp(String(fixture.expectedPaneCount));
+  const truthfulAppCounts = new RegExp(
+    `Apps\\s+${appCount}\\s+active\\s*/\\s*${appCount}(?:\\s+(?:registered|saved))?`,
+    "i"
+  ).test(plain);
+  const composerPointer = /Ctrl\+G agent pane/i.test(plain);
+  const agentDockEvidence =
+    !agentDockFits(fixture.smokeWidth) || /No Agent output yet\. Submit a request in Composer\./i.test(plain);
   return (
     hasExactLightPalette &&
     hasExactComposerDivider &&
     completePaneBorders &&
     truthfulAppCounts &&
+    composerPointer &&
+    agentDockEvidence &&
     !/scroll 0\/\d+/.test(plain)
   );
 }
 
 export function transcriptHasResponsiveBridgeLayout(text, fixture = smokeFixtureDefinition()) {
   const plain = stripAnsi(renderedTranscriptOutput(text));
-  const visiblePaneCount = fixture.expectedPaneCount === 8 ? 6 : fixture.expectedPaneCount;
+  const visiblePaneCount = fixture.expectedPaneCount;
   const completePaneBorders =
     (plain.match(/\u2514/g) ?? []).length >= visiblePaneCount &&
     (plain.match(/\u2518/g) ?? []).length >= visiblePaneCount;
@@ -1060,8 +1075,12 @@ export function transcriptHasResponsiveBridgeLayout(text, fixture = smokeFixture
     const visibleLogPrefix = new RegExp(`\\[stdout\\]\\s+${escapeRegExp(app.id)}`, "i");
     return new RegExp(escapeRegExp(title), "i").test(plain) && visibleLogPrefix.test(plain);
   });
-  const responsivePage = fixture.expectedPaneCount !== 8 || /Page 1\/2/i.test(plain);
-  return completePaneBorders && visiblePaneDetails && responsivePage && !/scroll 0\/\d+/.test(plain);
+  return completePaneBorders && visiblePaneDetails && /Ctrl\+G agent pane/i.test(plain) && !/scroll 0\/\d+/.test(plain);
+}
+
+function agentDockFits(width) {
+  const agentWidth = Math.floor(width / 3);
+  return agentWidth >= 36 && width - agentWidth >= 80;
 }
 
 export function renderedTranscriptOutput(text) {
