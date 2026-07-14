@@ -230,11 +230,17 @@ test("Agent Gateway streams runtime events through session event model", async (
         "run.started",
         "model.request_started",
         "model.delta",
-        "model.delta",
         "model.completed",
         "answer",
         "run.completed"
       ]);
+      assert.equal(
+        streamed
+          .filter((event) => event.type === "model.delta")
+          .map((event) => (event.data as { delta?: string }).delta ?? "")
+          .join(""),
+        "Relaybase status"
+      );
       assert.equal(gateway.getSession(session.id).messages.at(-1)?.role, "assistant");
       assert.equal(gateway.getSession(session.id).messages.at(-1)?.content, "Relaybase status is clear.");
     } finally {
@@ -944,6 +950,13 @@ test("RA008 policy guardrails separate read-only tools, approval-required tools,
   assert.equal(
     outputGuardrail(
       "Operators should not have to guess. Runtime detected from files X/Y. Command candidate inferred from package.json or main.go. Port strategy inferred from framework markers.",
+      0
+    ),
+    undefined
+  );
+  assert.equal(
+    outputGuardrail(
+      "I should not assume every project is Node/npm. Relaybase should infer a command from inspected files and report that port strategy was inferred from framework markers.",
       0
     ),
     undefined

@@ -1759,6 +1759,25 @@ func TestInitialAgentReplayCommitsOnlyFinalSemanticStatus(t *testing.T) {
 	}
 }
 
+func TestInitialAgentReplayPublishesPartialOutputOnlyForActiveRun(t *testing.T) {
+	root := newTestModel(t)
+	root.agentStatus = "running"
+	root.agentInitialReplay = true
+
+	root.applyAgentRunEvent(rawAgentEvent("model.delta", `{"delta":"partial output"}`))
+	if rendered := strings.Join(root.assistantHistoryForView(), "\n"); strings.Contains(rendered, "partial output") {
+		t.Fatalf("active replay delta rendered before replay completion: %q", rendered)
+	}
+
+	root.applyAgentRunEvent(rawAgentEvent("stream.replay_completed", `{"afterSequence":0}`))
+	if root.agentInitialReplay || root.agentStatus != "running" {
+		t.Fatalf("active replay state not committed: status=%s replay=%t", root.agentStatus, root.agentInitialReplay)
+	}
+	if rendered := strings.Join(root.assistantHistoryForView(), "\n"); !strings.Contains(rendered, "partial output") {
+		t.Fatalf("active replay partial output was not published: %q", rendered)
+	}
+}
+
 func TestAgentModelDeltaDoesNotOverwriteRunningStatus(t *testing.T) {
 	root := newTestModel(t)
 	root.agentStatus = "running"

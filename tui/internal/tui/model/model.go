@@ -4123,6 +4123,12 @@ func (m *RootModel) applyAgentRunEvent(event relaybaseclient.AgentRunEvent) {
 			m.agentStatus = m.agentReplayStatus
 			m.agentReplayStatus = ""
 		}
+		if agentStatusHasLiveOutput(m.agentStatus) {
+			if delta := strings.TrimSpace(m.agentDelta); delta != "" {
+				m.lastAssistantLine = "Agent: " + assistant.SanitizeText(delta)
+				m.refreshAssistantPrompt()
+			}
+		}
 	case "blocked":
 		m.addAssistantMessage(firstNonEmpty(stringField(event.Data, "content"), diagnosticMessageFromData(event.Data), "Operator Agent request was blocked."))
 	case "clarification_needed":
@@ -4201,6 +4207,15 @@ func (m *RootModel) setAgentRunStatus(status string) {
 		return
 	}
 	m.agentStatus = status
+}
+
+func agentStatusHasLiveOutput(status string) bool {
+	switch status {
+	case "sending", "running", "waiting":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *RootModel) flushAgentDelta() {

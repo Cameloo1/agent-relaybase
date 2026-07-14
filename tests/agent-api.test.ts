@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { AgentFileWriteApproval, AgentManifestPatchApproval, TuiAgentContext } from "../src/apiTypes.ts";
+import { coalesceAgentReplayEvents } from "../src/agent/api.ts";
+import type { AgentRunEvent } from "../src/agent/types.ts";
 import { createRelaybaseServer } from "../src/server.ts";
 
 const AGENT_ENV_NAMES = [
@@ -13,6 +15,36 @@ const AGENT_ENV_NAMES = [
   "RELAYBASE_AGENT_ENABLED",
   "RELAYBASE_AGENT_REMOTE_MODEL_ENABLED"
 ];
+
+test("Agent event replay coalesces model deltas without losing text, ordering, or the latest sequence", () => {
+  const deltas = Array.from({ length: 1_000 }, (_, index) => `token-${index};`);
+  const events: AgentRunEvent[] = deltas.map((delta, index) => ({
+    id: `event-${index + 1}`,
+    sequence: index + 1,
+    sessionId: "session-1",
+    runId: "run-1",
+    type: "model.delta",
+    at: "2026-07-14T00:00:00.000Z",
+    data: { delta }
+  }));
+  events.push({
+    id: "event-1001",
+    sequence: 1001,
+    sessionId: "session-1",
+    runId: "run-1",
+    type: "run.completed",
+    at: "2026-07-14T00:00:01.000Z",
+    data: {}
+  });
+
+  const replay = coalesceAgentReplayEvents(events);
+  const replayDeltas = replay.filter((event) => event.type === "model.delta");
+
+  assert.ok(replayDeltas.length < 10, `expected fewer than 10 replay chunks, got ${replayDeltas.length}`);
+  assert.equal(replayDeltas.map((event) => (event.data as { delta: string }).delta).join(""), deltas.join(""));
+  assert.equal(replay.at(-1)?.type, "run.completed");
+  assert.equal(replayDeltas.at(-1)?.sequence, 1000);
+});
 
 test("Agent Gateway config GET/PUT is token gated and never serializes raw OpenRouter key", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-config-"));

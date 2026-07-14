@@ -2,10 +2,11 @@ import type http from "node:http";
 import type { RelaybaseRuntime } from "../server.ts";
 import { sendJson } from "../responses.ts";
 import { AgentGatewayRequestError } from "./gateway.ts";
-import type { AgentMessageRequest } from "./types.ts";
+import type { AgentMessageRequest, AgentRunEvent } from "./types.ts";
 
 type RequireToken = (options?: { code?: string; message?: string; userAction?: string }) => void;
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
+const MAX_REPLAY_DELTA_CHARS = 4096;
 
 export async function handleAgentApiRequest(input: {
   runtime: RelaybaseRuntime;
@@ -240,7 +241,7 @@ async function streamAgentSessionEvents(
     3000
   );
 
-  for (const event of runtime.agentGateway.sessionEvents(sessionId, afterSequence)) {
+  for (const event of coalesceAgentReplayEvents(runtime.agentGateway.sessionEvents(sessionId, afterSequence))) {
     send(event.type, String(event.sequence), event);
   }
 
@@ -274,6 +275,47 @@ async function streamAgentSessionEvents(
   };
   request.once("close", cleanup);
   response.once("close", cleanup);
+}
+
+export function coalesceAgentReplayEvents(events: readonly AgentRunEvent[]): AgentRunEvent[] {
+  const coalesced: AgentRunEvent[] = [];
+  let pendingEvent: AgentRunEvent | undefined;
+  let pendingDelta = "";
+
+  const flush = () => {
+    if (!pendingEvent || !pendingDelta) {
+      pendingEvent = undefined;
+      pendingDelta = "";
+      return;
+    }
+    const data = isRecord(pendingEvent.data) ? pendingEvent.data : {};
+    coalesced.push({ ...pendingEvent, data: { ...data, delta: pendingDelta } });
+    pendingEvent = undefined;
+    pendingDelta = "";
+  };
+
+  for (const event of events) {
+    const delta = event.type === "model.delta" && isRecord(event.data) ? event.data.delta : undefined;
+    if (typeof delta !== "string" || !delta) {
+      flush();
+      coalesced.push(event);
+      continue;
+    }
+    if (
+      pendingEvent &&
+      (pendingEvent.runId !== event.runId || pendingDelta.length + delta.length > MAX_REPLAY_DELTA_CHARS)
+    ) {
+      flush();
+    }
+    pendingEvent = event;
+    pendingDelta += delta;
+  }
+  flush();
+  return coalesced;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function headerText(value: string | string[] | undefined): string {

@@ -67,6 +67,9 @@ export interface OperatorAgentPendingApprovalRequest {
   rawItem?: unknown;
 }
 
+const MODEL_DELTA_FLUSH_INTERVAL_MS = 100;
+const MODEL_DELTA_MAX_CHARS = 512;
+
 export class OperatorAgentRuntime {
   #runnerFactory?: OperatorAgentRunnerFactory;
   #timeoutMs: number;
@@ -141,21 +144,23 @@ export class OperatorAgentRuntime {
         }
       });
 
-      const result = await this.#runWithTimeout(
-        runner,
-        agent,
-        prompt,
-        (delta) => {
-          input.emit({
-            type: "model.delta",
-            data: {
-              delta: redactAgentText(delta, knownSecrets)
-            }
-          });
-        },
-        (event) => input.emit(event),
-        input.signal
-      );
+      const deltaEmitter = new ModelDeltaEmitter(input.emit);
+      let result: any;
+      try {
+        result = await this.#runWithTimeout(
+          runner,
+          agent,
+          prompt,
+          (delta) => deltaEmitter.push(redactAgentText(delta, knownSecrets)),
+          (event) => {
+            deltaEmitter.flush();
+            input.emit(event);
+          },
+          input.signal
+        );
+      } finally {
+        deltaEmitter.flush();
+      }
       const interruptions = pendingApprovalsFromResult(result);
       if (interruptions.length) {
         const clarification = lifecycleApprovalClarification(
@@ -366,6 +371,41 @@ export class OperatorAgentRuntime {
         controller.abort();
       }
     }
+  }
+}
+
+class ModelDeltaEmitter {
+  #pending = "";
+  #timer: ReturnType<typeof setTimeout> | undefined;
+  #emit: (event: AgentRuntimeEvent) => void;
+
+  constructor(emit: (event: AgentRuntimeEvent) => void) {
+    this.#emit = emit;
+  }
+
+  push(delta: string): void {
+    if (!delta) {
+      return;
+    }
+    this.#pending += delta;
+    if (this.#pending.length >= MODEL_DELTA_MAX_CHARS) {
+      this.flush();
+      return;
+    }
+    this.#timer ??= setTimeout(() => this.flush(), MODEL_DELTA_FLUSH_INTERVAL_MS);
+  }
+
+  flush(): void {
+    if (this.#timer) {
+      clearTimeout(this.#timer);
+      this.#timer = undefined;
+    }
+    if (!this.#pending) {
+      return;
+    }
+    const delta = this.#pending;
+    this.#pending = "";
+    this.#emit({ type: "model.delta", data: { delta } });
   }
 }
 
