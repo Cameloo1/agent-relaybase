@@ -8,6 +8,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/cameloo/relaybase/tui/internal/tui/components"
 	"github.com/cameloo/relaybase/tui/internal/tui/contextmenu"
 	"github.com/cameloo/relaybase/tui/internal/tui/inventory"
 	"github.com/cameloo/relaybase/tui/internal/tui/keymap"
@@ -314,7 +315,7 @@ func TestPaneLogRenderingStripsAnsiAndTruncatesLongLines(t *testing.T) {
 	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
 	rendered := RenderShell(styles.New(theme), ShellData{
 		Width:            80,
-		Height:           20,
+		Height:           30,
 		ConnectionStatus: "connected",
 		EventStatus:      "connected",
 		KeyMap:           keymap.Default(),
@@ -385,15 +386,201 @@ func TestRegisteredStoppedInventoryIsDiscoverableAndStartable(t *testing.T) {
 		KeyMap:           keymap.Default(),
 		AssistantPrompt:  "> _",
 		Inventory: []inventory.Item{
-			{ID: "api", Name: "API", Status: "running"},
-			{ID: "worker", Name: "Worker", Status: "stopped", Selected: true},
+			{ID: "api", Name: "API", Directory: `C:\work\api`, Status: "running"},
+			{ID: "worker", Name: "Worker", Directory: `C:\work\worker`, Status: "stopped", Readiness: "ready", LastError: "previous exit", Selected: true},
 		},
 		PageCount: 1,
 	})
 	snapshot := compactSnapshot(rendered)
-	for _, expected := range []string{"Registered apps", "Worker", "stopped", "Enter: start", "> _"} {
+	for _, expected := range []string{"Registered apps", "Name Project Status", "API C:/work/api running", "Worker C:/work/worker stopped", "Selected: Worker", "Readiness: ready", "Enter: review start", "Last error: previous exit", "> _"} {
 		if !strings.Contains(snapshot, expected) {
 			t.Fatalf("inventory missing %q:\n%s", expected, snapshot)
+		}
+	}
+}
+
+func TestNoPaneInventoryAndListModalShareRegisteredAppTableProjection(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	style := styles.New(theme)
+	items := []inventory.Item{
+		{ID: "service-api", Name: "Service", Directory: `C:\very\long\workspace\relaybase\examples\api`, Status: "running", Selected: true},
+		{ID: "service-worker", Name: "Service", Directory: `C:\work\worker`, Status: "degraded"},
+	}
+	base := ShellData{
+		OperatorConsole: true, Width: 100, Height: 30, ComposerRows: 1,
+		ConnectionStatus: "connected", EventStatus: "connected", AgentStatus: "idle", StateKnown: true,
+		KeyMap: keymap.Default(), AssistantPrompt: "> _", PageCount: 1,
+	}
+	noPane := base
+	noPane.Inventory = items
+	modal := base
+	modal.RegisteredApps = &RegisteredAppsData{Items: items, Selected: 0, ConnectionStatus: "connected", StateKnown: true}
+
+	noPaneSnapshot := compactSnapshot(RenderShell(style, noPane))
+	modalSnapshot := compactSnapshot(RenderShell(style, modal))
+	for _, expected := range []string{"Name Project Status", "Service [service-api]", "Service [service-wor.]", "running", "degraded", "examples/api"} {
+		if !strings.Contains(noPaneSnapshot, expected) {
+			t.Fatalf("no-pane inventory missing shared table projection %q:\n%s", expected, noPaneSnapshot)
+		}
+		if !strings.Contains(modalSnapshot, expected) {
+			t.Fatalf("/list modal missing shared table projection %q:\n%s", expected, modalSnapshot)
+		}
+	}
+}
+
+func TestRegisteredAppsModalIsDedicatedAndInteractive(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	style := styles.New(theme)
+	data := ShellData{
+		OperatorConsole:  true,
+		Width:            100,
+		Height:           30,
+		ComposerRows:     1,
+		ConnectionStatus: "connected",
+		EventStatus:      "connected",
+		AgentStatus:      "idle",
+		StateKnown:       true,
+		KeyMap:           keymap.Default(),
+		AssistantPrompt:  "> _",
+		RegisteredApps: &RegisteredAppsData{
+			Items: []inventory.Item{
+				{ID: "api", Name: "API", Directory: `C:\work\api`, Status: "running", Route: "http://api.localhost:7777"},
+				{ID: "worker", Name: "Worker", Directory: `C:\work\worker`, Status: "stopped", Readiness: "ready", LastError: "previous exit", Selected: true},
+			},
+			Selected:         1,
+			ConnectionStatus: "connected",
+			StateKnown:       true,
+		},
+		PageCount: 1,
+	}
+	snapshot := compactSnapshot(RenderShell(style, data))
+	for _, required := range []string{"Registered apps 2 saved", "Name Project Status", "API C:/work/api running", "Worker C:/work/worker stopped", "Enter reviews", "review start"} {
+		if !strings.Contains(snapshot, required) {
+			t.Fatalf("registered app modal missing %q:\n%s", required, snapshot)
+		}
+	}
+	for _, excluded := range []string{"http://api.localhost:7777", "previous exit", "Readiness"} {
+		if strings.Contains(snapshot, excluded) {
+			t.Fatalf("registered app table leaked secondary detail %q:\n%s", excluded, snapshot)
+		}
+	}
+	if strings.Contains(snapshot, "Search:") {
+		t.Fatalf("registered app modal reused help content:\n%s", snapshot)
+	}
+	frame := BuildShell(style, data)
+	rowRegions := 0
+	for _, region := range frame.HitMap.Regions() {
+		if region.Kind == components.HitRegisteredAppRow {
+			rowRegions++
+		}
+	}
+	if rowRegions != 2 {
+		t.Fatalf("registered app modal has %d row hit regions, want 2: %#v", rowRegions, frame.HitMap.Regions())
+	}
+}
+
+func TestPaneReopenModalUsesDedicatedReadableTable(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	style := styles.New(theme)
+	data := ShellData{
+		OperatorConsole:  true,
+		Width:            100,
+		Height:           30,
+		ComposerRows:     1,
+		ConnectionStatus: "connected",
+		EventStatus:      "connected",
+		AgentStatus:      "idle",
+		StateKnown:       true,
+		KeyMap:           keymap.Default(),
+		AssistantPrompt:  "> _",
+		PaneReopen: &PaneReopenData{Items: []PaneReopenItem{
+			{PaneID: "api:web", Name: "API / web", Project: `C:\workspace\api`, Status: "running", UserClosed: true},
+			{PaneID: "worker:job", Name: "Worker / job", Project: `C:\workspace\worker`, Status: "stopped"},
+		}, Selected: 1},
+		PageCount: 1,
+	}
+	snapshot := compactSnapshot(RenderShell(style, data))
+	for _, required := range []string{"Reopen pane 2 available", "Recently closed panes are listed first", "Name Project Status", "API / web C:/workspace/api running", "Worker / job C:/workspace/worker stopped", "open pane"} {
+		if !strings.Contains(snapshot, required) {
+			t.Fatalf("pane reopen modal missing %q:\n%s", required, snapshot)
+		}
+	}
+	frame := BuildShell(style, data)
+	rows := 0
+	for _, region := range frame.HitMap.Regions() {
+		if region.Kind == components.HitPaneReopenRow {
+			rows++
+		}
+	}
+	if rows != 2 {
+		t.Fatalf("pane reopen modal has %d row hit regions, want 2: %#v", rows, frame.HitMap.Regions())
+	}
+}
+
+func TestAppTableStatusToneAndProjectPathStaySemanticAndBounded(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	style := styles.New(theme)
+	tests := []struct {
+		status string
+		want   any
+	}{
+		{status: "running", want: theme.Success},
+		{status: "stopped", want: theme.Warning},
+		{status: "degraded", want: theme.Warning},
+		{status: "failed", want: theme.Error},
+		{status: "unknown", want: theme.Muted},
+	}
+	for _, test := range tests {
+		if got := appStatusTone(style, test.status).GetForeground(); fmt.Sprint(got) != fmt.Sprint(test.want) {
+			t.Fatalf("status %q color=%v, want %v", test.status, got, test.want)
+		}
+	}
+	project := shortProjectPath(`C:\very\long\workspace\relaybase\examples\dashboard`, 24)
+	if lipgloss.Width(project) > 24 || !strings.Contains(project, "dashboard") {
+		t.Fatalf("short project path=%q width=%d", project, lipgloss.Width(project))
+	}
+}
+
+func TestRegisteredAppTableDisambiguatesDuplicateNames(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	data := ShellData{
+		OperatorConsole: true, Width: 100, Height: 30, ComposerRows: 1,
+		ConnectionStatus: "connected", EventStatus: "connected", AgentStatus: "idle", StateKnown: true,
+		KeyMap: keymap.Default(), AssistantPrompt: "> _", PageCount: 1,
+		RegisteredApps: &RegisteredAppsData{ConnectionStatus: "connected", StateKnown: true, Items: []inventory.Item{
+			{ID: "service-api", Name: "Service", Status: "running"},
+			{ID: "service-worker", Name: "Service", Status: "stopped"},
+		}},
+	}
+	snapshot := compactSnapshot(RenderShell(styles.New(theme), data))
+	for _, expected := range []string{"Service [service-api]", "Service [service-wor.]"} {
+		if !strings.Contains(snapshot, expected) {
+			t.Fatalf("duplicate app names were not disambiguated with stable ids; missing %q:\n%s", expected, snapshot)
+		}
+	}
+}
+
+func TestRegisteredAppsModalHasExplicitEmptyAndOfflineState(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	data := ShellData{
+		OperatorConsole:  true,
+		Width:            80,
+		Height:           24,
+		ComposerRows:     1,
+		ConnectionStatus: "offline",
+		EventStatus:      "waiting",
+		AgentStatus:      "waiting",
+		KeyMap:           keymap.Default(),
+		AssistantPrompt:  "> _",
+		RegisteredApps: &RegisteredAppsData{
+			ConnectionStatus: "offline",
+		},
+		PageCount: 1,
+	}
+	snapshot := compactSnapshot(RenderShell(styles.New(theme), data))
+	for _, required := range []string{"Registered apps 0 saved", "Daemon offline", "/daemon repair", "cannot be loaded"} {
+		if !strings.Contains(snapshot, required) {
+			t.Fatalf("offline empty registered-app modal missing %q:\n%s", required, snapshot)
 		}
 	}
 }

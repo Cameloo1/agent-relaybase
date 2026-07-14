@@ -21,6 +21,7 @@ import (
 	"github.com/cameloo/relaybase/tui/internal/events"
 	"github.com/cameloo/relaybase/tui/internal/preferences"
 	"github.com/cameloo/relaybase/tui/internal/relaybaseclient"
+	"github.com/cameloo/relaybase/tui/internal/tui/appcompletion"
 	"github.com/cameloo/relaybase/tui/internal/tui/assistant"
 	"github.com/cameloo/relaybase/tui/internal/tui/commandpalette"
 	"github.com/cameloo/relaybase/tui/internal/tui/commands"
@@ -113,6 +114,7 @@ type RootModel struct {
 	paste                  *pendingPaste
 	pasteGeneration        uint64
 	interaction            interaction.State
+	agentPreviousFocus     interaction.PrimaryFocus
 	responseOffset         int
 	responseFollow         bool
 	responseNewOutput      int
@@ -139,6 +141,7 @@ type RootModel struct {
 	agentStreamSessionID   string
 	agentStreamGeneration  uint64
 	agentInitialReplay     bool
+	agentReplayStatus      string
 	agentPendingInput      string
 	agentPendingGeneration uint64
 	agentMessageGeneration uint64
@@ -151,6 +154,17 @@ type RootModel struct {
 	helpMatches            []slash.CommandMatch
 	helpSelected           int
 	helpDetailOffset       int
+	appListVisible         bool
+	appListOffset          int
+	appListRefreshing      bool
+	appListNotice          string
+	appListPaneRefreshID   string
+	paneReopenVisible      bool
+	paneReopenSelected     int
+	paneReopenSelectedID   string
+	paneReopenOffset       int
+	paneReopenAppID        string
+	paneReopenNotice       string
 	usage                  usagecomponent.Model
 	usageRequestGeneration uint64
 	threadSwitcherVisible  bool
@@ -159,6 +173,7 @@ type RootModel struct {
 	codePickerVisible      bool
 	codePickerSelected     int
 	commandPalette         commandpalette.Model
+	startCompletion        appcompletion.Model
 	clipboardWriteReady    bool
 	appPackages            []relaybaseclient.AppPackageDefinition
 	activePackageRun       *relaybaseclient.AppPackageRun
@@ -171,6 +186,7 @@ type RootModel struct {
 	diagnosticsExpanded    bool
 	width                  int
 	height                 int
+	layoutComposerRows     int
 	bodyScrollOffset       int
 	daemonRetryAttempt     int
 	eventRetryAttempt      int
@@ -344,8 +360,10 @@ func NewRoot(cfg config.Config, client *relaybaseclient.Client) RootModel {
 		helpSearch:             helpSearch,
 		helpMatches:            slash.SearchCatalog(""),
 		commandPalette:         commandpalette.New(commandpalette.DefaultMaxRows),
+		startCompletion:        appcompletion.New(appcompletion.DefaultMaxRows),
 		composer:               composerModel,
 		interaction:            interaction.New(),
+		agentPreviousFocus:     interaction.FocusPanes,
 		responseFollow:         true,
 		localThreadGeneration:  1,
 		threadDrafts:           map[string]threadDraftState{},
@@ -440,15 +458,22 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.eventStatus = "checking"
 		return m, commands.FetchStateCmd(m.ctx, m.client)
 	case tea.WindowSizeMsg:
+		previousMetrics := m.operatorMetrics()
 		m.width = msg.Width
 		m.height = msg.Height
 		// Width can reflow a multiline draft and therefore change DynamicHeight.
 		// Size the composer first, then project every dependent region once.
 		m.composer.SetWidth(maxInt(8, msg.Width-4))
+		persistAgentPreference := m.transitionAgentSurfaceForResize(previousMetrics)
 		m.syncOperatorLayout()
 		m.helpSearch.SetWidth(maxInt(16, minInt(48, msg.Width-12)))
 		m.commandPalette.SetMaxRows(commandPaletteRows(msg.Height))
+		m.clampAppListOffset()
+		m.followPaneReopenSelection()
 		m.clampBodyScroll()
+		if persistAgentPreference {
+			return m, m.persistPreferencesCmd()
+		}
 		return m, nil
 	case tea.MouseWheelMsg:
 		mouse := msg.Mouse()
@@ -465,6 +490,42 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.quitConfirmation || m.contextMenu.IsOpen() {
+			return m, nil
+		}
+		if m.responseDetailsVisible() {
+			if region, ok := frame.HitMap.Hit(mouse.X, mouse.Y); ok && region.Kind == components.HitResponse {
+				switch mouse.Button {
+				case tea.MouseWheelUp:
+					m.scrollResponse(-3)
+				case tea.MouseWheelDown:
+					m.scrollResponse(3)
+				}
+			}
+			return m, nil
+		}
+		if m.paneReopenVisible {
+			if region, ok := frame.HitMap.Hit(mouse.X, mouse.Y); ok && (region.Kind == components.HitPaneReopenRow || region.Kind == components.HitModal) {
+				switch mouse.Button {
+				case tea.MouseWheelUp:
+					m.paneReopenSelected -= 3
+				case tea.MouseWheelDown:
+					m.paneReopenSelected += 3
+				}
+				m.paneReopenSelectedID = ""
+				m.followPaneReopenSelection()
+			}
+			return m, nil
+		}
+		if m.appListVisible {
+			if region, ok := frame.HitMap.Hit(mouse.X, mouse.Y); ok && (region.Kind == components.HitRegisteredAppRow || region.Kind == components.HitModal) {
+				switch mouse.Button {
+				case tea.MouseWheelUp:
+					m.appInventory.Move(-3)
+				case tea.MouseWheelDown:
+					m.appInventory.Move(3)
+				}
+				m.followAppListSelection()
+			}
 			return m, nil
 		}
 		if m.helpVisible {
@@ -514,7 +575,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.inventoryVisible() {
-			metrics := layout.Compute(maxInt(m.width, 1), maxInt(m.height, 1), m.composer.Rows())
+			metrics := m.operatorMetrics()
 			if metrics.Panes.Contains(mouse.X, mouse.Y) {
 				switch mouse.Button {
 				case tea.MouseWheelUp:
@@ -550,6 +611,15 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.commandPalette.Move(1)
 				}
 				return m, nil
+			case components.HitStartCompletionRow:
+				if mouse.Button == tea.MouseWheelUp {
+					m.startCompletion.Move(-1)
+				} else if mouse.Button == tea.MouseWheelDown {
+					m.startCompletion.Move(1)
+				}
+				return m, nil
+			case components.HitStartCompletion:
+				return m, nil
 			case components.HitCommandPalette:
 				return m, nil
 			}
@@ -562,6 +632,9 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		frame := views.BuildShell(m.styles, m.shellData())
 		region, ok := frame.HitMap.Hit(mouse.X, mouse.Y)
+		if m.responseDetailsVisible() {
+			return m, nil
+		}
 		if m.codePickerVisible {
 			if !ok || (region.Kind != components.HitModal && region.Kind != components.HitCodePickerRow) {
 				m.closeCodePicker()
@@ -588,6 +661,23 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.paneReopenVisible {
+			if ok && region.Kind == components.HitPaneReopenRow {
+				m.paneReopenSelected = region.Index
+				m.paneReopenSelectedID = ""
+				m.paneReopenNotice = ""
+				m.followPaneReopenSelection()
+			}
+			return m, nil
+		}
+		if m.appListVisible {
+			if ok && region.Kind == components.HitRegisteredAppRow {
+				m.appInventory.SelectIndex(region.Index)
+				m.appListNotice = ""
+				m.followAppListSelection()
+			}
+			return m, nil
+		}
 		if m.helpVisible {
 			if ok && region.Kind == components.HitHelpResult {
 				m.helpSelected = region.Index
@@ -599,6 +689,12 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.diagnosticsExpanded || strings.TrimSpace(m.setupPanelForView()) != "" {
+			return m, nil
+		}
+		if m.startCompletionVisible() {
+			if ok && region.Kind == components.HitStartCompletionRow && m.startCompletion.SelectVisibleRow(region.Index) {
+				m.completeStartApp()
+			}
 			return m, nil
 		}
 		if m.commandPaletteVisible() {
@@ -623,6 +719,9 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case components.HitPaneCopyLogs:
 			m.paneManager.SelectPane(region.PaneID)
 			return m, m.copyPaneLogsCmd(region.PaneID)
+		case components.HitPaneRestart:
+			cmd := m.confirmPaneLifecycle(slash.KindRestart, region.PaneID)
+			return m, cmd
 		case components.HitPaneLogs:
 			m.setPrimaryFocus(interaction.FocusPanes)
 			if m.paneManager.SelectedPaneID() == region.PaneID {
@@ -642,13 +741,18 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.completeCommandPalette()
 			}
 			return m, nil
+		case components.HitStartCompletionRow:
+			if m.startCompletion.SelectVisibleRow(region.Index) {
+				m.completeStartApp()
+			}
+			return m, nil
 		}
 		return m, nil
 	case tea.PasteMsg:
 		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() {
 			return m, nil
 		}
-		if m.threadSwitcherVisible || m.codePickerVisible {
+		if m.threadSwitcherVisible || m.codePickerVisible || m.appListVisible || m.paneReopenVisible {
 			return m, nil
 		}
 		if m.helpVisible {
@@ -663,12 +767,12 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.beginPaste(msg.Content)
 	case pasteReadyMsg:
-		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() || m.threadSwitcherVisible || m.codePickerVisible || m.helpVisible {
+		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() || m.threadSwitcherVisible || m.codePickerVisible || m.appListVisible || m.paneReopenVisible || m.helpVisible {
 			return m.cancelPendingPaste(), nil
 		}
 		return m.completePaste(msg), nil
 	case clipboardPasteLoadedMsg:
-		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() || m.threadSwitcherVisible || m.codePickerVisible || m.helpVisible {
+		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() || m.threadSwitcherVisible || m.codePickerVisible || m.appListVisible || m.paneReopenVisible || m.helpVisible {
 			return m, nil
 		}
 		if msg.Err != nil {
@@ -714,6 +818,9 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.threadSwitcherVisible {
 			return m.handleThreadSwitcherKey(msg)
 		}
+		if m.paneReopenVisible {
+			return m.handlePaneReopenKey(msg)
+		}
 		if isThreadSwitcherShortcut(msg) {
 			return m.openThreadSwitcher()
 		}
@@ -739,74 +846,24 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.appListVisible {
+			return m.handleAppListKey(msg)
+		}
 		if m.helpVisible {
 			return m.handleHelpKey(msg)
+		}
+		if keymap.Matches(msg, m.keymap.AgentPane) {
+			return m.toggleAgentSurface()
+		}
+		if m.responseDetailsVisible() || m.interaction.Owner() == interaction.OwnerResponse {
+			return m.handleAgentSurfaceKey(msg, m.responseDetailsVisible())
 		}
 		if m.commandActive {
 			return m.handleCommandInput(msg)
 		}
-		if m.interaction.Owner() == interaction.OwnerResponse {
-			// Global console bindings remain global even while the response owns
-			// navigation. Resolve them before adopting printable text as a draft.
-			if keymap.Matches(msg, m.keymap.Quit) {
-				if strings.TrimSpace(m.commandInput) != "" {
-					m.quitConfirmation = true
-					m.interaction.OpenModal(interaction.ModalQuitConfirmation)
-					m.refreshAssistantPrompt()
-					return m, nil
-				}
-				m.close()
-				return m, tea.Quit
-			}
-			if keymap.Matches(msg, m.keymap.Help) {
-				cmd := m.openHelp()
-				m.diagnosticsExpanded = false
-				return m, cmd
-			}
-			if keymap.Matches(msg, m.keymap.Diagnostics) {
-				m.toggleDiagnostics()
-				return m, nil
-			}
-			if msg.Text == "b" || msg.Keystroke() == "b" {
-				return m.openCodePicker()
-			}
-			if isCopyShortcut(msg) || keymap.Matches(msg, m.keymap.CopyLogs) {
-				payload := response.SanitizeTerminalText(strings.Join(m.assistantHistoryForView(), "\n\n"))
-				if strings.TrimSpace(payload) == "" {
-					m.addDiagnostic("response_copy_empty", "info", "There is no Agent response to copy.")
-					return m, nil
-				}
-				return m, writeClipboardCmd(payload)
-			}
-			switch {
-			case keymap.Matches(msg, m.keymap.Up):
-				m.scrollResponse(-1)
-				return m, nil
-			case keymap.Matches(msg, m.keymap.Down):
-				m.scrollResponse(1)
-				return m, nil
-			case keymap.Matches(msg, m.keymap.PageUp):
-				m.scrollResponse(-maxInt(1, m.height/4))
-				return m, nil
-			case keymap.Matches(msg, m.keymap.PageDown):
-				m.scrollResponse(maxInt(1, m.height/4))
-				return m, nil
-			case keymap.Matches(msg, m.keymap.Home):
-				m.gotoResponseTop()
-				return m, nil
-			case keymap.Matches(msg, m.keymap.End), keymap.Matches(msg, m.keymap.Follow):
-				m.gotoResponseBottom()
-				return m, nil
-			case keymap.Matches(msg, m.keymap.Escape):
-				m.setPrimaryFocus(interaction.FocusPanes)
-				return m, nil
-			}
-			if updated, ok := m.startCommandInput(msg); ok {
-				return updated, nil
-			}
-			// Response owns all remaining keys. In particular, Enter is inert
-			// here and must not fall through to pane focus.
-			return m, nil
+		if m.interaction.Owner() == interaction.OwnerPanes && keymap.Matches(msg, m.keymap.StopSelected) {
+			cmd := m.confirmPaneLifecycle(slash.KindStop, "")
+			return m, cmd
 		}
 		if isPasteShortcut(msg) {
 			return m, readClipboardCmd()
@@ -942,6 +999,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case commands.StateLoadedMsg:
 		wasOffline := m.connectionStatus != "connected"
+		paneRefreshID := m.appListPaneRefreshID
 		m.state = msg.State
 		m.connectionStatus = "connected"
 		m.daemonRetryAttempt = 0
@@ -955,6 +1013,29 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearDiagnosticsByPrefix("daemon_bootstrap_")
 		m.paneManager.ApplyState(msg.State)
 		m.appInventory.ApplyState(msg.State)
+		m.refreshStartCompletion()
+		m.appListRefreshing = false
+		if m.appListVisible {
+			if paneRefreshID != "" {
+				m.appListPaneRefreshID = ""
+				if len(m.paneManager.PaneIDsForApp(paneRefreshID)) == 0 {
+					m.appListNotice = "The app is running, but no monitoring pane is present in current daemon state."
+				} else {
+					m.appListNotice = "The monitoring pane is now available; press Enter to open it."
+				}
+			} else {
+				m.appListNotice = ""
+			}
+			m.followAppListSelection()
+		}
+		if m.paneReopenVisible {
+			if len(m.paneReopenCandidates()) == 0 {
+				m.closePaneReopen()
+				m.addAssistantMessage("No hidden pane remains available after the daemon state refresh.")
+			} else {
+				m.followPaneReopenSelection()
+			}
+		}
 		if m.hasNoRegisteredApps() && !m.setupSession.Active() {
 			m.setupSession = setupwizard.NoApps(m.cfg.CurrentDirectory)
 		}
@@ -983,6 +1064,11 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, batchCommands(cmds...)
 	case commands.StateFailedMsg:
 		m.connectionStatus = "offline"
+		m.appListRefreshing = false
+		m.appListPaneRefreshID = ""
+		if m.appListVisible {
+			m.appListNotice = "Could not refresh registered apps; showing last known daemon state."
+		}
 		m.eventStatus = "waiting"
 		m.agentStatus = "waiting"
 		if m.stream != nil {
@@ -1307,8 +1393,10 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.closeAgentStream()
 		m.agentSession = msg.Session
 		m.syncComposerHistoryScope()
-		m.agentStatus = "session"
 		if msg.Session != nil {
+			if m.agentStatus != "sending" {
+				m.agentStatus = agentStatusFromSession(msg.Session)
+			}
 			m.restoreThreadResponse(msg.Session.ID)
 			m.restoreThreadDraft(msg.Session.ID)
 			m.agentSessions = upsertAgentSession(m.agentSessions, *msg.Session)
@@ -1368,7 +1456,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.agentStatus = "ready_no_thread"
 			return m, nil
 		}
-		m.agentStatus = "session"
+		m.agentStatus = agentStatusFromSession(msg.Session)
 		m.agentSessions = upsertAgentSession(m.agentSessions, *msg.Session)
 		m.addAssistantMessage("Active Operator Agent thread: " + agentSessionLabel(*msg.Session) + ".")
 		return m, m.connectAgentEventsCmd(msg.Session.ID)
@@ -1402,7 +1490,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.restoreThreadDraft(msg.Session.ID)
 			m.agentSessions = upsertAgentSession(m.agentSessions, *msg.Session)
 			m.addAssistantMessage("Switched Operator Agent thread to " + agentSessionLabel(*msg.Session) + ".")
-			m.agentStatus = "session"
+			m.agentStatus = agentStatusFromSession(msg.Session)
 			return m, m.connectAgentEventsCmd(msg.Session.ID)
 		}
 		m.agentStatus = "ready_no_thread"
@@ -1473,7 +1561,13 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.agentStream = msg.Stream
 		m.agentInitialReplay = true
-		m.agentStatus = "streaming"
+		m.agentReplayStatus = ""
+		switch m.agentStatus {
+		case "sending", "running", "waiting", "failed", "idle":
+			// Preserve semantic run state across transport establishment.
+		default:
+			m.agentStatus = agentStatusFromSession(m.agentSession)
+		}
 		m.clearDiagnostics(agentEventDisconnectedCode)
 		return m, commands.NextAgentEventCmd(m.ctx, msg.Stream, msg.SessionID, msg.Generation)
 	case commands.AgentEventMsg:
@@ -1488,7 +1582,6 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.agentStream = msg.Stream
 		if msg.Event.Type != "stream.reconnecting" {
-			m.agentStatus = "streaming"
 			m.clearDiagnostics(agentEventDisconnectedCode)
 		}
 		m.applyAgentRunEvent(msg.Event)
@@ -1501,6 +1594,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.agentStreamSessionID = ""
 		m.agentStreamGeneration++
 		m.agentInitialReplay = false
+		m.agentReplayStatus = ""
 		if m.agentSession != nil {
 			m.agentStatus = "disconnected"
 			m.addDiagnostic(agentEventDisconnectedCode, "warning", fmt.Sprintf("Operator Agent event stream disconnected: %v", msg.Err))
@@ -1517,7 +1611,11 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.authorizedProjectRoots = nil
 		m.pendingSubmissionDraft = nil
 		if msg.Result != nil {
-			m.agentStatus = "idle"
+			if m.agentStatus == "sending" {
+				if status := agentStatusFromRunStatus(msg.Result.Run.Status); status != "" {
+					m.agentStatus = status
+				}
+			}
 			for _, diagnostic := range msg.Result.Diagnostics {
 				m.addDiagnostic(agentDiagnosticCode(diagnostic), valueOr(diagnostic.Severity, "info"), agentDiagnosticMessage(diagnostic))
 			}
@@ -1629,10 +1727,16 @@ func (m RootModel) handleBlockingModalKey(msg tea.KeyPressMsg) (RootModel, tea.C
 		m.pendingConfirm = nil
 		m.interaction.CloseModal()
 		m.resetBodyScroll()
+		if m.appListVisible {
+			m.appListNotice = "Start cancelled; no lifecycle request was sent."
+		}
 		m.addAssistantMessage("Confirmation cancelled.")
 		return m, nil
 	}
 	if keymap.Matches(msg, m.keymap.Enter) {
+		if m.appListVisible {
+			m.closeAppList()
+		}
 		m.interaction.CloseModal()
 		m.resetBodyScroll()
 		return m, m.executePendingConfirmation()
@@ -1726,6 +1830,8 @@ func (m RootModel) shellData() views.ShellData {
 		Usage:               m.usage.Snapshot(),
 		ThreadSwitcher:      m.threadSwitcherDataForView(),
 		CodePicker:          m.codePickerDataForView(),
+		RegisteredApps:      m.appListDataForView(),
+		PaneReopen:          m.paneReopenDataForView(),
 		KeyMap:              m.keymap,
 		AssistantPrompt:     m.assistantPrompt,
 		AssistantHistory:    m.assistantHistoryForView(),
@@ -1740,6 +1846,7 @@ func (m RootModel) shellData() views.ShellData {
 		PageCount:           m.paneManager.PageCount(),
 		ClipboardWriteReady: m.clipboardWriteReady,
 		CommandPalette:      m.commandPaletteDataForView(),
+		StartCompletion:     m.startCompletionDataForView(),
 		ComposerView:        composerView.View(),
 		ComposerRows:        composerView.Rows(),
 		ComposerPasting:     m.paste != nil,
@@ -1748,12 +1855,17 @@ func (m RootModel) shellData() views.ShellData {
 		ResponseFollow:      m.responseFollow,
 		ResponseNewOutput:   m.responseNewOutput,
 		ResponseOffset:      m.responseOffset,
+		AgentPaneExpanded:   !m.preferences.Layout.AgentPaneCollapsed,
+		ResponseDetails:     m.responseDetailsVisible(),
 		PrimaryFocus:        string(m.interaction.Focus),
 	}
+	if data.ResponseDetails {
+		data.PrimaryFocus = string(interaction.FocusResponse)
+	}
 	if data.ResponseFollow {
-		data.ResponseOffset = views.ResponseBottomOffset(data)
+		data.ResponseOffset = views.ResponseBottomOffset(m.styles, data)
 	} else {
-		data.ResponseOffset = minInt(maxInt(0, data.ResponseOffset), views.ResponseScrollMax(data))
+		data.ResponseOffset = minInt(maxInt(0, data.ResponseOffset), views.ResponseScrollMax(m.styles, data))
 	}
 	return data
 }
@@ -1895,10 +2007,14 @@ func (m *RootModel) addAssistantMessage(message string) {
 }
 
 func (m *RootModel) refreshAssistantPrompt() {
-	// Composer DynamicHeight can change after typing, paste, history adoption,
-	// and thread restoration without a WindowSizeMsg. Every prompt refresh is
-	// therefore also a cheap synchronization point for pane projection.
-	defer m.syncOperatorLayout()
+	// Composer DynamicHeight can change without a WindowSizeMsg. Re-project
+	// only when that geometry actually changed; Agent status/output refreshes
+	// must not resize panes or remap pages.
+	defer func() {
+		if m.layoutComposerRows != m.composer.Rows() {
+			m.syncOperatorLayout()
+		}
+	}()
 	if m.pendingAgentApproval != nil && m.interaction.Modal == interaction.ModalNone {
 		m.resetBodyScroll()
 		m.interaction.OpenModal(interaction.ModalAgentApproval)
@@ -1951,6 +2067,31 @@ func (m RootModel) handleCommandInput(msg tea.KeyPressMsg) (RootModel, tea.Cmd) 
 		}
 		return m, writeClipboardCmd(payload)
 	}
+	if m.startCompletionVisible() {
+		switch {
+		case keymap.Matches(msg, m.keymap.Tab):
+			m.completeStartApp()
+			return m, nil
+		case keymap.Matches(msg, m.keymap.Up):
+			m.startCompletion.Move(-1)
+			return m, nil
+		case keymap.Matches(msg, m.keymap.Down):
+			m.startCompletion.Move(1)
+			return m, nil
+		case keymap.Matches(msg, m.keymap.PageUp):
+			m.startCompletion.Page(-1)
+			return m, nil
+		case keymap.Matches(msg, m.keymap.PageDown):
+			m.startCompletion.Page(1)
+			return m, nil
+		case keymap.Matches(msg, m.keymap.Home):
+			m.startCompletion.Home()
+			return m, nil
+		case keymap.Matches(msg, m.keymap.End):
+			m.startCompletion.End()
+			return m, nil
+		}
+	}
 	if m.commandPaletteVisible() {
 		switch {
 		case keymap.Matches(msg, m.keymap.Tab):
@@ -1999,6 +2140,10 @@ func (m RootModel) handleCommandInput(msg tea.KeyPressMsg) (RootModel, tea.Cmd) 
 		return m, nil
 	}
 	if keymap.Matches(msg, m.keymap.Enter) {
+		if m.shouldCompleteStartOnEnter() {
+			m.completeStartApp()
+			return m, nil
+		}
 		if m.shouldCompleteCommandOnEnter() {
 			m.completeCommandPalette()
 			return m, nil
@@ -2038,6 +2183,13 @@ func (m RootModel) handleCommandInput(msg tea.KeyPressMsg) (RootModel, tea.Cmd) 
 		m.syncCommandPalette()
 		m.refreshAssistantPrompt()
 		return m, nil
+	}
+	if isComposerWordEditingShortcut(msg) {
+		command := m.composer.Update(msg)
+		m.commandInput = m.composer.Value()
+		m.syncCommandPalette()
+		m.refreshAssistantPrompt()
+		return m, command
 	}
 	if isBackspace(msg) {
 		m.composer.Backspace()
@@ -2170,6 +2322,10 @@ func (m *RootModel) syncComposer() {
 }
 
 func (m *RootModel) setPrimaryFocus(focus interaction.PrimaryFocus) {
+	if focus == interaction.FocusResponse && m.interaction.Focus != interaction.FocusResponse &&
+		m.interaction.Modal == interaction.ModalNone && m.interaction.Transient == interaction.TransientNone {
+		m.agentPreviousFocus = valueOrFocus(m.interaction.Focus, interaction.FocusPanes)
+	}
 	m.interaction.SetFocus(focus)
 	if m.interaction.Focus != focus {
 		return
@@ -2204,8 +2360,57 @@ func (m *RootModel) restorePendingSubmissionDraft() {
 }
 
 func (m *RootModel) syncOperatorLayout() {
-	metrics := layout.Compute(m.width, m.height, m.composer.Rows())
+	selectedID := m.paneManager.SelectedPaneID()
+	focusedID := ""
+	if focused := m.paneManager.FocusedPane(); focused != nil {
+		focusedID = focused.ID
+	}
+	metrics := m.operatorMetrics()
 	m.paneManager.Resize(metrics.Panes.Width, metrics.Panes.Height)
+	if focusedID != "" && m.paneManager.SelectPane(focusedID) {
+		m.paneManager.FocusSelected()
+	} else if selectedID != "" {
+		m.paneManager.SelectPane(selectedID)
+	}
+	m.preferences.Layout.LastPage = m.paneManager.Page()
+	m.layoutComposerRows = m.composer.Rows()
+}
+
+func (m RootModel) operatorMetrics() layout.Metrics {
+	return layout.ComputeWithOptions(m.width, m.height, m.composer.Rows(), layout.Options{
+		AgentExpanded: !m.preferences.Layout.AgentPaneCollapsed,
+	})
+}
+
+func (m RootModel) responseDetailsVisible() bool {
+	return m.interaction.Transient == interaction.TransientResponseDetails
+}
+
+func (m *RootModel) restoreAgentPreviousFocus() {
+	target := valueOrFocus(m.agentPreviousFocus, interaction.FocusPanes)
+	if target == interaction.FocusResponse {
+		target = interaction.FocusPanes
+	}
+	m.setPrimaryFocus(target)
+}
+
+func (m *RootModel) transitionAgentSurfaceForResize(previous layout.Metrics) bool {
+	next := m.operatorMetrics()
+	if previous.AgentDocked && !next.AgentDockable && m.interaction.Transient == interaction.TransientNone && m.interaction.Modal == interaction.ModalNone {
+		if m.interaction.Focus == interaction.FocusResponse {
+			m.restoreAgentPreviousFocus()
+		}
+		m.interaction.OpenTransient(interaction.TransientResponseDetails)
+		return false
+	}
+	if m.responseDetailsVisible() && next.AgentDockable {
+		m.interaction.CloseTransient()
+		changed := m.preferences.Layout.AgentPaneCollapsed
+		m.preferences.Layout.AgentPaneCollapsed = false
+		m.setPrimaryFocus(interaction.FocusResponse)
+		return changed
+	}
+	return false
 }
 
 func (m RootModel) submitAssistantInput(input string) (RootModel, tea.Cmd) {
@@ -2342,6 +2547,9 @@ func (m RootModel) submitSlashCommand(input string) (RootModel, tea.Cmd) {
 		m.restorePendingSubmissionDraft()
 		return m, nil
 	}
+	if command.Kind == slash.KindStart {
+		return m.submitStartCommand(command)
+	}
 
 	if command.Kind == slash.KindRegister && !command.Confirm {
 		request, err := m.registrationPreviewRequest(command.Path, command.NoVerify)
@@ -2367,6 +2575,50 @@ func (m RootModel) submitSlashCommand(input string) (RootModel, tea.Cmd) {
 	}
 
 	return m.executeSlashCommand(command)
+}
+
+func (m RootModel) submitStartCommand(command slash.ParsedCommand) (RootModel, tea.Cmd) {
+	if strings.TrimSpace(command.Target) == "" {
+		return m.executeSlashCommand(command)
+	}
+	if m.connectionStatus != "connected" {
+		m.addAssistantMessage("Start is unavailable until the Relaybase daemon is connected; use /daemon repair if it remains offline.")
+		m.restorePendingSubmissionDraft()
+		return m, nil
+	}
+	item, err := m.appInventory.ResolveApp(command.Target)
+	if err != nil {
+		m.addAssistantMessage(err.Error())
+		m.restorePendingSubmissionDraft()
+		return m, nil
+	}
+	status := strings.ToLower(strings.TrimSpace(item.Status))
+	switch status {
+	case "running":
+		return m.openRunningAppPane(item.ID)
+	case "starting", "stopping":
+		m.addAssistantMessage("App " + item.ID + " is " + valueOr(item.Status, status) + "; wait for the daemon transition to finish.")
+		m.restorePendingSubmissionDraft()
+		return m, nil
+	}
+	if !item.CanStart() {
+		m.addAssistantMessage(registeredAppUnavailableMessage(item))
+		m.restorePendingSubmissionDraft()
+		return m, nil
+	}
+	command.Target = item.ID
+	if command.Confirm {
+		return m.executeSlashCommand(command)
+	}
+	confirmation, err := m.prepareConfirmation(command)
+	if err != nil {
+		m.addAssistantMessage(err.Error())
+		m.restorePendingSubmissionDraft()
+		return m, nil
+	}
+	m.pendingConfirm = confirmation
+	m.refreshAssistantPrompt()
+	return m, nil
 }
 
 func (m RootModel) submitNaturalCommand(parsed assistant.ParsedInput) (RootModel, tea.Cmd) {
@@ -2593,6 +2845,23 @@ func (m RootModel) validateNaturalCommand(command slash.ParsedCommand) error {
 
 func (m RootModel) prepareConfirmation(command slash.ParsedCommand) (*confirmationRequest, error) {
 	switch command.Kind {
+	case slash.KindStart:
+		item, err := m.appInventory.ResolveApp(command.Target)
+		if err != nil {
+			return nil, err
+		}
+		if !item.CanStart() {
+			return nil, errors.New(registeredAppUnavailableMessage(item))
+		}
+		target := slash.ResolvedTarget{Description: "app " + valueOr(item.Name, item.ID), AppIDs: []string{item.ID}}
+		return &confirmationRequest{
+			Action:          "start",
+			Target:          target,
+			Risk:            lifecycleRisk("start"),
+			Expected:        "Daemon returns an operation id for one registered app request.",
+			Command:         command,
+			LifecycleAction: "start",
+		}, nil
 	case slash.KindLaunchPackage, slash.KindDeletePackage:
 		definition, err := m.resolveAppPackage(command.PackageName)
 		if err != nil {
@@ -2749,6 +3018,18 @@ func (m *RootModel) executePendingConfirmation() tea.Cmd {
 
 func (m RootModel) executeSlashCommand(command slash.ParsedCommand) (RootModel, tea.Cmd) {
 	switch command.Kind {
+	case slash.KindStart:
+		if strings.TrimSpace(command.Target) == "" {
+			return m, m.openAppList()
+		}
+		item, err := m.appInventory.ResolveApp(command.Target)
+		if err != nil {
+			m.addAssistantMessage(err.Error())
+			m.restorePendingSubmissionDraft()
+			return m, nil
+		}
+		m.addAssistantMessage("Requesting start for app " + valueOr(item.Name, item.ID) + ".")
+		return m, commands.LifecycleRequestBatchCmd(m.ctx, m.client, []string{item.ID}, "start")
 	case slash.KindCreatePackage:
 		m.addAssistantMessage(fmt.Sprintf("Creating package %s with %d registered app reference(s).", command.PackageName, len(command.Members)))
 		return m, commands.CreateAppPackageCmd(m.ctx, m.client, command.PackageName, command.Members)
@@ -2846,6 +3127,9 @@ func (m RootModel) executeSlashCommand(command slash.ParsedCommand) (RootModel, 
 	case slash.KindHelp:
 		m.addAssistantMessage("Showing command help.")
 		return m, m.openHelp()
+	case slash.KindList:
+		m.addAssistantMessage("Showing registered apps.")
+		return m, m.openAppList()
 	case slash.KindUsage:
 		m.usage.Open()
 		m.interaction.OpenModal(interaction.ModalUsage)
@@ -3527,9 +3811,8 @@ func (m *RootModel) executeContextMenuSelection() tea.Cmd {
 		}
 		return m.persistPreferencesCmd()
 	case contextmenu.ActionPaneReopen:
-		if m.paneManager.ReopenSelectedOrFirstAvailable() {
-			m.addAssistantMessage("Reopened pane.")
-			return m.persistPreferencesCmd()
+		if m.openPaneReopen("") {
+			return nil
 		}
 		m.addAssistantMessage("No hidden or stopped pane is available to reopen.")
 		return nil
@@ -3609,6 +3892,26 @@ func (m *RootModel) confirmMenuCommand(command slash.ParsedCommand) tea.Cmd {
 	m.pendingConfirm = confirmation
 	m.refreshAssistantPrompt()
 	return nil
+}
+
+func (m *RootModel) confirmPaneLifecycle(kind string, paneID string) tea.Cmd {
+	action := "Stop"
+	if kind == slash.KindRestart {
+		action = "Restart"
+	}
+	if paneID != "" && !m.paneManager.SelectPane(paneID) {
+		m.addAssistantMessage(action + " is unavailable: the selected pane is no longer present.")
+		return nil
+	}
+	if m.paneManager.SelectedPane() == nil {
+		m.addAssistantMessage(action + " is unavailable: no pane is selected.")
+		return nil
+	}
+	if m.connectionStatus != "connected" {
+		m.addAssistantMessage(action + " is unavailable until the Relaybase daemon is connected; use /daemon repair if it remains offline.")
+		return nil
+	}
+	return m.confirmMenuCommand(slash.ParsedCommand{Kind: kind, Target: "current"})
 }
 
 func menuUnavailableMessage(item contextmenu.Item) string {
@@ -3784,7 +4087,9 @@ func currentSetupPlanID(state setupwizard.State) string {
 func (m *RootModel) applyAgentRunEvent(event relaybaseclient.AgentRunEvent) {
 	switch event.Type {
 	case "stream.reconnecting":
-		m.agentStatus = "reconnecting"
+		if intField(event.Data, "attempt") < 2 {
+			return
+		}
 		m.addOrReplaceDiagnostic(
 			agentEventDisconnectedCode,
 			"warning",
@@ -3793,8 +4098,10 @@ func (m *RootModel) applyAgentRunEvent(event relaybaseclient.AgentRunEvent) {
 	case "model.delta":
 		if delta := stringField(event.Data, "delta"); delta != "" {
 			m.agentDelta += delta
-			m.lastAssistantLine = "Agent: " + assistant.SanitizeText(m.agentDelta)
-			m.refreshAssistantPrompt()
+			if !m.agentInitialReplay {
+				m.lastAssistantLine = "Agent: " + assistant.SanitizeText(m.agentDelta)
+				m.refreshAssistantPrompt()
+			}
 		}
 	case "answer":
 		if content := stringField(event.Data, "content"); content != "" {
@@ -3812,6 +4119,10 @@ func (m *RootModel) applyAgentRunEvent(event relaybaseclient.AgentRunEvent) {
 		}
 	case "stream.replay_completed":
 		m.agentInitialReplay = false
+		if m.agentReplayStatus != "" {
+			m.agentStatus = m.agentReplayStatus
+			m.agentReplayStatus = ""
+		}
 	case "blocked":
 		m.addAssistantMessage(firstNonEmpty(stringField(event.Data, "content"), diagnosticMessageFromData(event.Data), "Operator Agent request was blocked."))
 	case "clarification_needed":
@@ -3871,17 +4182,25 @@ func (m *RootModel) applyAgentRunEvent(event relaybaseclient.AgentRunEvent) {
 			m.applyTuiProposedAction(action)
 		}
 	case "run.started":
-		m.agentStatus = "running"
+		m.setAgentRunStatus("running")
 	case "run.completed":
 		m.flushAgentDelta()
-		m.agentStatus = "idle"
+		m.setAgentRunStatus("idle")
 	case "run.failed":
 		m.flushAgentDelta()
-		m.agentStatus = "failed"
+		m.setAgentRunStatus("failed")
 		if message := diagnosticMessageFromData(event.Data); message != "" {
 			m.addAssistantMessage("Operator Agent run failed: " + message)
 		}
 	}
+}
+
+func (m *RootModel) setAgentRunStatus(status string) {
+	if m.agentInitialReplay {
+		m.agentReplayStatus = status
+		return
+	}
+	m.agentStatus = status
 }
 
 func (m *RootModel) flushAgentDelta() {
@@ -4430,6 +4749,7 @@ func (m *RootModel) closeAgentStream() {
 	m.agentStreamSessionID = ""
 	m.agentStreamGeneration++
 	m.agentInitialReplay = false
+	m.agentReplayStatus = ""
 }
 
 func (m *RootModel) connectAgentEventsCmd(sessionID string) tea.Cmd {
@@ -4487,7 +4807,7 @@ func (m RootModel) assistantHistoryForView() []string {
 		}
 		combined = append(combined, m.assistantHistory...)
 	}
-	if delta := strings.TrimSpace(m.agentDelta); delta != "" {
+	if delta := strings.TrimSpace(m.agentDelta); delta != "" && !m.agentInitialReplay {
 		combined = append(combined, "Agent: "+assistant.SanitizeText(delta))
 	}
 	if len(combined) == 0 {
@@ -5172,6 +5492,8 @@ func naturalCommandResultMessage(command slash.ParsedCommand) string {
 		return "Theme command applied."
 	case slash.KindHelp:
 		return "Help command applied."
+	case slash.KindList:
+		return "Registered app list opened."
 	default:
 		return "Command applied."
 	}
@@ -5179,7 +5501,7 @@ func naturalCommandResultMessage(command slash.ParsedCommand) string {
 
 func lifecycleActionForCommand(command slash.ParsedCommand) string {
 	switch command.Kind {
-	case slash.KindLaunch:
+	case slash.KindLaunch, slash.KindStart:
 		return "start"
 	case slash.KindRestart:
 		return "restart"
@@ -5248,6 +5570,15 @@ func isBackspace(msg tea.KeyPressMsg) bool {
 	}
 	switch msg.Keystroke() {
 	case "backspace", "ctrl+h":
+		return true
+	default:
+		return false
+	}
+}
+
+func isComposerWordEditingShortcut(msg tea.KeyPressMsg) bool {
+	switch msg.Keystroke() {
+	case "ctrl+left", "ctrl+right", "ctrl+backspace", "ctrl+delete", "ctrl+home", "ctrl+end":
 		return true
 	default:
 		return false
@@ -5414,6 +5745,36 @@ func agentStatusFromConfig(config *relaybaseclient.AgentConfig) string {
 		return "needs_config"
 	}
 	return "ready"
+}
+
+func agentStatusFromSession(session *relaybaseclient.AgentSession) string {
+	if session == nil || strings.TrimSpace(session.ID) == "" {
+		return "ready_no_thread"
+	}
+	if len(session.Runs) == 0 {
+		return "idle"
+	}
+	if status := agentStatusFromRunStatus(session.Runs[len(session.Runs)-1].Status); status != "" {
+		return status
+	}
+	return "idle"
+}
+
+func agentStatusFromRunStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "queued":
+		return "sending"
+	case "running":
+		return "running"
+	case "waiting_for_approval":
+		return "waiting"
+	case "completed":
+		return "idle"
+	case "failed", "cancelled":
+		return "failed"
+	default:
+		return ""
+	}
 }
 
 func agentGatewayConfigured(config *relaybaseclient.AgentConfig) bool {
@@ -5691,7 +6052,7 @@ func registrationPreviewMessage(preview *relaybaseclient.RegistrationSetupResult
 	} else if preview.VerificationIntent.WillStart {
 		parts = append(parts, "confirmation briefly starts, checks, and stops the app")
 	}
-	if !preview.Started {
+	if !preview.Started && preview.Status != "registered_cleanup_failed" {
 		parts = append(parts, "app ends stopped")
 	}
 	return assistant.SanitizeText(strings.Join(parts, "; ") + ".")
@@ -5975,7 +6336,7 @@ func (m *RootModel) handleBodyScrollKey(msg tea.KeyPressMsg) bool {
 	}
 	page := maxInt(3, dashboardHeight(m.height)-2)
 	if m.inventoryVisible() {
-		metrics := layout.Compute(maxInt(m.width, 1), maxInt(m.height, 1), m.composer.Rows())
+		metrics := m.operatorMetrics()
 		page = maxInt(1, metrics.Panes.Height-1)
 	}
 	switch {
@@ -6036,7 +6397,7 @@ func (m *RootModel) requestSelectedInventoryStart() tea.Cmd {
 		}
 		return nil
 	}
-	confirmation, err := m.prepareConfirmation(slash.ParsedCommand{Kind: slash.KindLaunch, Target: item.ID})
+	confirmation, err := m.prepareConfirmation(slash.ParsedCommand{Kind: slash.KindStart, Target: item.ID})
 	if err != nil {
 		m.addAssistantMessage(err.Error())
 		return nil
@@ -6066,7 +6427,7 @@ func (m *RootModel) followPaneSelection(direction int) {
 }
 
 func (m *RootModel) ensureBodyLineVisible(line int) {
-	metrics := layout.Compute(maxInt(m.width, 1), maxInt(m.height, 1), m.composer.Rows())
+	metrics := m.operatorMetrics()
 	viewport := maxInt(1, metrics.Panes.Height)
 	if views.BodyScrollMax(m.styles, m.shellData()) > 0 && viewport > 1 {
 		viewport--

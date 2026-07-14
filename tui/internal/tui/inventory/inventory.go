@@ -1,6 +1,8 @@
 package inventory
 
 import (
+	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -12,6 +14,7 @@ import (
 type Item struct {
 	ID        string
 	Name      string
+	Directory string
 	Status    string
 	Readiness string
 	Route     string
@@ -45,6 +48,7 @@ func (m *Manager) ApplyState(state *relaybaseclient.RelaybaseState) {
 			byID[id] = Item{
 				ID:        id,
 				Name:      firstNonEmpty(app.Name, id),
+				Directory: firstNonEmpty(app.CWD, projectDirectory(app.ManifestPath)),
 				Status:    firstNonEmpty(app.RuntimeStatus, "stopped"),
 				Readiness: app.ReadinessState,
 				Route:     app.Route,
@@ -96,6 +100,23 @@ func (m *Manager) Move(delta int) {
 	m.clampSelection()
 }
 
+func (m *Manager) SelectIndex(index int) {
+	m.selectedIndex = index
+	m.clampSelection()
+}
+
+// SelectID selects one registered app by its stable daemon id. It returns
+// false without changing selection when that app is no longer present.
+func (m *Manager) SelectID(id string) bool {
+	for index, item := range m.items {
+		if item.ID == id {
+			m.selectedIndex = index
+			return true
+		}
+	}
+	return false
+}
+
 func (m Manager) Items() []Item {
 	items := make([]Item, len(m.items))
 	copy(items, m.items)
@@ -121,6 +142,49 @@ func (m Manager) SelectedID() string {
 		return ""
 	}
 	return selected.ID
+}
+
+func (m Manager) ItemByID(id string) (Item, bool) {
+	for _, item := range m.items {
+		if item.ID == id {
+			return item, true
+		}
+	}
+	return Item{}, false
+}
+
+// ResolveApp accepts a stable app id or one unique registered display name.
+// Exact ids take precedence over names so completion output remains
+// unambiguous even when another app's display name happens to equal an id.
+func (m Manager) ResolveApp(target string) (Item, error) {
+	normalized := strings.ToLower(strings.TrimSpace(target))
+	if normalized == "" {
+		return Item{}, fmt.Errorf("Choose a registered app with /start or provide an exact app id")
+	}
+	for _, item := range m.items {
+		if strings.ToLower(strings.TrimSpace(item.ID)) == normalized {
+			return item, nil
+		}
+	}
+	matches := []Item{}
+	for _, item := range m.items {
+		if strings.ToLower(strings.TrimSpace(item.Name)) == normalized {
+			matches = append(matches, item)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		return Item{}, fmt.Errorf("Unknown registered app %q. Use /start and Tab to choose an app id", strings.TrimSpace(target))
+	default:
+		ids := make([]string, 0, len(matches))
+		for _, item := range matches {
+			ids = append(ids, item.ID)
+		}
+		sort.Strings(ids)
+		return Item{}, fmt.Errorf("Registered app name %q is ambiguous. Choose one app id: %s", strings.TrimSpace(target), strings.Join(ids, ", "))
+	}
 }
 
 func (m Manager) SelectedIndex() int {
@@ -156,6 +220,14 @@ func mergeComponent(byID map[string]Item, component relaybaseclient.AppComponent
 	item.Route = firstNonEmpty(component.Route.Label(), item.Route)
 	item.LastError = firstNonEmpty(component.LastError, item.LastError)
 	byID[id] = item
+}
+
+func projectDirectory(manifestPath string) string {
+	trimmed := strings.TrimSpace(manifestPath)
+	if trimmed == "" {
+		return ""
+	}
+	return filepath.Clean(filepath.Dir(trimmed))
 }
 
 func firstNonEmpty(values ...string) string {

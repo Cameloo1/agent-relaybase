@@ -4,7 +4,15 @@ package layout
 
 import "github.com/cameloo/relaybase/tui/internal/tui/components"
 
-const minimumPaneHeightWithLog = 9
+const (
+	minimumPaneHeightWithLog = 9
+	minimumAgentWidth        = 36
+	minimumWorkspaceWidth    = 80
+)
+
+type Options struct {
+	AgentExpanded bool
+}
 
 type Mode string
 
@@ -21,14 +29,23 @@ type Metrics struct {
 	ResizeRequired bool
 	Rail           components.Rect
 	Panes          components.Rect
-	Response       components.Rect
+	Agent          components.Rect
+	AgentDockable  bool
+	AgentDocked    bool
 	Composer       components.Rect
 	PaletteAnchor  components.Rect
 	Modal          components.Rect
 }
 
-// Compute is the only layout arithmetic for the operator shell.
+// Compute projects the default operator shell, where the Agent surface is
+// expanded whenever the terminal can preserve both sides of the dock.
 func Compute(width, height, composerRows int) Metrics {
+	return ComputeWithOptions(width, height, composerRows, Options{AgentExpanded: true})
+}
+
+// ComputeWithOptions is the only layout arithmetic for the operator shell.
+// The Agent divider is part of its exact one-third allocation.
+func ComputeWithOptions(width, height, composerRows int, options Options) Metrics {
 	if width < 1 {
 		width = 1
 	}
@@ -60,31 +77,28 @@ func Compute(width, height, composerRows int) Metrics {
 	if metrics.Mode == Narrow {
 		railHeight = 2
 	}
-	metrics.Rail = components.Rect{Width: width, Height: railHeight}
 	metrics.Composer = components.Rect{Y: height - composerRows - 2, Width: width, Height: composerRows + 2}
-	available := metrics.Composer.Y - metrics.Rail.Height
-	responseHeight := max(4, available/3)
-	if metrics.Mode == Wide {
-		// Wide terminals are the only layout that can display several pane rows
-		// at once. Keep the response independently scrollable but compact so a
-		// second row of app logs remains immediately inspectable.
-		responseHeight = 5
+
+	agentWidth := width / 3
+	workspaceWidth := width - agentWidth
+	metrics.AgentDockable = agentWidth >= minimumAgentWidth && workspaceWidth >= minimumWorkspaceWidth
+	if options.AgentExpanded && metrics.AgentDockable {
+		metrics.AgentDocked = true
+		metrics.Agent = components.Rect{
+			X:      workspaceWidth,
+			Width:  agentWidth,
+			Height: metrics.Composer.Y,
+		}
+	} else {
+		workspaceWidth = width
 	}
-	if metrics.Mode == Narrow {
-		responseHeight = max(3, available/3)
+
+	metrics.Rail = components.Rect{Width: workspaceWidth, Height: railHeight}
+	metrics.Panes = components.Rect{
+		Y:      metrics.Rail.Height,
+		Width:  workspaceWidth,
+		Height: metrics.Composer.Y - metrics.Rail.Height,
 	}
-	minimumResponseHeight := 3
-	if metrics.Mode == Narrow {
-		// At the minimum supported height, two response rows still preserve a
-		// header and one independently scrollable output row while reserving a
-		// complete metadata pane plus one visible log row.
-		minimumResponseHeight = 2
-	}
-	if responseHeight > available-minimumPaneHeightWithLog {
-		responseHeight = max(minimumResponseHeight, available-minimumPaneHeightWithLog)
-	}
-	metrics.Response = components.Rect{Y: metrics.Composer.Y - responseHeight, Width: width, Height: responseHeight}
-	metrics.Panes = components.Rect{Y: metrics.Rail.Height, Width: width, Height: metrics.Response.Y - metrics.Rail.Height}
 	metrics.PaletteAnchor = components.Rect{Y: max(metrics.Rail.Height, metrics.Composer.Y-6), Width: width}
 	modalWidth := width - 4
 	modalHeight := min(height-4, max(8, height*2/3))

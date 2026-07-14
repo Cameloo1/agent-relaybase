@@ -70,6 +70,7 @@ func TestSaveAndLoadAllSupportedPreferences(t *testing.T) {
 	prefs.Assistant.HistoryRetentionDays = 14
 	prefs.Layout.LastPage = 2
 	prefs.Layout.Density = "comfortable"
+	prefs.Layout.AgentPaneCollapsed = true
 
 	if err := store.Save(prefs); err != nil {
 		t.Fatalf("Save returned error: %v", err)
@@ -100,8 +101,24 @@ func TestSaveAndLoadAllSupportedPreferences(t *testing.T) {
 	if loaded.Assistant.BarColor != "#6d4c3d" || loaded.Assistant.HistoryRetentionDays != 14 {
 		t.Fatalf("assistant preferences did not persist: %#v", loaded.Assistant)
 	}
-	if loaded.Layout.LastPage != 2 || loaded.Layout.Density != "comfortable" {
+	if loaded.Layout.LastPage != 2 || loaded.Layout.Density != "comfortable" || !loaded.Layout.AgentPaneCollapsed {
 		t.Fatalf("layout preferences did not persist: %#v", loaded.Layout)
+	}
+}
+
+func TestHiddenPaneOrderPreservesReopenRecency(t *testing.T) {
+	store := NewStore(t.TempDir())
+	prefs := Default()
+	prefs.Panes.Hidden = []string{"pane-newest", "pane-older", "pane-newest"}
+	if err := store.Save(prefs); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	loaded, result := store.Load()
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("unexpected diagnostics: %#v", result.Diagnostics)
+	}
+	if strings.Join(loaded.Panes.Hidden, ",") != "pane-newest,pane-older" {
+		t.Fatalf("hidden pane recency order was not preserved: %#v", loaded.Panes.Hidden)
 	}
 }
 

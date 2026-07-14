@@ -154,7 +154,7 @@ test("Agent Gateway persists non-secret config across restart while explicit env
       {
         enabled: true,
         provider: {
-          modelSlug: "openai/gpt-5.4",
+          modelSlug: "openai/gpt-5.6-luna",
           remoteModelEnabled: true,
           apiKeyEnvVar: "RELAYBASE_PERSISTED_TEST_KEY"
         },
@@ -176,7 +176,7 @@ test("Agent Gateway persists non-secret config across restart while explicit env
       tokenHeaders(hub.runtime.token)
     );
     assert.equal(persisted.json.agent.config.enabled, true);
-    assert.equal(persisted.json.agent.config.provider.modelSlug, "openai/gpt-5.4");
+    assert.equal(persisted.json.agent.config.provider.modelSlug, "openai/gpt-5.6-luna");
     assert.equal(persisted.json.agent.config.provider.remoteModelEnabled, true);
     assert.equal(persisted.json.agent.config.provider.apiKeySource.envVar, "RELAYBASE_PERSISTED_TEST_KEY");
     assert.equal(persisted.json.agent.config.provider.apiKeySource.configured, false);

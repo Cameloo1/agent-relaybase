@@ -14,11 +14,11 @@ func TestPaneMenuNavigation(t *testing.T) {
 	if !menu.IsOpen() {
 		t.Fatal("expected pane menu to be open")
 	}
-	if item := menu.SelectedItem(); item == nil || item.Action != ActionPaneClose {
+	if item := menu.SelectedItem(); item == nil || item.Action != ActionPaneRestart {
 		t.Fatalf("unexpected initial item: %#v", item)
 	}
 	menu.Move(1)
-	if item := menu.SelectedItem(); item == nil || item.Action != ActionPanePinToggle {
+	if item := menu.SelectedItem(); item == nil || item.Action != ActionPaneStop {
 		t.Fatalf("unexpected selected item after move: %#v", item)
 	}
 }
@@ -29,14 +29,14 @@ func TestPaneMenuCoversEveryItem(t *testing.T) {
 		PaneMenuOptions{CanReopen: true},
 	)
 	expected := []string{
+		ActionPaneRestart,
+		ActionPaneStop,
 		ActionPaneClose,
-		ActionPanePinToggle,
 		ActionPaneReopen,
-		ActionPaneColor,
+		ActionPanePinToggle,
 		ActionPaneCopyRoute,
 		ActionPaneExportLogs,
-		ActionPaneStop,
-		ActionPaneRestart,
+		ActionPaneColor,
 		ActionPaneDiagnostics,
 	}
 	if len(menu.Items) != len(expected) {
@@ -148,7 +148,7 @@ func TestPaneMenuReopenReflectsAvailability(t *testing.T) {
 
 	menu = PaneMenu(&panes.PaneSnapshot{ID: "pane-1", Title: "Notes: backend"}, PaneMenuOptions{CanReopen: true})
 	item = findItem(t, menu, ActionPaneReopen)
-	if !item.Enabled || item.DisabledReason != "" {
+	if item.Label != "Reopen pane…" || !item.Enabled || item.DisabledReason != "" {
 		t.Fatalf("expected reopen to be enabled when candidate exists, got %#v", item)
 	}
 }

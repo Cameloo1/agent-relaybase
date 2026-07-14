@@ -352,6 +352,83 @@ func TestPaneManagerCloseAndUnpinReflowCurrentPage(t *testing.T) {
 	}
 }
 
+func TestPaneManagerReopenCandidatesPreferRecentUserCloses(t *testing.T) {
+	manager := NewManager()
+	manager.ApplyState(&relaybaseclient.RelaybaseState{Components: []relaybaseclient.AppComponent{
+		{AppID: "alpha", GroupID: "alpha", Role: "frontend", PaneLabel: "web", DisplayName: "Alpha", Status: "running"},
+		{AppID: "beta", GroupID: "beta", Role: "backend", PaneLabel: "api", DisplayName: "Beta", Status: "running"},
+		{AppID: "gamma", GroupID: "gamma", Role: "worker", PaneLabel: "worker", DisplayName: "Gamma", Status: "stopped"},
+	}})
+
+	first := manager.SelectedPaneID()
+	manager.CloseSelected()
+	second := manager.SelectedPaneID()
+	manager.CloseSelected()
+
+	candidates := manager.ReopenCandidates()
+	if len(candidates) != 3 {
+		t.Fatalf("candidates=%#v, want two user closes and one auto-hidden pane", candidates)
+	}
+	if candidates[0].PaneID != second || !candidates[0].UserClosed || candidates[1].PaneID != first || !candidates[1].UserClosed {
+		t.Fatalf("recent user closes are not first in MRU order: %#v", candidates)
+	}
+	if candidates[2].AppID != "gamma" || candidates[2].UserClosed {
+		t.Fatalf("auto-hidden pane should follow recent closes: %#v", candidates)
+	}
+	if got := manager.HiddenIDs(); len(got) != 2 || got[0] != second || got[1] != first {
+		t.Fatalf("persisted hidden order=%#v, want %#v then %#v", got, second, first)
+	}
+
+	if !manager.ReopenPane(first) || manager.SelectedPaneID() != first {
+		t.Fatalf("explicit reopen did not restore and select %q", first)
+	}
+	if got := manager.HiddenIDs(); len(got) != 1 || got[0] != second {
+		t.Fatalf("reopened pane remained in persisted close order: %#v", got)
+	}
+}
+
+func TestPaneManagerFindsAndRevealsExactAppPane(t *testing.T) {
+	manager := NewManager()
+	manager.ApplyState(&relaybaseclient.RelaybaseState{Components: []relaybaseclient.AppComponent{
+		{AppID: "suite-web", GroupID: "suite", Role: "frontend", PaneLabel: "web", DisplayName: "Suite", Status: "running"},
+		{AppID: "suite-web", GroupID: "suite", Role: "worker", PaneLabel: "worker", DisplayName: "Suite", Status: "running"},
+	}})
+	ids := manager.PaneIDsForApp("suite-web")
+	if len(ids) != 2 {
+		t.Fatalf("pane ids=%#v, want both app panes", ids)
+	}
+	if !manager.SelectPane(ids[1]) {
+		t.Fatalf("could not select %q", ids[1])
+	}
+	manager.CloseSelected()
+	if !manager.RevealAndSelectPane(ids[1]) || manager.SelectedPaneID() != ids[1] {
+		t.Fatalf("exact hidden pane was not revealed and selected: selected=%q", manager.SelectedPaneID())
+	}
+	if got := manager.PaneIDsForApp("missing"); len(got) != 0 {
+		t.Fatalf("missing app returned panes: %#v", got)
+	}
+}
+
+func TestPaneManagerRefreshRemovesMissingReopenCandidates(t *testing.T) {
+	manager := NewManager()
+	manager.ApplyState(&relaybaseclient.RelaybaseState{Components: []relaybaseclient.AppComponent{
+		{AppID: "alpha", GroupID: "alpha", Role: "frontend", PaneLabel: "web", DisplayName: "Alpha", Status: "running"},
+		{AppID: "beta", GroupID: "beta", Role: "backend", PaneLabel: "api", DisplayName: "Beta", Status: "running"},
+	}})
+	manager.CloseSelected()
+	manager.CloseSelected()
+	manager.ApplyState(&relaybaseclient.RelaybaseState{Components: []relaybaseclient.AppComponent{
+		{AppID: "beta", GroupID: "beta", Role: "backend", PaneLabel: "api", DisplayName: "Beta", Status: "running"},
+	}})
+	candidates := manager.ReopenCandidates()
+	if len(candidates) != 1 || candidates[0].AppID != "beta" {
+		t.Fatalf("refresh retained stale reopen candidates: %#v", candidates)
+	}
+	if got := manager.PaneIDsForApp("alpha"); len(got) != 0 {
+		t.Fatalf("refresh retained stale app pane lookup: %#v", got)
+	}
+}
+
 func TestPaneManagerFocusAndEscapeFlow(t *testing.T) {
 	manager := NewManager()
 	manager.ApplyState(groupedState(1))

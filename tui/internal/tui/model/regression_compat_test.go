@@ -22,7 +22,7 @@ import (
 
 func TestOperatorLayoutResynchronizesAfterDynamicComposerGrowth(t *testing.T) {
 	root := newTestModelWithPanes(t, 1)
-	updated, _ := root.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	updated, _ := root.Update(tea.WindowSizeMsg{Width: 160, Height: 36})
 	root = updated.(RootModel)
 	before := root.paneManager.Layout().Height
 
@@ -75,7 +75,7 @@ func TestOperatorRailCountsDaemonActiveComponentsWithoutCallingRegistrationsActi
 
 func TestOperatorPointerFocusHasOneAuthoritativeOwner(t *testing.T) {
 	root := newTestModelWithPanes(t, 1)
-	updated, _ := root.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	updated, _ := root.Update(tea.WindowSizeMsg{Width: 160, Height: 36})
 	root = updated.(RootModel)
 	root.commandInput = "preserved draft"
 	root.composer.SetValue(root.commandInput)
@@ -176,13 +176,13 @@ func TestOperatorWheelRemainsUsableOnResponsiveFullMetadataPages(t *testing.T) {
 		visiblePanes  int
 		expectedPages int
 	}{
-		{name: "medium_80", width: 80, height: 24, visiblePanes: 2, expectedPages: 4},
+		{name: "medium_80", width: 80, height: 24, visiblePanes: 4, expectedPages: 3},
 		{name: "medium_100", width: 100, height: 30, visiblePanes: 6, expectedPages: 2},
-		{name: "medium_110", width: 110, height: 32, visiblePanes: 6, expectedPages: 2},
+		{name: "medium_110", width: 110, height: 32, visiblePanes: 8, expectedPages: 2},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			root := applyState(newTestModel(t), fullMetadataModelState(8))
+			root := applyState(newTestModel(t), fullMetadataModelState(9))
 			updated, _ := root.Update(tea.WindowSizeMsg{Width: test.width, Height: test.height})
 			root = updated.(RootModel)
 			root.responseFollow = false
@@ -248,7 +248,7 @@ func TestOperatorCommandPaletteClickCompletesWithoutMovingResponse(t *testing.T)
 
 func TestBlockingSurfacesConsumePasteClipboardAndBackgroundClicks(t *testing.T) {
 	root := applyState(newTestModel(t), notesFrontendBackendState())
-	updated, _ := root.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	updated, _ := root.Update(tea.WindowSizeMsg{Width: 160, Height: 36})
 	root = updated.(RootModel)
 	pending, _ := root.submitAssistantInput("stop backend")
 
@@ -488,14 +488,14 @@ func TestStaleAgentMessageCompletionCannotMutateAnotherThread(t *testing.T) {
 
 func TestResponseFollowAnchorsWrappedOutputAndUnreadState(t *testing.T) {
 	root := newTestModelWithPanes(t, 1)
-	updated, _ := root.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	updated, _ := root.Update(tea.WindowSizeMsg{Width: 160, Height: 36})
 	root = updated.(RootModel)
 	root.historyExpanded = true
 	for index := 0; index < 30; index++ {
 		root.assistantTimeline = append(root.assistantTimeline, "a long response line that wraps in the operator response viewport")
 	}
 	root.responseFollow = true
-	bottom := views.ResponseScrollMax(root.shellData())
+	bottom := views.ResponseScrollMax(root.styles, root.shellData())
 	if bottom == 0 || root.shellData().ResponseOffset != bottom {
 		t.Fatalf("follow did not project to the rendered bottom: got=%d bottom=%d", root.shellData().ResponseOffset, bottom)
 	}
@@ -514,7 +514,7 @@ func TestResponseFollowAnchorsWrappedOutputAndUnreadState(t *testing.T) {
 
 	updated, _ = root.Update(keyPress("end"))
 	root = updated.(RootModel)
-	if !root.responseFollow || root.responseNewOutput != 0 || root.shellData().ResponseOffset != views.ResponseScrollMax(root.shellData()) {
+	if !root.responseFollow || root.responseNewOutput != 0 || root.shellData().ResponseOffset != views.ResponseScrollMax(root.styles, root.shellData()) {
 		t.Fatalf("End did not restore follow: follow=%v new=%d offset=%d", root.responseFollow, root.responseNewOutput, root.shellData().ResponseOffset)
 	}
 }
@@ -614,7 +614,7 @@ func TestAgentEventLifecycleRejectsStaleGenerationAfterThreadClear(t *testing.T)
 	oldStream := &relaybaseclient.AgentEventStream{}
 	updated, _ := root.Update(commands.AgentEventsConnectedMsg{Stream: oldStream, SessionID: "thread-old", Generation: oldGeneration})
 	root = updated.(RootModel)
-	if root.agentStream != oldStream || root.agentStatus != "streaming" {
+	if root.agentStream != oldStream || root.agentStatus != "idle" {
 		t.Fatalf("current stream did not connect: stream=%p status=%s", root.agentStream, root.agentStatus)
 	}
 

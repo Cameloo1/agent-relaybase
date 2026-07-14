@@ -50,6 +50,7 @@ export interface OperatorAgentRuntimeInput {
 export interface OperatorAgentRuntimeResult {
   status: "completed" | "failed" | "waiting_for_approval";
   assistantContent?: string;
+  modelOutputProduced?: boolean;
   diagnostics: AgentDiagnostic[];
   promptContext: OperatorPromptContext;
   toolNames: string[];
@@ -246,6 +247,7 @@ export class OperatorAgentRuntime {
         });
         return {
           status: "failed",
+          modelOutputProduced: true,
           diagnostics: [outputDiagnostic],
           promptContext,
           toolNames

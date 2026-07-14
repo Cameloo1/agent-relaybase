@@ -14,6 +14,8 @@ const (
 	TransientCommandPalette  TransientKind = "command_palette"
 	TransientThreadSwitcher  TransientKind = "thread_switcher"
 	TransientHelp            TransientKind = "help"
+	TransientAppList         TransientKind = "app_list"
+	TransientPaneReopen      TransientKind = "pane_reopen"
 	TransientResponseDetails TransientKind = "response_details"
 	TransientCodePicker      TransientKind = "code_picker"
 	TransientDiagnostics     TransientKind = "diagnostics"

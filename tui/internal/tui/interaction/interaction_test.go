@@ -23,3 +23,29 @@ func TestModalAndTransientRestoreFocusAndOwnInput(t *testing.T) {
 		t.Fatalf("expected composer restoration after modal, got %s", state.Focus)
 	}
 }
+
+func TestAppListTransientIsDistinctFromHelp(t *testing.T) {
+	state := New()
+	state.SetFocus(FocusResponse)
+	state.OpenTransient(TransientAppList)
+	if state.Transient != TransientAppList || state.Transient == TransientHelp || state.Owner() != OwnerTransient {
+		t.Fatalf("app list must own a distinct transient: %#v", state)
+	}
+	state.CloseTransient()
+	if state.Focus != FocusResponse {
+		t.Fatalf("expected response focus restoration, got %s", state.Focus)
+	}
+}
+
+func TestPaneReopenTransientIsDedicatedAndRestoresFocus(t *testing.T) {
+	state := New()
+	state.SetFocus(FocusComposer)
+	state.OpenTransient(TransientPaneReopen)
+	if state.Transient != TransientPaneReopen || state.Transient == TransientAppList || state.Transient == TransientHelp || state.Owner() != OwnerTransient {
+		t.Fatalf("pane reopen must own a dedicated transient: %#v", state)
+	}
+	state.CloseTransient()
+	if state.Focus != FocusComposer {
+		t.Fatalf("expected composer focus restoration, got %s", state.Focus)
+	}
+}

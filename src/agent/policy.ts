@@ -13,7 +13,8 @@ const PROSE_APPROVAL_REQUEST_PATTERN =
   /\b(?:need|needs|require|requires|required)\s+(?:your\s+)?(?:approval|confirmation)|\bwould\s+you\s+like\s+me\s+to\s+proceed\b|\bplease\s+(?:confirm|approve)\b/i;
 const APPROVAL_GATED_TOPIC_PATTERN =
   /\b(?:apply|setup|write|create|update|register|manifest|start|stop|restart|repair|export|open|prove|file|files|changes)\b/i;
-const UNSUPPORTED_PORT_STRATEGY_PATTERN = /\b(assume|invent|guess)\b[\s\S]*\b(port|framework|flag)\b/i;
+const UNSUPPORTED_PORT_STRATEGY_CLAIM_PATTERN =
+  /\b(?:I|we|Relaybase|the\s+(?:agent|model|daemon|tool))\s+(?:(?:have|has|had|will)\s+)?(?:assume|assumed|guess|guessed|invent|invented)\b[^.!?\n]{0,48}\b(?:port|framework|flag)\b|\b(?:port|framework|flag)\b[^.!?\n]{0,48}\b(?:is|are|was|were|has been|have been)\s+(?:assumed|guessed|invented)\b/i;
 const SHELL_META_PATTERN = /[&|<>]|`|\$\(|;\s*\S/;
 
 export interface PolicyDecision {
@@ -85,7 +86,7 @@ export function outputGuardrail(
       "Call the approval-gated Relaybase tool so the daemon can show a real approval preview."
     );
   }
-  if (UNSUPPORTED_PORT_STRATEGY_PATTERN.test(output)) {
+  if (UNSUPPORTED_PORT_STRATEGY_CLAIM_PATTERN.test(output)) {
     return diagnostic(
       "AGENT_PORT_STRATEGY_INVENTED",
       "The model output appears to invent port or framework behavior.",

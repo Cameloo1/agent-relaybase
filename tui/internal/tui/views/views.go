@@ -2,12 +2,15 @@ package views
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	bubbleshelp "charm.land/bubbles/v2/help"
 	bubbleskey "charm.land/bubbles/v2/key"
+	bubblestable "charm.land/bubbles/v2/table"
 	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -64,8 +67,11 @@ type ShellData struct {
 	PageCount           int
 	ClipboardWriteReady bool
 	CommandPalette      *CommandPaletteData
+	StartCompletion     *StartCompletionData
 	ThreadSwitcher      *ThreadSwitcherData
 	CodePicker          *CodePickerData
+	RegisteredApps      *RegisteredAppsData
+	PaneReopen          *PaneReopenData
 	Help                *HelpData
 	Usage               *usagecomponent.Snapshot
 	ComposerView        string
@@ -76,6 +82,8 @@ type ShellData struct {
 	ResponseFollow      bool
 	ResponseNewOutput   int
 	ResponseOffset      int
+	AgentPaneExpanded   bool
+	ResponseDetails     bool
 	PrimaryFocus        string
 }
 
@@ -83,6 +91,15 @@ type CommandPaletteData struct {
 	Matches         []slash.CommandMatch
 	SelectedVisible int
 	Total           int
+}
+
+// StartCompletionData is a presentation-only window over registered daemon
+// state. Accepting a row only inserts a stable id into the composer.
+type StartCompletionData struct {
+	Items           []inventory.Item
+	SelectedVisible int
+	Total           int
+	Query           string
 }
 
 // ThreadSwitcherData is a display-only projection. Session activation remains
@@ -113,6 +130,36 @@ type HelpData struct {
 	Matches      []slash.CommandMatch
 	Selected     int
 	DetailOffset int
+}
+
+// RegisteredAppsData is a presentation-only projection of daemon-owned app
+// state. Starting an app remains an approval-gated root-model action.
+type RegisteredAppsData struct {
+	Items            []inventory.Item
+	Selected         int
+	Offset           int
+	ConnectionStatus string
+	StateKnown       bool
+	Refreshing       bool
+	Notice           string
+}
+
+// PaneReopenData is a presentation-only chooser. Selecting a row only reveals
+// an existing pane; daemon lifecycle state remains outside the view and TUI.
+type PaneReopenData struct {
+	Items    []PaneReopenItem
+	Selected int
+	Offset   int
+	Notice   string
+	AppID    string
+}
+
+type PaneReopenItem struct {
+	PaneID     string
+	Name       string
+	Project    string
+	Status     string
+	UserClosed bool
 }
 
 type ShellFrame struct {
@@ -154,7 +201,10 @@ func BuildShell(style styles.Styles, data ShellData) ShellFrame {
 	assistant := components.RenderAssistantBar(style, assistantPrompt, width)
 	palette := ""
 	paletteHeight := 0
-	if data.CommandPalette != nil {
+	if data.StartCompletion != nil {
+		palette = renderStartCompletion(style, *data.StartCompletion, width)
+		paletteHeight = lipgloss.Height(palette)
+	} else if data.CommandPalette != nil {
 		palette = renderCommandPalette(style, *data.CommandPalette, width)
 		paletteHeight = lipgloss.Height(palette)
 	}
@@ -174,7 +224,12 @@ func BuildShell(style styles.Styles, data ShellData) ShellFrame {
 		}
 	}
 	paletteTop := bodyTop + lipgloss.Height(body)
-	if data.CommandPalette != nil {
+	if data.StartCompletion != nil {
+		for _, region := range startCompletionHitRegions(*data.StartCompletion, palette, width) {
+			region.Rect = region.Rect.Translate(0, paletteTop)
+			hitMap.Add(region)
+		}
+	} else if data.CommandPalette != nil {
 		for _, region := range commandPaletteHitRegions(*data.CommandPalette, palette, width) {
 			region.Rect = region.Rect.Translate(0, paletteTop)
 			hitMap.Add(region)
@@ -194,59 +249,52 @@ func BuildShell(style styles.Styles, data ShellData) ShellFrame {
 func buildOperatorShell(style styles.Styles, data ShellData) ShellFrame {
 	width := maxInt(data.Width, 1)
 	height := maxInt(data.Height, 1)
-	metrics := layout.Compute(width, height, data.ComposerRows)
+	metrics := layout.ComputeWithOptions(width, height, data.ComposerRows, layout.Options{AgentExpanded: data.AgentPaneExpanded})
 	if metrics.ResizeRequired {
 		text := fixedRegion(style.Help, "Relaybase operator console needs at least 40×18 cells.\n\nResize the terminal; drafts, panes, and Agent state are preserved.", width, height)
 		return ShellFrame{Text: text, HitMap: components.HitMap{}}
 	}
 
-	rail := fixedRegion(style.Status, renderOperatorRail(style, data, width), width, metrics.Rail.Height)
+	rail := fixedRegion(style.Status, renderOperatorRail(style, data, metrics.Rail.Width), metrics.Rail.Width, metrics.Rail.Height)
 	base := operatorPaneProjection(data)
 	// The pane manager owns scrolling inside each app log. The operator pane
 	// region is an exact projection and must never acquire a competing outer
 	// viewport or consume a row with a global scroll indicator.
 	body := renderBody(style, base)
-	panesText := fixedRegion(style.Body, body, width, metrics.Panes.Height)
+	panesText := fixedRegion(style.Body, body, metrics.Panes.Width, metrics.Panes.Height)
 	paneFrame := bodyViewportFrame{Text: panesText, ContentHeight: metrics.Panes.Height}
 	if operatorInventoryViewport(base) {
-		paneFrame = renderBodyViewportFrame(body, metrics.Panes.Height, data.BodyScrollOffset, width)
-		panesText = fixedRegion(style.Body, paneFrame.Text, width, metrics.Panes.Height)
+		paneFrame = renderBodyViewportFrame(body, metrics.Panes.Height, data.BodyScrollOffset, metrics.Panes.Width)
+		panesText = fixedRegion(style.Body, paneFrame.Text, metrics.Panes.Width, metrics.Panes.Height)
 	}
-
-	renderedResponse := (safemarkdown.SafeMarkdownRenderer{}).Render(data.ResponseSource, maxInt(20, width-4))
-	responseHeader := "Agent " + valueOr(data.ResponseState, valueOr(data.AgentStatus, "unknown"))
-	if data.PrimaryFocus == "response" {
-		responseHeader += " " + style.Control.Render("[focused]")
-	}
-	if data.ResponseFollow {
-		responseHeader += " • follow"
-	} else if data.ResponseNewOutput > 0 {
-		responseHeader += fmt.Sprintf(" • %d new", data.ResponseNewOutput)
-	}
-	responseHeader += " • [c] copy • [b] code"
-	responseBody := renderBodyViewportFrame(renderedResponse.Text, maxInt(1, metrics.Response.Height-1), data.ResponseOffset, width)
-	responseText := fixedRegion(style.Body, responseHeader+"\n"+responseBody.Text, width, metrics.Response.Height)
 
 	composer := strings.TrimSpace(data.ComposerView)
 	if composer == "" {
 		composer = "> " + cleanInlineText(data.AssistantPrompt)
 	}
-	composerHeader := "Composer > _ • Enter submit • Ctrl+J newline"
+	composerHeader := "Composer " + style.ControlMuted.Render("[Ctrl+G agent pane]") + " > _ • Enter submit • Ctrl+J newline"
 	if data.PrimaryFocus == "composer" {
 		composerHeader += " " + style.Control.Render("[focused]")
 	}
 	if data.ComposerPasting {
-		composerHeader = "Composer > _ • Pasting… • Esc cancel"
+		composerHeader = "Composer " + style.ControlMuted.Render("[Ctrl+G agent pane]") + " > _ • Pasting… • Esc cancel"
 	}
 	composerText := framedFixedRegion(style.Assistant, composerHeader+"\n"+composer, width, metrics.Composer.Height)
 
-	frame := ShellFrame{Text: lipgloss.JoinVertical(lipgloss.Left, rail, panesText, responseText, composerText)}
+	workspace := lipgloss.JoinVertical(lipgloss.Left, rail, panesText)
+	upper := workspace
+	if metrics.AgentDocked {
+		upper = lipgloss.JoinHorizontal(lipgloss.Top, workspace, renderAgentDock(style, data, metrics.Agent))
+	}
+	frame := ShellFrame{Text: lipgloss.JoinVertical(lipgloss.Left, upper, composerText)}
 	for _, region := range paneHitRegions(style, base) {
-		if transformed, ok := transformBodyRegion(region, paneFrame, width, metrics.Panes.Y); ok {
+		if transformed, ok := transformBodyRegion(region, paneFrame, metrics.Panes.Width, metrics.Panes.Y); ok {
 			frame.HitMap.Add(transformed)
 		}
 	}
-	frame.HitMap.Add(components.HitRegion{Rect: metrics.Response, Kind: components.HitResponse})
+	if metrics.AgentDocked {
+		frame.HitMap.Add(components.HitRegion{Rect: metrics.Agent, Kind: components.HitResponse})
+	}
 	frame.HitMap.Add(components.HitRegion{Rect: metrics.Composer, Kind: components.HitComposer})
 
 	if overlay := operatorOverlay(style, data, metrics, frame.Text); overlay.Text != "" {
@@ -257,16 +305,29 @@ func buildOperatorShell(style styles.Styles, data ShellData) ShellFrame {
 		frame.Text = overlay.Text
 		return frame
 	}
-	if data.CommandPalette != nil {
-		palette := renderCommandPalette(style, *data.CommandPalette, width)
+	if data.StartCompletion != nil {
+		palette := renderStartCompletion(style, *data.StartCompletion, metrics.Panes.Width)
 		paletteHeight := lipgloss.Height(palette)
 		bounds := components.Rect{
 			Y:      maxInt(metrics.Rail.Height, metrics.Composer.Y-paletteHeight),
-			Width:  width,
+			Width:  metrics.Panes.Width,
 			Height: paletteHeight,
 		}
 		frame.Text = composeOperatorLayer(frame.Text, palette, bounds, metrics.Bounds)
-		for _, region := range commandPaletteHitRegions(*data.CommandPalette, palette, width) {
+		for _, region := range startCompletionHitRegions(*data.StartCompletion, palette, metrics.Panes.Width) {
+			region.Rect = region.Rect.Translate(bounds.X, bounds.Y)
+			frame.HitMap.Add(region)
+		}
+	} else if data.CommandPalette != nil {
+		palette := renderCommandPalette(style, *data.CommandPalette, metrics.Panes.Width)
+		paletteHeight := lipgloss.Height(palette)
+		bounds := components.Rect{
+			Y:      maxInt(metrics.Rail.Height, metrics.Composer.Y-paletteHeight),
+			Width:  metrics.Panes.Width,
+			Height: paletteHeight,
+		}
+		frame.Text = composeOperatorLayer(frame.Text, palette, bounds, metrics.Bounds)
+		for _, region := range commandPaletteHitRegions(*data.CommandPalette, palette, metrics.Panes.Width) {
 			region.Rect = region.Rect.Translate(bounds.X, bounds.Y)
 			frame.HitMap.Add(region)
 		}
@@ -278,11 +339,58 @@ func operatorPaneProjection(data ShellData) ShellData {
 	data.AssistantHistory = nil
 	data.Confirmation = nil
 	data.ContextMenu = nil
+	data.StartCompletion = nil
+	data.RegisteredApps = nil
+	data.PaneReopen = nil
 	data.Help = nil
 	data.ShowHelp = false
 	data.DiagnosticsOpen = false
 	data.SetupPanel = ""
 	return data
+}
+
+func agentDockStyle(style styles.Styles) lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(style.Body.GetForeground()).
+		Background(style.Body.GetBackground()).
+		Border(lipgloss.NormalBorder(), false, false, false, true).
+		BorderForeground(style.Body.GetBorderLeftForeground()).
+		Padding(0, 1)
+}
+
+func renderAgentDock(style styles.Styles, data ShellData, bounds components.Rect) string {
+	panelStyle := agentDockStyle(style)
+	innerWidth := maxInt(1, bounds.Width-panelStyle.GetHorizontalFrameSize())
+	innerHeight := maxInt(1, bounds.Height-panelStyle.GetVerticalFrameSize())
+	content := renderAgentResponseContent(style, data, innerWidth, innerHeight)
+	return panelStyle.Width(bounds.Width).Height(bounds.Height).Render(content)
+}
+
+func renderAgentResponseContent(style styles.Styles, data ShellData, width int, height int) string {
+	width = maxInt(1, width)
+	height = maxInt(1, height)
+	header := "Agent " + valueOr(data.ResponseState, valueOr(data.AgentStatus, "unknown"))
+	if data.AgentThreadLabel != "" {
+		header += " • " + data.AgentThreadLabel
+	}
+	if data.PrimaryFocus == "response" {
+		header += " " + style.Control.Render("[focused]")
+	}
+	state := "follow"
+	if !data.ResponseFollow {
+		state = "paused"
+		if data.ResponseNewOutput > 0 {
+			state = fmt.Sprintf("%d new", data.ResponseNewOutput)
+		}
+	}
+	controls := state + " • [c] copy • [b] code • Ctrl+G close"
+	source := strings.TrimSpace(data.ResponseSource)
+	if source == "" {
+		source = "No Agent output yet. Submit a request in Composer."
+	}
+	rendered := (safemarkdown.SafeMarkdownRenderer{}).Render(source, maxInt(20, width))
+	body := renderBodyViewportFrame(rendered.Text, maxInt(1, height-2), data.ResponseOffset, width)
+	return fixedRegion(style.Body, header+"\n"+controls+"\n"+body.Text, width, height)
 }
 
 func operatorInventoryViewport(data ShellData) bool {
@@ -298,9 +406,10 @@ func InventorySelectionLine(style styles.Styles, data ShellData) int {
 		return 0
 	}
 	selectedLabel := ""
-	for _, item := range projection.Inventory {
+	rows := registeredAppTableRows(projection.Inventory)
+	for index, item := range projection.Inventory {
 		if item.Selected {
-			selectedLabel = valueOr(item.Name, item.ID)
+			selectedLabel = rows[index].Name
 			break
 		}
 	}
@@ -309,12 +418,14 @@ func InventorySelectionLine(style styles.Styles, data ShellData) int {
 	}
 	for index, line := range strings.Split(renderBody(style, projection), "\n") {
 		plain := ansiEscapePattern.ReplaceAllString(line, "")
-		if strings.Contains(plain, "> "+selectedLabel) {
+		if strings.Contains(plain, selectedLabel) {
 			return index
 		}
 	}
 	return 0
 }
+
+const operatorRailDivider = "│"
 
 func renderOperatorRail(style styles.Styles, data ShellData, width int) string {
 	attention := diagnosticsSummary(data.Diagnostics)
@@ -328,27 +439,55 @@ func renderOperatorRail(style styles.Styles, data ShellData, width int) string {
 		events += style.Muted.Render(fmt.Sprintf(" (%d)", data.EventCount))
 	}
 	apps := renderOperatorAppCounts(style, data)
+	compactApps := renderCompactOperatorAppCounts(style, data)
+	tightApps := renderTightOperatorAppCounts(style, data)
+	minimumApps := renderMinimumOperatorAppCounts(style, data)
 	attentionField := style.Muted.Render("Attention ") + operatorAttentionTone(style, data.Diagnostics).Render(attention)
 	page := ""
+	compactPage := ""
 	if data.PageCount > 1 {
 		page = style.Muted.Render(fmt.Sprintf("Page %d/%d", data.Page+1, data.PageCount))
+		compactPage = style.Muted.Render(fmt.Sprintf("P%d/%d", data.Page+1, data.PageCount))
 	}
+	group := ""
+	if width >= 120 && data.GroupCount > 0 {
+		group = style.Muted.Render(fmt.Sprintf("Groups %d", data.GroupCount))
+	}
+	thread := ""
+	if data.AgentThreadLabel != "" {
+		thread = style.Muted.Render(truncateText(data.AgentThreadLabel, maxInt(1, width/3)))
+	}
+
 	if width < 80 {
-		firstLine := fitRequiredRailPair(style, connection, agent, width)
-		secondLine := fitNarrowOperatorSummary(style, data, apps, attentionField, width)
-		secondLine = appendOperatorRailIfFits(style, secondLine, page, width)
-		secondLine = appendOperatorRailIfFits(style, secondLine, events, width)
+		columnWidths := operatorRailColumnWidths(width, 2)
+		agentSlot := firstOperatorRailCandidate(columnWidths[1],
+			withOperatorRailDetail(style, withOperatorRailDetail(style, agent, events), thread),
+			withOperatorRailDetail(style, agent, events),
+			withOperatorRailDetail(style, agent, thread),
+			agent,
+		)
+		appsSlot := operatorAppRailSlot(style, columnWidths[0], group, apps, compactApps, tightApps, minimumApps)
+		attentionSlot := firstOperatorRailCandidate(columnWidths[1],
+			withOperatorRailDetail(style, attentionField, page),
+			withOperatorRailDetail(style, attentionField, compactPage),
+			attentionField,
+		)
+		firstLine := renderOperatorRailColumns(style, width, connection, agentSlot)
+		secondLine := renderOperatorRailColumns(style, width, appsSlot, attentionSlot)
 		return firstLine + "\n" + secondLine
 	}
-	segments := []string{connection, agent, page, apps, events, attentionField}
-	rail := joinOperatorRail(style, segments...)
-	if width >= 120 && data.GroupCount > 0 {
-		rail = appendOperatorRailIfFits(style, rail, style.Muted.Render(fmt.Sprintf("Groups %d", data.GroupCount)), width)
-	}
-	if data.AgentThreadLabel != "" {
-		rail = appendOperatorRailIfFits(style, rail, style.Muted.Render(truncateText(data.AgentThreadLabel, maxInt(1, width/3))), width)
-	}
-	return rail
+
+	columnWidths := operatorRailColumnWidths(width, 5)
+	agentSlot := firstOperatorRailCandidate(maxInt(1, columnWidths[1]-1), withOperatorRailDetail(style, agent, thread), agent)
+	appsSlot := operatorAppRailSlot(style, maxInt(1, columnWidths[2]-1), group, apps, compactApps, tightApps, minimumApps)
+	attentionSlot := firstOperatorRailCandidate(maxInt(1, columnWidths[4]-1),
+		withOperatorRailDetail(style, attentionField, page),
+		page,
+		withOperatorRailDetail(style, attentionField, compactPage),
+		compactPage,
+		attentionField,
+	)
+	return renderOperatorRailColumns(style, width, connection, agentSlot, appsSlot, events, attentionSlot)
 }
 
 func operatorAttentionTone(style styles.Styles, diagnostics []DiagnosticLine) lipgloss.Style {
@@ -423,69 +562,114 @@ func renderCompactOperatorAppCounts(style styles.Styles, data ShellData) string 
 		style.Muted.Render(fmt.Sprintf("/%d registered", registered))
 }
 
-func fitRequiredRailPair(style styles.Styles, left string, right string, width int) string {
-	joined := joinOperatorRail(style, left, right)
-	if ansi.StringWidth(joined) <= width {
-		return joined
+func renderTightOperatorAppCounts(style styles.Styles, data ShellData) string {
+	if !data.StateKnown {
+		return style.Muted.Render("Apps unknown")
 	}
-	separator := style.Muted.Render(" ")
-	leftBudget := maxInt(10, width/2)
-	rightBudget := maxInt(1, width-ansi.StringWidth(separator)-leftBudget)
-	return truncateStyledText(left, leftBudget) + separator + truncateStyledText(right, rightBudget)
+	registered := data.RegisteredAppCount
+	if registered == 0 && data.AppCount > 0 {
+		registered = data.AppCount
+	}
+	if data.ActiveAppCount == 0 && data.RegisteredAppCount == 0 {
+		return style.Muted.Render(fmt.Sprintf("Apps %d saved", registered))
+	}
+	activeStyle := style.Muted
+	if data.ActiveAppCount > 0 {
+		activeStyle = operatorRailTone(style, "active")
+	}
+	return style.Muted.Render("Apps ") +
+		activeStyle.Render(fmt.Sprintf("%d active", data.ActiveAppCount)) +
+		style.Muted.Render(fmt.Sprintf("/%d saved", registered))
 }
 
-func fitNarrowOperatorSummary(style styles.Styles, data ShellData, apps string, attention string, width int) string {
-	joined := joinOperatorRail(style, apps, attention)
-	if ansi.StringWidth(joined) <= width {
-		return joined
+func renderMinimumOperatorAppCounts(style styles.Styles, data ShellData) string {
+	if !data.StateKnown {
+		return style.Muted.Render("Apps unknown")
 	}
-
-	compactApps := renderCompactOperatorAppCounts(style, data)
-	separator := style.Muted.Render(" ")
-	attentionBudget := width - ansi.StringWidth(compactApps) - ansi.StringWidth(separator)
-	minimumAttentionWidth := len("Attention")
-	if attentionBudget < minimumAttentionWidth {
-		appsBudget := maxInt(1, width-ansi.StringWidth(separator)-minimumAttentionWidth)
-		compactApps = truncateStyledText(compactApps, appsBudget)
-		attentionBudget = width - ansi.StringWidth(compactApps) - ansi.StringWidth(separator)
+	registered := data.RegisteredAppCount
+	if registered == 0 && data.AppCount > 0 {
+		registered = data.AppCount
 	}
-	compactAttention := renderCompactOperatorAttention(style, data.Diagnostics, attentionBudget)
-	return compactApps + separator + compactAttention
+	if data.ActiveAppCount == 0 && data.RegisteredAppCount == 0 {
+		return style.Muted.Render(fmt.Sprintf("Apps %d saved", registered))
+	}
+	activeStyle := style.Muted
+	if data.ActiveAppCount > 0 {
+		activeStyle = operatorRailTone(style, "active")
+	}
+	return style.Muted.Render("Apps ") +
+		activeStyle.Render(fmt.Sprintf("%d active", data.ActiveAppCount)) +
+		style.Muted.Render(fmt.Sprintf("/%d", registered))
 }
 
-func renderCompactOperatorAttention(style styles.Styles, diagnostics []DiagnosticLine, width int) string {
-	label := style.Muted.Render("Attention")
-	if width <= ansi.StringWidth(label) {
-		return truncateStyledText(label, maxInt(1, width))
-	}
-	summary := diagnosticsSummary(diagnostics)
-	if summary == "" {
-		summary = "—"
-	}
-	valueWidth := width - ansi.StringWidth(label) - 1
-	value := truncateText(summary, valueWidth)
-	return label + style.Muted.Render(" ") + operatorAttentionTone(style, diagnostics).Render(value)
-}
-
-func appendOperatorRailIfFits(style styles.Styles, required string, optional string, width int) string {
-	if optional == "" {
-		return required
-	}
-	candidate := joinOperatorRail(style, required, optional)
-	if ansi.StringWidth(candidate) <= width {
-		return candidate
-	}
-	return required
-}
-
-func joinOperatorRail(style styles.Styles, segments ...string) string {
-	compact := make([]string, 0, len(segments))
-	for _, segment := range segments {
-		if segment != "" {
-			compact = append(compact, segment)
+func operatorAppRailSlot(style styles.Styles, width int, group string, candidates ...string) string {
+	withGroup := make([]string, 0, len(candidates))
+	if group != "" {
+		for _, candidate := range candidates {
+			withGroup = append(withGroup, withOperatorRailDetail(style, candidate, group))
 		}
 	}
-	return strings.Join(compact, style.Muted.Render(" • "))
+	return firstOperatorRailCandidate(width, append(withGroup, candidates...)...)
+}
+
+func withOperatorRailDetail(style styles.Styles, base string, detail string) string {
+	if base == "" {
+		return detail
+	}
+	if detail == "" {
+		return base
+	}
+	return base + style.Muted.Render(" ") + detail
+}
+
+func firstOperatorRailCandidate(width int, candidates ...string) string {
+	fallback := ""
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		fallback = candidate
+		if ansi.StringWidth(candidate) <= width {
+			return candidate
+		}
+	}
+	return fallback
+}
+
+func renderOperatorRailColumns(style styles.Styles, width int, segments ...string) string {
+	columnWidths := operatorRailColumnWidths(width, len(segments))
+	divider := style.Muted.Render(operatorRailDivider)
+	var rail strings.Builder
+	for index, segment := range segments {
+		columnWidth := columnWidths[index]
+		if index > 0 && columnWidth > 0 {
+			segment = style.Muted.Render(" ") + segment
+		}
+		fitted := truncateStyledText(segment, columnWidth)
+		rail.WriteString(fitted)
+		rail.WriteString(strings.Repeat(" ", maxInt(0, columnWidth-ansi.StringWidth(fitted))))
+		if index < len(segments)-1 {
+			rail.WriteString(divider)
+		}
+	}
+	return rail.String()
+}
+
+func operatorRailColumnWidths(width int, count int) []int {
+	if count <= 0 {
+		return nil
+	}
+	available := maxInt(0, width-(count-1)*ansi.StringWidth(operatorRailDivider))
+	base := available / count
+	remainder := available % count
+	widths := make([]int, count)
+	for index := range widths {
+		widths[index] = base
+		if index < remainder {
+			widths[index]++
+		}
+	}
+	return widths
 }
 
 func fixedRegion(style lipgloss.Style, text string, width int, height int) string {
@@ -548,11 +732,14 @@ func operatorOverlay(style styles.Styles, data ShellData, metrics layout.Metrics
 	case data.Confirmation != nil:
 	case data.Usage != nil:
 	case data.ContextMenu != nil:
+	case data.RegisteredApps != nil:
+	case data.PaneReopen != nil:
 	case data.Help != nil || data.ShowHelp:
 	case data.DiagnosticsOpen:
 	case strings.TrimSpace(data.SetupPanel) != "":
 	case data.ThreadSwitcher != nil:
 	case data.CodePicker != nil:
+	case data.ResponseDetails:
 	default:
 		return operatorOverlayFrame{}
 	}
@@ -576,6 +763,8 @@ func operatorOverlay(style styles.Styles, data ShellData, metrics layout.Metrics
 		content = renderCodePicker(*data.CodePicker)
 	} else if data.Usage != nil {
 		content = usagecomponent.Render(*data.Usage, maxInt(20, innerWidth), time.Now())
+	} else if data.ResponseDetails {
+		content = renderAgentResponseContent(style, data, innerWidth, innerHeight)
 	}
 
 	viewportFrame := bodyViewportFrame{
@@ -607,6 +796,15 @@ func operatorOverlay(style styles.Styles, data ShellData, metrics layout.Metrics
 				Index: index,
 			})
 		}
+	case data.ResponseDetails:
+		localRegions = append(localRegions, components.HitRegion{
+			Rect: components.Rect{Width: innerWidth, Height: innerHeight},
+			Kind: components.HitResponse,
+		})
+	case data.RegisteredApps != nil:
+		localRegions = registeredAppHitRegions(helpProjection)
+	case data.PaneReopen != nil:
+		localRegions = paneReopenHitRegions(helpProjection)
 	case data.Help != nil:
 		localRegions = helpHitRegions(helpProjection)
 	}
@@ -675,12 +873,18 @@ func operatorOverlayContent(style styles.Styles, data ShellData) string {
 		return usagecomponent.Render(*data.Usage, 52, time.Now())
 	case data.ContextMenu != nil:
 		return renderContextMenu(*data.ContextMenu)
+	case data.RegisteredApps != nil:
+		return renderRegisteredAppsModal(style, data, *data.RegisteredApps)
+	case data.PaneReopen != nil:
+		return renderPaneReopenModal(style, data, *data.PaneReopen)
 	case data.Help != nil:
 		return renderSearchableHelp(style, data, *data.Help)
 	case data.ShowHelp:
 		return renderHelp(data)
 	case data.DiagnosticsOpen:
 		return renderDiagnosticsDrawer(data.Diagnostics)
+	case data.ResponseDetails:
+		return renderAgentResponseContent(style, data, maxInt(1, data.Width-4), maxInt(1, data.Height-8))
 	case strings.TrimSpace(data.SetupPanel) != "":
 		return safemarkdown.SanitizeTerminalText(data.SetupPanel)
 	default:
@@ -906,8 +1110,8 @@ func renderPaneGrid(style styles.Styles, data ShellData) string {
 	}
 	if len(data.Panes) == 0 {
 		if len(data.Inventory) > 0 {
-			lines = append(lines, renderInventory(data.Inventory, contentWidth(data.Width))...)
 			inventoryWidth := maxInt(1, contentWidth(data.Width)-style.Body.GetHorizontalFrameSize())
+			lines = append(lines, renderInventory(style, data.Inventory, inventoryWidth)...)
 			return style.Body.Width(inventoryWidth).Render(strings.Join(lines, "\n"))
 		}
 		lines = append(lines, "No monitoring panes are open")
@@ -921,7 +1125,7 @@ func renderPaneGrid(style styles.Styles, data ShellData) string {
 		lines = append(lines, fmt.Sprintf("Page %d/%d", data.Page+1, data.PageCount), "")
 	}
 
-	grid := renderGrid(style, data.Panes, data.PaneLayout, data.ClipboardWriteReady)
+	grid := renderGrid(style, data.Panes, data.PaneLayout, data.ClipboardWriteReady, data.ConnectionStatus == "connected")
 	lines = append(lines, grid)
 	return strings.Join(lines, "\n")
 }
@@ -931,24 +1135,24 @@ func renderFocusedPane(style styles.Styles, data ShellData, pane panes.PaneSnaps
 	if paneWidth <= 0 {
 		paneWidth = data.Width
 	}
-	return renderPane(style, pane, maxInt(paneWidth, 8), maxInt(data.PaneLayout.Height, 8), data.ClipboardWriteReady)
+	return renderPane(style, pane, maxInt(paneWidth, 8), maxInt(data.PaneLayout.Height, 8), data.ClipboardWriteReady, data.ConnectionStatus == "connected")
 }
 
-func renderGrid(style styles.Styles, paneSnapshots []panes.PaneSnapshot, layout panes.Layout, clipboardReady bool) string {
+func renderGrid(style styles.Styles, paneSnapshots []panes.PaneSnapshot, layout panes.Layout, clipboardReady bool, lifecycleReady bool) string {
 	columns := maxInt(layout.Columns, 1)
 	rows := []string{}
 	for start := 0; start < len(paneSnapshots); start += columns {
 		end := minInt(start+columns, len(paneSnapshots))
 		rowPanes := []string{}
 		for _, pane := range paneSnapshots[start:end] {
-			rowPanes = append(rowPanes, renderPane(style, pane, layout.PaneWidth, layout.PaneHeight, clipboardReady))
+			rowPanes = append(rowPanes, renderPane(style, pane, layout.PaneWidth, layout.PaneHeight, clipboardReady, lifecycleReady))
 		}
 		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, rowPanes...))
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
-func renderPane(style styles.Styles, pane panes.PaneSnapshot, width int, height int, clipboardReady bool) string {
+func renderPane(style styles.Styles, pane panes.PaneSnapshot, width int, height int, clipboardReady bool, lifecycleReady bool) string {
 	width = maxInt(width, 8)
 	height = maxInt(height, 6)
 
@@ -979,7 +1183,7 @@ func renderPane(style styles.Styles, pane panes.PaneSnapshot, width int, height 
 		lines = append(lines, truncateText(pidPortLine(pane), width-4))
 	}
 	copyEnabled := clipboardReady && (len(pane.LogLineModels) > 0 || len(pane.LogLines) > 0)
-	lines = append(lines, renderPaneControls(style, copyEnabled))
+	lines = append(lines, renderPaneControls(style, copyEnabled, lifecycleReady))
 	if pane.LastError != "" {
 		lines = append(lines, truncateText("error "+pane.LastError, width-4))
 	}
@@ -1029,12 +1233,16 @@ func paneLogGeometry(style styles.Styles, pane panes.PaneSnapshot, height int) (
 	return start, maxInt(0, innerHeight-start)
 }
 
-func renderPaneControls(style styles.Styles, copyEnabled bool) string {
+func renderPaneControls(style styles.Styles, copyEnabled bool, restartEnabled bool) string {
 	copyControl := style.ControlMuted.Render("[c]")
 	if copyEnabled {
 		copyControl = style.Control.Render("[c]")
 	}
-	return copyControl + " " + style.ControlMuted.Render("[·] [·]")
+	restartControl := style.ControlMuted.Render("[r]")
+	if restartEnabled {
+		restartControl = style.Control.Render("[r]")
+	}
+	return copyControl + " " + restartControl + " " + style.ControlMuted.Render("[·]")
 }
 
 func paneLogStyle(style styles.Styles, tone panes.LogTone) lipgloss.Style {
@@ -1078,6 +1286,23 @@ func renderCommandPalette(style styles.Styles, data CommandPaletteData, width in
 	return style.Palette.Width(innerWidth).Render(strings.Join(lines, "\n"))
 }
 
+func renderStartCompletion(style styles.Styles, data StartCompletionData, width int) string {
+	innerWidth := maxInt(12, width-2)
+	lines := []string{style.Muted.Render("Registered apps for /start")}
+	if len(data.Items) == 0 {
+		lines = append(lines, style.Muted.Render("No matching registered apps"))
+	} else {
+		rows := registeredAppTableRows(data.Items)
+		lines = append(lines, renderAppTable(style, innerWidth, len(rows), rows, data.SelectedVisible, 0))
+	}
+	footer := "↑↓ select • Tab complete • Enter open/submit • Esc close"
+	if data.Total > len(data.Items) {
+		footer = fmt.Sprintf("%d matches • %s", data.Total, footer)
+	}
+	lines = append(lines, style.Muted.Render(footer))
+	return style.Palette.Width(innerWidth).Render(strings.Join(lines, "\n"))
+}
+
 func renderSearchableHelp(style styles.Styles, shell ShellData, data HelpData) string {
 	width := contentWidth(shell.Width)
 	height := maxInt(8, shell.Height-8)
@@ -1104,9 +1329,12 @@ func renderSearchableHelp(style styles.Styles, shell ShellData, data HelpData) s
 	}
 	descriptor := data.Matches[selected].Descriptor
 	detailLines := []string{descriptor.Canonical, "category: " + descriptor.Category}
-	if descriptor.Approval {
+	switch descriptor.ConfirmationPolicy {
+	case slash.ConfirmationWhenTargeted:
+		detailLines = append(detailLines, "safety: chooser is read-only; targeted start requires confirmation")
+	case slash.ConfirmationAlways:
 		detailLines = append(detailLines, "safety: confirmation required")
-	} else {
+	default:
 		detailLines = append(detailLines, "safety: no confirmation required")
 	}
 	detailLines = append(detailLines, "", descriptor.Description, "", "Usage")
@@ -1158,6 +1386,275 @@ func renderSearchableHelp(style styles.Styles, shell ShellData, data HelpData) s
 	return strings.Join(lines, "\n")
 }
 
+type appTableRow struct {
+	Name    string
+	Project string
+	Status  string
+}
+
+func registeredAppTableRows(items []inventory.Item) []appTableRow {
+	rows := make([]appTableRow, 0, len(items))
+	nameCounts := map[string]int{}
+	for _, item := range items {
+		nameCounts[strings.ToLower(cleanInlineText(valueOr(item.Name, item.ID)))]++
+	}
+	for _, item := range items {
+		name := cleanInlineText(valueOr(item.Name, item.ID))
+		if nameCounts[strings.ToLower(name)] > 1 {
+			name += " [" + truncateText(cleanInlineText(item.ID), 12) + "]"
+		}
+		rows = append(rows, appTableRow{
+			Name:    name,
+			Project: item.Directory,
+			Status:  valueOr(item.Status, "unknown"),
+		})
+	}
+	return rows
+}
+
+func renderAppTable(style styles.Styles, width int, visibleRows int, rows []appTableRow, selected int, offset int) string {
+	visibleRows = maxInt(1, visibleRows)
+	start := clampInt(offset, 0, maxInt(0, len(rows)-visibleRows))
+	end := minInt(len(rows), start+visibleRows)
+	nameWidth, projectWidth, statusWidth := appTableColumnWidths(width)
+	tableRows := make([]bubblestable.Row, 0, end-start)
+	for _, row := range rows[start:end] {
+		status := cleanInlineText(valueOr(row.Status, "unknown"))
+		tableRows = append(tableRows, bubblestable.Row{
+			cleanInlineText(valueOr(row.Name, "Unknown app")),
+			shortProjectPath(row.Project, projectWidth),
+			appStatusTone(style, status).Render(status),
+		})
+	}
+	tableStyles := bubblestable.DefaultStyles()
+	tableStyles.Header = lipgloss.NewStyle().Bold(true).Foreground(style.Theme.Muted).Padding(0, 1)
+	tableStyles.Cell = lipgloss.NewStyle().Foreground(style.Theme.Text).Padding(0, 1)
+	tableStyles.Selected = lipgloss.NewStyle().Bold(true).Foreground(style.Theme.Background).Background(style.Theme.Accent)
+	model := bubblestable.New(
+		bubblestable.WithColumns([]bubblestable.Column{
+			{Title: "Name", Width: nameWidth},
+			{Title: "Project", Width: projectWidth},
+			{Title: "Status", Width: statusWidth},
+		}),
+		bubblestable.WithRows(tableRows),
+		bubblestable.WithWidth(maxInt(1, width)),
+		bubblestable.WithHeight(visibleRows+1),
+		bubblestable.WithFocused(true),
+		bubblestable.WithStyles(tableStyles),
+	)
+	if len(tableRows) > 0 {
+		model.SetCursor(clampInt(selected-start, 0, len(tableRows)-1))
+	}
+	return model.View()
+}
+
+func appTableColumnWidths(width int) (int, int, int) {
+	cellWidth := maxInt(3, width-6) // one cell of horizontal padding per column
+	status := minInt(12, maxInt(5, cellWidth/4))
+	name := maxInt(5, cellWidth*2/5)
+	project := cellWidth - name - status
+	if project < 3 {
+		project = 3
+		name = maxInt(1, cellWidth-status-project)
+	}
+	if name+project+status > cellWidth {
+		status = maxInt(1, cellWidth-name-project)
+	}
+	return name, project, status
+}
+
+func appStatusTone(style styles.Styles, status string) lipgloss.Style {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "running", "ready", "healthy", "active":
+		return lipgloss.NewStyle().Foreground(style.Theme.Success)
+	case "failed", "error", "errored", "unavailable", "offline":
+		return lipgloss.NewStyle().Foreground(style.Theme.Error)
+	case "stopped", "warning", "warn", "degraded", "starting", "stopping", "pending", "checking", "connecting":
+		return lipgloss.NewStyle().Foreground(style.Theme.Warning)
+	default:
+		return lipgloss.NewStyle().Foreground(style.Theme.Muted)
+	}
+}
+
+func shortProjectPath(value string, width int) string {
+	cleaned := strings.TrimSpace(cleanInlineText(value))
+	if cleaned == "" {
+		return "—"
+	}
+	cleaned = filepath.Clean(cleaned)
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		home = filepath.Clean(home)
+		lowerPath := strings.ToLower(cleaned)
+		lowerHome := strings.ToLower(home)
+		if lowerPath == lowerHome {
+			cleaned = "~"
+		} else if strings.HasPrefix(lowerPath, lowerHome+strings.ToLower(string(filepath.Separator))) {
+			cleaned = "~" + cleaned[len(home):]
+		}
+	}
+	cleaned = filepath.ToSlash(cleaned)
+	if ansi.StringWidth(cleaned) <= width {
+		return cleaned
+	}
+	parts := strings.Split(strings.Trim(cleaned, "/"), "/")
+	for keep := minInt(3, len(parts)); keep >= 1; keep-- {
+		candidate := ".../" + strings.Join(parts[len(parts)-keep:], "/")
+		if ansi.StringWidth(candidate) <= width {
+			return candidate
+		}
+	}
+	return truncateText(cleaned, maxInt(1, width))
+}
+
+func renderPaneReopenModal(style styles.Styles, shell ShellData, data PaneReopenData) string {
+	width := contentWidth(shell.Width)
+	height := maxInt(8, shell.Height-8)
+	viewportHeight := paneReopenViewportRows(shell)
+	contextLine := "Recently closed panes are listed first; opening a pane does not start or restart an app."
+	if data.AppID != "" {
+		contextLine = "Choose a monitoring pane for " + cleanInlineText(data.AppID) + "."
+	}
+	actionLine := "Enter opens the selected pane. Esc returns to the dashboard."
+	if strings.TrimSpace(data.Notice) != "" {
+		actionLine = cleanInlineText(data.Notice)
+	}
+	lines := []string{
+		fmt.Sprintf("Reopen pane — %d available", len(data.Items)),
+		contextLine,
+		actionLine,
+		"",
+	}
+	tableRows := make([]appTableRow, 0, len(data.Items))
+	nameCounts := map[string]int{}
+	for _, item := range data.Items {
+		nameCounts[strings.ToLower(cleanInlineText(item.Name))]++
+	}
+	for _, item := range data.Items {
+		name := cleanInlineText(item.Name)
+		if nameCounts[strings.ToLower(name)] > 1 {
+			name += " [" + truncateText(cleanInlineText(item.PaneID), 12) + "]"
+		}
+		tableRows = append(tableRows, appTableRow{Name: name, Project: item.Project, Status: valueOr(item.Status, "unknown")})
+	}
+	lines = append(lines, renderAppTable(style, width, viewportHeight, tableRows, data.Selected, data.Offset), "")
+	helpModel := bubbleshelp.New()
+	helpModel.SetWidth(width)
+	bindings := []bubbleskey.Binding{
+		bubbleskey.NewBinding(bubbleskey.WithKeys("up", "down"), bubbleskey.WithHelp("up/down", "select")),
+		bubbleskey.NewBinding(bubbleskey.WithKeys("pgup", "pgdown"), bubbleskey.WithHelp("pgup/pgdn", "page")),
+		bubbleskey.NewBinding(bubbleskey.WithKeys("enter"), bubbleskey.WithHelp("enter", "open pane")),
+		bubbleskey.NewBinding(bubbleskey.WithKeys("esc"), bubbleskey.WithHelp("esc", "close")),
+	}
+	lines = append(lines, helpModel.ShortHelpView(bindings))
+	return fixedRegion(lipgloss.NewStyle(), strings.Join(lines, "\n"), width, height)
+}
+
+func paneReopenViewportRows(shell ShellData) int {
+	return maxInt(1, maxInt(8, shell.Height-8)-7)
+}
+
+func renderRegisteredAppsModal(style styles.Styles, shell ShellData, data RegisteredAppsData) string {
+	width := contentWidth(shell.Width)
+	height := maxInt(8, shell.Height-8)
+	viewportHeight := registeredAppsViewportRows(shell)
+	lines := []string{
+		fmt.Sprintf("Registered apps — %d saved", len(data.Items)),
+		registeredAppsConnectionLine(data),
+		registeredAppsActionLine(data),
+		"",
+	}
+	tableRows := registeredAppTableRows(data.Items)
+	if len(tableRows) == 0 {
+		lines[2] = registeredAppsEmptyLine(data)
+	}
+	lines = append(lines, renderAppTable(style, width, viewportHeight, tableRows, data.Selected, data.Offset), "")
+
+	helpModel := bubbleshelp.New()
+	helpModel.SetWidth(width)
+	bindings := []bubbleskey.Binding{
+		bubbleskey.NewBinding(bubbleskey.WithKeys("up", "down"), bubbleskey.WithHelp("↑↓", "select")),
+		bubbleskey.NewBinding(bubbleskey.WithKeys("pgup", "pgdown"), bubbleskey.WithHelp("pgup/pgdn", "page")),
+		bubbleskey.NewBinding(bubbleskey.WithKeys("enter"), bubbleskey.WithHelp("enter", registeredAppsEnterHelp(data))),
+		bubbleskey.NewBinding(bubbleskey.WithKeys("esc"), bubbleskey.WithHelp("esc", "close")),
+	}
+	lines = append(lines, helpModel.ShortHelpView(bindings))
+	return fixedRegion(lipgloss.NewStyle(), strings.Join(lines, "\n"), width, height)
+}
+
+func registeredAppsViewportRows(shell ShellData) int {
+	return maxInt(1, maxInt(8, shell.Height-8)-7)
+}
+
+func registeredAppsConnectionLine(data RegisteredAppsData) string {
+	switch data.ConnectionStatus {
+	case "offline":
+		if len(data.Items) > 0 {
+			return "Daemon offline — showing last known registered apps; refresh is unavailable."
+		}
+		return "Daemon offline — registered apps are unavailable. Use /daemon repair."
+	case "connecting":
+		return "Connecting to the Relaybase daemon…"
+	case "connected":
+		if data.Refreshing {
+			return "Refreshing registered apps from the Relaybase daemon…"
+		}
+		if data.StateKnown {
+			return "Current daemon-backed registration state."
+		}
+	}
+	return "Loading registered apps from the Relaybase daemon…"
+}
+
+func registeredAppsActionLine(data RegisteredAppsData) string {
+	if strings.TrimSpace(data.Notice) != "" {
+		return cleanInlineText(data.Notice)
+	}
+	if data.ConnectionStatus != "connected" {
+		return "Start is unavailable until the Relaybase daemon is connected."
+	}
+	if len(data.Items) == 0 || data.Selected < 0 || data.Selected >= len(data.Items) {
+		return "Use /register <path> or /add <path> to register an app."
+	}
+	item := data.Items[data.Selected]
+	status := strings.ToLower(strings.TrimSpace(item.Status))
+	switch status {
+	case "", "stopped":
+		return "Enter reviews a confirmation-gated daemon start request."
+	case "running":
+		return "Enter opens this app's existing monitoring pane."
+	case "starting", "stopping":
+		return "Wait for the daemon transition to finish before choosing an action."
+	case "failed", "degraded":
+		return "Use /restart " + cleanInlineText(item.ID) + " to review a daemon restart request."
+	default:
+		return "This app cannot be started from its current state."
+	}
+}
+
+func registeredAppsEnterHelp(data RegisteredAppsData) string {
+	if data.Selected < 0 || data.Selected >= len(data.Items) {
+		return "unavailable"
+	}
+	switch strings.ToLower(strings.TrimSpace(data.Items[data.Selected].Status)) {
+	case "running":
+		return "open pane"
+	case "", "stopped":
+		return "review start"
+	default:
+		return "status guidance"
+	}
+}
+
+func registeredAppsEmptyLine(data RegisteredAppsData) string {
+	if data.ConnectionStatus == "connected" && data.StateKnown {
+		return "No registered apps. Use /register <path> or /add <path>."
+	}
+	if data.ConnectionStatus == "offline" {
+		return "Registered apps cannot be loaded while the daemon is offline."
+	}
+	return "Loading registered apps…"
+}
+
 func renderDiagnosticsDrawer(diagnostics []DiagnosticLine) string {
 	lines := []string{"Diagnostics", "Press Ctrl+D or Esc to return to the dashboard.", ""}
 	if len(diagnostics) == 0 {
@@ -1169,31 +1666,49 @@ func renderDiagnosticsDrawer(diagnostics []DiagnosticLine) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderInventory(items []inventory.Item, width int) []string {
+func renderInventory(style styles.Styles, items []inventory.Item, width int) []string {
 	lines := []string{
 		"Registered apps — no monitoring panes are open",
 		"Use ↑/↓ to choose a stopped app and Enter to review a daemon start request.",
 		"Ctrl+O can reopen hidden monitoring panes.",
 		"",
 	}
-	for _, item := range items {
-		prefix := "  "
+	rows := registeredAppTableRows(items)
+	selected := 0
+	for index, item := range items {
 		if item.Selected {
-			prefix = "> "
+			selected = index
+			break
 		}
-		label := fmt.Sprintf("%s — %s", valueOr(item.Name, item.ID), valueOr(item.Status, "unknown"))
-		if item.Readiness != "" && item.Readiness != item.Status {
-			label += " / " + item.Readiness
-		}
-		if item.CanStart() {
-			label += " — Enter: start"
-		} else if item.Status == "running" || item.Status == "starting" {
-			label += " — monitoring pane hidden"
-		}
-		if item.LastError != "" {
-			label += " — error: " + item.LastError
-		}
-		lines = append(lines, prefix+truncateText(label, maxInt(width-2, 1)))
+	}
+	lines = append(lines, renderAppTable(style, width, maxInt(1, len(rows)), rows, selected, 0), "")
+	if selected < len(items) {
+		item := items[selected]
+		lines = append(lines, inventorySelectionDetails(item)...)
+	}
+	return lines
+}
+
+func inventorySelectionDetails(item inventory.Item) []string {
+	name := cleanInlineText(valueOr(item.Name, item.ID))
+	lines := []string{"Selected: " + name}
+	details := []string{}
+	if readiness := strings.TrimSpace(item.Readiness); readiness != "" && !strings.EqualFold(readiness, item.Status) {
+		details = append(details, "Readiness: "+cleanInlineText(readiness))
+	}
+	if lastError := strings.TrimSpace(item.LastError); lastError != "" {
+		details = append(details, "Last error: "+cleanInlineText(lastError))
+	}
+	if len(details) > 0 {
+		lines = append(lines, strings.Join(details, " • "))
+	}
+	switch {
+	case item.CanStart():
+		lines = append(lines, "Enter: review start")
+	case item.Status == "running" || item.Status == "starting":
+		lines = append(lines, "Monitoring pane hidden — use Ctrl+O to reopen it.")
+	default:
+		lines = append(lines, "No start action is available from the current daemon state.")
 	}
 	return lines
 }
@@ -1251,7 +1766,7 @@ func diagnosticsSummary(diagnostics []DiagnosticLine) string {
 // BodyScrollMax returns the maximum safe body offset for keyboard navigation.
 func BodyScrollMax(style styles.Styles, data ShellData) int {
 	if data.OperatorConsole {
-		metrics := layout.Compute(maxInt(data.Width, 1), maxInt(data.Height, 1), data.ComposerRows)
+		metrics := layout.ComputeWithOptions(maxInt(data.Width, 1), maxInt(data.Height, 1), data.ComposerRows, layout.Options{AgentExpanded: data.AgentPaneExpanded})
 		if metrics.ResizeRequired {
 			return 0
 		}
@@ -1284,7 +1799,9 @@ func BodyScrollMax(style styles.Styles, data ShellData) int {
 	status := style.Status.Width(width).Render("")
 	assistant := components.RenderAssistantBar(style, "", width)
 	paletteHeight := 0
-	if data.CommandPalette != nil {
+	if data.StartCompletion != nil {
+		paletteHeight = lipgloss.Height(renderStartCompletion(style, *data.StartCompletion, width))
+	} else if data.CommandPalette != nil {
 		paletteHeight = lipgloss.Height(renderCommandPalette(style, *data.CommandPalette, width))
 	}
 	bodyHeight := maxInt(1, height-lipgloss.Height(header)-lipgloss.Height(status)-paletteHeight-lipgloss.Height(assistant))
@@ -1299,21 +1816,38 @@ func BodyScrollMax(style styles.Styles, data ShellData) int {
 
 // ResponseScrollMax returns the greatest safe response offset using the same
 // Markdown wrapping and viewport geometry as the operator renderer.
-func ResponseScrollMax(data ShellData) int {
+func ResponseScrollMax(style styles.Styles, data ShellData) int {
 	width := maxInt(data.Width, 1)
 	height := maxInt(data.Height, 1)
-	metrics := layout.Compute(width, height, data.ComposerRows)
+	metrics := layout.ComputeWithOptions(width, height, data.ComposerRows, layout.Options{AgentExpanded: data.AgentPaneExpanded})
 	if metrics.ResizeRequired {
 		return 0
 	}
-	rendered := (safemarkdown.SafeMarkdownRenderer{}).Render(data.ResponseSource, maxInt(20, width-4))
-	return renderBodyViewportFrame(rendered.Text, maxInt(1, metrics.Response.Height-1), maxIntValue(), width).Offset
+	contentWidth := 0
+	contentHeight := 0
+	if data.ResponseDetails {
+		content := overlayContentBounds(style.Help, metrics.Modal)
+		contentWidth = content.Width
+		contentHeight = content.Height
+	} else if metrics.AgentDocked {
+		panelStyle := agentDockStyle(style)
+		contentWidth = maxInt(1, metrics.Agent.Width-panelStyle.GetHorizontalFrameSize())
+		contentHeight = maxInt(1, metrics.Agent.Height-panelStyle.GetVerticalFrameSize())
+	} else {
+		return 0
+	}
+	source := strings.TrimSpace(data.ResponseSource)
+	if source == "" {
+		source = "No Agent output yet. Submit a request in Composer."
+	}
+	rendered := (safemarkdown.SafeMarkdownRenderer{}).Render(source, maxInt(20, contentWidth))
+	return renderBodyViewportFrame(rendered.Text, maxInt(1, contentHeight-2), maxIntValue(), contentWidth).Offset
 }
 
 // ResponseBottomOffset is an intention-revealing alias used when follow mode
 // anchors new Agent output to the bottom of the response viewport.
-func ResponseBottomOffset(data ShellData) int {
-	return ResponseScrollMax(data)
+func ResponseBottomOffset(style styles.Styles, data ShellData) int {
+	return ResponseScrollMax(style, data)
 }
 
 func maxIntValue() int {
@@ -1401,6 +1935,7 @@ func renderHelp(data ShellData) string {
 	lines = append(lines, "- /unpin <pane>")
 	lines = append(lines, "- /theme <light|dark|auto>")
 	lines = append(lines, "- /help")
+	lines = append(lines, "- /list")
 	lines = append(lines, "- /daemon status")
 	lines = append(lines, "- /daemon repair")
 	lines = append(lines, "- /thread list")

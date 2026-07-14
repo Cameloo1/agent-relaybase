@@ -39,12 +39,22 @@ func TestHitMapContainsOnlyExplicitInteractiveRegionsAndTopmostWins(t *testing.T
 	if !hitMap.Add(HitRegion{Rect: Rect{X: 2, Y: 1, Width: 3, Height: 1}, Kind: HitPaneCopyLogs, PaneID: "pane-a"}) {
 		t.Fatal("valid copy region was rejected")
 	}
-	if len(hitMap.Regions()) != 2 {
+	if !hitMap.Add(HitRegion{Rect: Rect{X: 5, Y: 1, Width: 3, Height: 1}, Kind: HitPaneRestart, PaneID: "pane-a"}) {
+		t.Fatal("valid restart region was rejected")
+	}
+	if hitMap.Add(HitRegion{Rect: Rect{X: 8, Y: 1, Width: 3, Height: 1}, Kind: HitPaneRestart}) {
+		t.Fatal("restart region without a pane ID must be rejected")
+	}
+	if len(hitMap.Regions()) != 3 {
 		t.Fatalf("unexpected region count: %#v", hitMap.Regions())
 	}
 	region, ok := hitMap.Hit(3, 1)
 	if !ok || region.Kind != HitPaneCopyLogs {
 		t.Fatalf("topmost copy region did not win: %#v ok=%v", region, ok)
+	}
+	region, ok = hitMap.Hit(6, 1)
+	if !ok || region.Kind != HitPaneRestart {
+		t.Fatalf("restart region missing: %#v ok=%v", region, ok)
 	}
 	region, ok = hitMap.Hit(8, 3)
 	if !ok || region.Kind != HitPaneLogs {

@@ -98,13 +98,14 @@ function structuredAdapterId(launch: AppLaunch): string {
 }
 
 function legacyLaunchPlan(app: AppRecord, _port: number): CompiledLaunchPlan {
+  const [executable = app.command, ...args] = splitCommand(app.command);
   return Object.freeze({
     schemaVersion: 1 as const,
     source: app.command === "external" ? ("external" as const) : ("legacy" as const),
     adapterId: "legacy-command",
     adapterVersion: 1,
-    executable: app.command,
-    args: Object.freeze([]),
+    executable,
+    args: Object.freeze(args),
     cwd: app.cwd,
     environment: Object.freeze({}),
     port: Object.freeze({
@@ -122,4 +123,14 @@ function legacyLaunchPlan(app: AppRecord, _port: number): CompiledLaunchPlan {
     warnings: Object.freeze([]),
     confidence: "high" as const
   });
+}
+
+function splitCommand(command: string): string[] {
+  const tokens: string[] = [];
+  const pattern = /"([^"]*)"|'([^']*)'|([^\s]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(command))) {
+    tokens.push(match[1] ?? match[2] ?? match[3] ?? "");
+  }
+  return tokens;
 }

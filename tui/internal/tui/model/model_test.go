@@ -25,6 +25,7 @@ import (
 	"github.com/cameloo/relaybase/tui/internal/tui/assistant"
 	"github.com/cameloo/relaybase/tui/internal/tui/commands"
 	"github.com/cameloo/relaybase/tui/internal/tui/contextmenu"
+	"github.com/cameloo/relaybase/tui/internal/tui/interaction"
 	"github.com/cameloo/relaybase/tui/internal/tui/panes"
 	"github.com/cameloo/relaybase/tui/internal/tui/slash"
 	"github.com/cameloo/relaybase/tui/internal/tui/testfixtures"
@@ -446,7 +447,7 @@ func TestFocusedPanePageKeysScrollLogsAndFetchOlder(t *testing.T) {
 	root = updated.(RootModel)
 	paneID := root.PaneManager().SelectedPaneID()
 	root.paneManager.MergeSnapshot(panes.LogTarget{PaneID: paneID, AppID: "app-1-web"}, &relaybaseclient.LogSnapshot{
-		Events: testLogEvents("app-1-web", "app-1", "frontend", 30),
+		Events: testLogEvents("app-1-web", "app-1", "frontend", 80),
 		Page: relaybaseclient.LogPage{
 			NextBefore: "10",
 			HasOlder:   true,
@@ -455,19 +456,27 @@ func TestFocusedPanePageKeysScrollLogsAndFetchOlder(t *testing.T) {
 	updated, _ = root.Update(keyPress("enter"))
 	model := updated.(RootModel)
 
-	updated, cmd := model.Update(keyPress("pgup"))
-	model = updated.(RootModel)
+	var cmd tea.Cmd
+	for attempts := 0; attempts < 10 && cmd == nil; attempts++ {
+		updated, cmd = model.Update(keyPress("pgup"))
+		model = updated.(RootModel)
+	}
 	if cmd == nil {
-		t.Fatal("expected focused PageUp to request older logs when available")
+		t.Fatal("expected repeated focused PageUp to request older logs at the retained boundary")
 	}
 	if pane := model.PaneManager().SelectedPane(); pane == nil || pane.ScrollOffset == 0 {
 		t.Fatalf("expected focused PageUp to scroll away from follow position, got %#v", pane)
 	}
 
-	updated, cmd = model.Update(keyPress("pgdown"))
-	model = updated.(RootModel)
-	if cmd != nil {
-		t.Fatal("focused PageDown should scroll locally without fetching logs")
+	for attempts := 0; attempts < 10; attempts++ {
+		updated, cmd = model.Update(keyPress("pgdown"))
+		model = updated.(RootModel)
+		if cmd != nil {
+			t.Fatal("focused PageDown should scroll locally without fetching logs")
+		}
+		if pane := model.PaneManager().SelectedPane(); pane != nil && pane.ScrollOffset == 0 {
+			break
+		}
 	}
 	if pane := model.PaneManager().SelectedPane(); pane == nil || pane.ScrollOffset != 0 {
 		t.Fatalf("expected focused PageDown to return to the latest logs, got %#v", pane)
@@ -945,8 +954,8 @@ func TestPaneMenuNavigationInModel(t *testing.T) {
 	updated, _ = model.Update(keyPress("down"))
 	model = updated.(RootModel)
 
-	if item := model.contextMenu.SelectedItem(); item == nil || item.Action != contextmenu.ActionPanePinToggle {
-		t.Fatalf("expected pin action after menu navigation, got %#v", item)
+	if item := model.contextMenu.SelectedItem(); item == nil || item.Action != contextmenu.ActionPaneStop {
+		t.Fatalf("expected stop action after menu navigation, got %#v", item)
 	}
 }
 
@@ -968,8 +977,7 @@ func TestMenuActionUpdatesPanePreferences(t *testing.T) {
 	root := newTestModelWithPanes(t, 1)
 	updated, _ := root.Update(ctrlKey("o"))
 	model := updated.(RootModel)
-	updated, _ = model.Update(keyPress("down"))
-	model = updated.(RootModel)
+	selectMenuAction(t, &model, contextmenu.ActionPanePinToggle)
 	updated, cmd := model.Update(keyPress("enter"))
 	model = updated.(RootModel)
 
@@ -1066,15 +1074,16 @@ func TestPaneMenuReopensAvailablePane(t *testing.T) {
 	}
 	selectMenuAction(t, &root, contextmenu.ActionPaneReopen)
 	cmd := root.executeContextMenuSelection()
-	if cmd == nil {
-		t.Fatal("expected preference save command after reopening pane")
+	if cmd != nil || !root.paneReopenVisible || root.interaction.Transient != interaction.TransientPaneReopen {
+		t.Fatalf("reopen action did not open its chooser: visible=%v transient=%s cmd=%v", root.paneReopenVisible, root.interaction.Transient, cmd)
 	}
-	if panes := root.PaneManager().VisiblePanes(); len(panes) != 1 {
-		t.Fatalf("expected one reopened pane, got %#v", panes)
+	if panes := root.PaneManager().VisiblePanes(); len(panes) != 0 {
+		t.Fatalf("opening chooser implicitly reopened a pane: %#v", panes)
 	}
-	history := strings.Join(root.assistantHistoryForView(), "\n")
-	if !strings.Contains(history, "Reopened pane.") {
-		t.Fatalf("expected reopen message, got %#v", history)
+	updated, cmd := root.Update(keyPress("enter"))
+	root = updated.(RootModel)
+	if cmd == nil || root.paneReopenVisible || len(root.PaneManager().VisiblePanes()) != 1 || !root.PaneManager().Focused() {
+		t.Fatalf("chooser did not explicitly reopen and focus the selected pane: visible=%v focused=%v cmd=%v panes=%#v", root.paneReopenVisible, root.PaneManager().Focused(), cmd, root.PaneManager().VisiblePanes())
 	}
 }
 
@@ -1700,21 +1709,62 @@ func TestAgentReconnectStatusIsVisibleAndClearsOnReplay(t *testing.T) {
 	root := newTestModel(t)
 	stream := &relaybaseclient.AgentEventStream{}
 	root.agentSession = &relaybaseclient.AgentSession{ID: "session-1"}
+	root.agentStatus = "running"
 	root.agentStream = stream
 	root.agentStreamSessionID = "session-1"
 	root.agentStreamGeneration = 1
-	reconnecting := rawAgentEvent("stream.reconnecting", `{"afterSequence":7,"attempt":2}`)
-	updated, _ := root.Update(commands.AgentEventMsg{Stream: stream, Event: reconnecting, SessionID: "session-1", Generation: 1})
+	firstAttempt := rawAgentEvent("stream.reconnecting", `{"afterSequence":7,"attempt":1}`)
+	updated, _ := root.Update(commands.AgentEventMsg{Stream: stream, Event: firstAttempt, SessionID: "session-1", Generation: 1})
 	model := updated.(RootModel)
-	if model.agentStatus != "reconnecting" || !hasDiagnostic(model.Diagnostics(), agentEventDisconnectedCode) {
+	if model.agentStatus != "running" || hasDiagnostic(model.Diagnostics(), agentEventDisconnectedCode) {
+		t.Fatalf("transient reconnect changed visible state: status=%s diagnostics=%#v", model.agentStatus, model.Diagnostics())
+	}
+
+	reconnecting := rawAgentEvent("stream.reconnecting", `{"afterSequence":7,"attempt":2}`)
+	updated, _ = model.Update(commands.AgentEventMsg{Stream: stream, Event: reconnecting, SessionID: "session-1", Generation: 1})
+	model = updated.(RootModel)
+	if model.agentStatus != "running" || !hasDiagnostic(model.Diagnostics(), agentEventDisconnectedCode) {
 		t.Fatalf("reconnect status not visible: status=%s diagnostics=%#v", model.agentStatus, model.Diagnostics())
 	}
 
 	replayed := rawAgentEvent("answer", `{"content":"reconnected"}`)
 	updated, _ = model.Update(commands.AgentEventMsg{Stream: stream, Event: replayed, SessionID: "session-1", Generation: 1})
 	model = updated.(RootModel)
-	if model.agentStatus != "streaming" || hasDiagnostic(model.Diagnostics(), agentEventDisconnectedCode) {
+	if model.agentStatus != "running" || hasDiagnostic(model.Diagnostics(), agentEventDisconnectedCode) {
 		t.Fatalf("reconnect status did not clear: status=%s diagnostics=%#v", model.agentStatus, model.Diagnostics())
+	}
+}
+
+func TestInitialAgentReplayCommitsOnlyFinalSemanticStatus(t *testing.T) {
+	root := newTestModel(t)
+	root.agentStatus = "idle"
+	root.agentInitialReplay = true
+
+	root.applyAgentRunEvent(rawAgentEvent("run.started", `{}`))
+	root.applyAgentRunEvent(rawAgentEvent("model.delta", `{"delta":"historical output"}`))
+	if root.agentStatus != "idle" || root.lastAssistantLine != "" {
+		t.Fatalf("historical replay leaked intermediate state: status=%s line=%q", root.agentStatus, root.lastAssistantLine)
+	}
+	if rendered := strings.Join(root.assistantHistoryForView(), "\n"); strings.Contains(rendered, "historical output") {
+		t.Fatalf("historical delta rendered before its terminal event: %q", rendered)
+	}
+
+	root.applyAgentRunEvent(rawAgentEvent("run.completed", `{}`))
+	root.applyAgentRunEvent(rawAgentEvent("stream.replay_completed", `{"afterSequence":0}`))
+	if root.agentStatus != "idle" || root.agentInitialReplay || root.agentReplayStatus != "" {
+		t.Fatalf("replay final state was not committed once: status=%s replay=%t pending=%q", root.agentStatus, root.agentInitialReplay, root.agentReplayStatus)
+	}
+	if rendered := strings.Join(root.assistantHistoryForView(), "\n"); !strings.Contains(rendered, "historical output") {
+		t.Fatalf("terminal replay output was lost: %q", rendered)
+	}
+}
+
+func TestAgentModelDeltaDoesNotOverwriteRunningStatus(t *testing.T) {
+	root := newTestModel(t)
+	root.agentStatus = "running"
+	root.applyAgentRunEvent(rawAgentEvent("model.delta", `{"delta":"working"}`))
+	if root.agentStatus != "running" {
+		t.Fatalf("model delta changed semantic run status to %q", root.agentStatus)
 	}
 }
 
@@ -2044,10 +2094,7 @@ func TestLifecycleMenuActionCallsDaemonClient(t *testing.T) {
 
 	updated, _ := root.Update(ctrlKey("o"))
 	model := updated.(RootModel)
-	for index := 0; index < 6; index++ {
-		updated, _ = model.Update(keyPress("down"))
-		model = updated.(RootModel)
-	}
+	selectMenuAction(t, &model, contextmenu.ActionPaneStop)
 	updated, cmd := model.Update(keyPress("enter"))
 	model = updated.(RootModel)
 	if cmd != nil {
@@ -2595,6 +2642,8 @@ func TestAgentConfigLoadsActiveDaemonThread(t *testing.T) {
 	cfg := config.Config{BaseURL: server.URL, StateDir: t.TempDir(), Token: "test-token", ThemeMode: "auto"}
 	root := NewRoot(cfg, relaybaseclient.New(cfg.BaseURL, cfg.Token, server.Client()))
 	root.connectionStatus = "connected"
+	updated, _ := root.Update(tea.WindowSizeMsg{Width: 160, Height: 36})
+	root = updated.(RootModel)
 	updated, cmd := root.Update(commands.AgentConfigLoadedMsg{Config: enabledAgentConfig(true)})
 	model := updated.(RootModel)
 	if cmd == nil {
@@ -3301,6 +3350,8 @@ func ctrlKey(value string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: 26}
 	case "o":
 		return tea.KeyPressMsg{Code: 15}
+	case "r":
+		return tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl}
 	default:
 		return tea.KeyPressMsg{}
 	}

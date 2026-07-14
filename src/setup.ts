@@ -2025,7 +2025,7 @@ function runtimeCandidateSelection(
       const previews = [candidate.commandPreview, candidate.command.join(" ")].map(normalizeComparableCommand);
       if (previews.includes(normalized)) {
         return {
-          command: candidate.commandPreview,
+          command: setupCommandForRuntimeCandidate(detection, candidate.command, candidate.commandPreview),
           source: "runtime-candidate",
           candidateId: candidate.id
         };
@@ -2634,12 +2634,24 @@ function startCommandFor(detection: ProjectDetection): string {
     (candidate) => candidate.confidence === "high" || candidate.confidence === "medium"
   );
   if (runtimeCommand && !/[&|<>;$`]/.test(runtimeCommand.commandPreview)) {
-    return runtimeCommand.commandPreview;
+    return setupCommandForRuntimeCandidate(detection, runtimeCommand.command, runtimeCommand.commandPreview);
   }
   if (detection.primaryRuntime && detection.primaryRuntime.runtime !== "javascript-typescript") {
     return "external";
   }
   return "node server.js";
+}
+
+function setupCommandForRuntimeCandidate(
+  detection: ProjectDetection,
+  command: string[],
+  commandPreview: string
+): string {
+  const scriptName = packageScriptNameFromTokens(command);
+  if (scriptName && Object.prototype.hasOwnProperty.call(detection.scripts, scriptName)) {
+    return `${detection.packageCommand} ${runToken(detection.packageManager)} ${scriptName}`;
+  }
+  return commandPreview;
 }
 
 function packageManagerArgs(packageManager: ProjectDetection["packageManager"], script: string): string[] {

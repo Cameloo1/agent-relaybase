@@ -21,6 +21,7 @@ type AppState struct {
 	RuntimeStatus  string          `json:"runtimeStatus,omitempty"`
 	ReadinessState string          `json:"readinessState,omitempty"`
 	Route          string          `json:"route,omitempty"`
+	CWD            string          `json:"cwd,omitempty"`
 	ManifestPath   string          `json:"manifestPath,omitempty"`
 	PID            int             `json:"pid,omitempty"`
 	Port           int             `json:"port,omitempty"`

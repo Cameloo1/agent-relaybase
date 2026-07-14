@@ -15,7 +15,7 @@ import { dashboardHtml } from "../src/dashboard.ts";
 import { isRecognizedRelaybaseNpmPowerShellShim, removeRecognizedRelaybasePowerShellShim } from "../src/prefixShim.ts";
 import { checkAppHealth, waitForHealthy } from "../src/health.ts";
 import { LogStore } from "../src/logStore.ts";
-import { ProcessManager } from "../src/processManager.ts";
+import { normalizeWindowsCommandShim, ProcessManager } from "../src/processManager.ts";
 import { redactDiagnosticText, redactSecretLikeValues, redactValueForExport } from "../src/redaction.ts";
 import { Registry } from "../src/registry.ts";
 import { appIdFromHost, resolveRoute } from "../src/router.ts";
@@ -110,6 +110,30 @@ test("structured launch validates controlled tokens and compiles argument bounda
     () => normalizeManifest({ id: "bad", name: "Bad", command: "node app.js", launch: { executable: "node" } }),
     /cannot both be provided/
   );
+});
+
+test("legacy launch plans expose the executable separately for verification preflight", () => {
+  const app = normalizeManifest(
+    {
+      schemaVersion: 1,
+      id: "legacy-vite",
+      name: "Legacy Vite",
+      command: "npm.cmd run dev",
+      cwd: "."
+    },
+    { manifestPath: path.join("C:\\Projects\\Legacy Vite", "relaybase.app.json"), now: new Date(0) }
+  );
+  const plan = compileLaunchPlan(app, { host: "127.0.0.1", port: 17042, hubPort: 7777 });
+  assert.equal(plan.source, "legacy");
+  assert.equal(plan.executable, "npm.cmd");
+  assert.deepEqual(plan.args, ["run", "dev"]);
+});
+
+test("Windows package-manager commands resolve to executable command shims", () => {
+  assert.equal(normalizeWindowsCommandShim("npm run serve", "win32"), "npm.cmd run serve");
+  assert.equal(normalizeWindowsCommandShim("corepack pnpm run dev", "win32"), "corepack.cmd pnpm run dev");
+  assert.equal(normalizeWindowsCommandShim("npm run serve", "linux"), "npm run serve");
+  assert.equal(normalizeWindowsCommandShim("C:\\tools\\npm run serve", "win32"), "C:\\tools\\npm run serve");
 });
 
 test("process manager passes assigned port and spaced arguments through structured launch with shell disabled", async () => {
@@ -1915,6 +1939,8 @@ test("generates standard app state shape", () => {
   const state = composeAppState({
     id: "notes",
     name: "Notes",
+    cwd: "C:\\work\\notes",
+    manifestPath: "C:\\work\\notes\\relaybase.app.json",
     registered: true,
     runtime: {
       status: "running",
@@ -1934,6 +1960,8 @@ test("generates standard app state shape", () => {
   });
 
   assert.equal(state.id, "notes");
+  assert.equal(state.cwd, "C:\\work\\notes");
+  assert.equal(state.manifestPath, "C:\\work\\notes\\relaybase.app.json");
   assert.equal(state.registered, true);
   assert.equal(state.runtime.status, "running");
   assert.equal(state.backendPortOpen, true);

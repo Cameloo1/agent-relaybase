@@ -19,7 +19,18 @@ type CommandDescriptor struct {
 	Aliases     []string
 	Category    string
 	Approval    bool
+	// ConfirmationPolicy makes conditional commands honest in help while
+	// Approval remains the representative-example compatibility flag.
+	ConfirmationPolicy ConfirmationPolicy
 }
+
+type ConfirmationPolicy string
+
+const (
+	ConfirmationNever        ConfirmationPolicy = "never"
+	ConfirmationAlways       ConfirmationPolicy = "always"
+	ConfirmationWhenTargeted ConfirmationPolicy = "when_targeted"
+)
 
 // CommandMatch is a ranked catalog result. Score is intended only for stable
 // ordering and must not be persisted as product state.
@@ -30,6 +41,7 @@ type CommandMatch struct {
 
 var commandCatalog = []CommandDescriptor{
 	descriptor(KindLaunch, "/launch", "/launch ", "lifecycle", true, "Start an app, group, or component role through the daemon.", []string{"/launch <app|group|role>"}, []string{"/launch notes"}, []string{"start", "run"}),
+	withConfirmationPolicy(descriptor(KindStart, "/start", "/start ", "inventory", true, "Open the registered app launcher, or request a confirmation-gated start for one registered app.", []string{"/start", "/start <app>"}, []string{"/start notes"}, []string{"apps", "registered", "saved", "launcher", "run"}), ConfirmationWhenTargeted),
 	descriptor(KindStop, "/stop", "/stop ", "lifecycle", true, "Stop an app, group, or component role through the daemon.", []string{"/stop <app|group|role>"}, []string{"/stop notes"}, []string{"shutdown"}),
 	descriptor(KindRestart, "/restart", "/restart ", "lifecycle", true, "Restart an app, group, or component role through the daemon.", []string{"/restart <app|group|role>"}, []string{"/restart notes"}, []string{"reboot", "reload"}),
 	descriptor(KindLogsExport, "/logs export", "/logs export ", "logs", true, "Export a redacted log scope through the daemon.", []string{"/logs export <pane|app|group|page|all>"}, []string{"/logs export all"}, []string{"download", "save"}),
@@ -40,6 +52,7 @@ var commandCatalog = []CommandDescriptor{
 	descriptor(KindUnpin, "/unpin", "/unpin ", "layout", false, "Unpin a pane from the dashboard layout.", []string{"/unpin <pane>"}, []string{"/unpin current"}, []string{"release", "layout"}),
 	descriptor(KindTheme, "/theme", "/theme ", "layout", false, "Choose the light, dark, or automatic TUI theme.", []string{"/theme <light|dark|auto>"}, []string{"/theme dark"}, []string{"appearance", "color"}),
 	descriptor(KindHelp, "/help", "/help", "help", false, "Open searchable command help.", []string{"/help"}, []string{"/help"}, []string{"commands", "documentation"}),
+	descriptor(KindList, "/list", "/list", "inventory", false, "Open the registered app launcher.", []string{"/list"}, []string{"/list"}, []string{"apps", "registered", "saved", "start", "launcher"}),
 	descriptor(KindConfirm, "/confirm", "/confirm", "safety", false, "Confirm the currently pending Relaybase action.", []string{"/confirm"}, []string{"/confirm"}, []string{"approve", "continue"}),
 	descriptor(KindCancel, "/cancel", "/cancel", "safety", false, "Cancel the currently pending Relaybase action.", []string{"/cancel"}, []string{"/cancel"}, []string{"reject", "abort"}),
 	descriptor(KindDaemonStatus, "/daemon status", "/daemon status", "daemon", false, "Show the current Relaybase daemon connection status.", []string{"/daemon status"}, []string{"/daemon status"}, []string{"offline", "connection"}),
@@ -74,7 +87,16 @@ var commandCatalog = []CommandDescriptor{
 }
 
 func descriptor(kind, canonical, insertion, category string, approval bool, description string, usages, examples, keywords []string) CommandDescriptor {
-	return CommandDescriptor{Kind: kind, Canonical: canonical, Insertion: insertion, Category: category, Approval: approval, Description: description, Usages: usages, Examples: examples, Keywords: keywords}
+	policy := ConfirmationNever
+	if approval {
+		policy = ConfirmationAlways
+	}
+	return CommandDescriptor{Kind: kind, Canonical: canonical, Insertion: insertion, Category: category, Approval: approval, ConfirmationPolicy: policy, Description: description, Usages: usages, Examples: examples, Keywords: keywords}
+}
+
+func withConfirmationPolicy(value CommandDescriptor, policy ConfirmationPolicy) CommandDescriptor {
+	value.ConfirmationPolicy = policy
+	return value
 }
 
 func withAliases(value CommandDescriptor, aliases ...string) CommandDescriptor {

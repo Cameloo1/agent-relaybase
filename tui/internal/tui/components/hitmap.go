@@ -41,19 +41,24 @@ func ClipAndTranslate(rect Rect, clip Rect, dx int, dy int) (Rect, bool) {
 type HitKind string
 
 const (
-	HitPaneSurface       HitKind = "pane.surface"
-	HitPaneLogs          HitKind = "pane.logs"
-	HitPaneCopyLogs      HitKind = "pane.copy_logs"
-	HitCommandPalette    HitKind = "command_palette"
-	HitCommandPaletteRow HitKind = "command_palette.row"
-	HitHelpResult        HitKind = "help.result"
-	HitHelpDetail        HitKind = "help.detail"
-	HitResponse          HitKind = "response"
-	HitComposer          HitKind = "composer"
-	HitModal             HitKind = "modal"
-	HitTransient         HitKind = "transient"
-	HitThreadSwitcherRow HitKind = "thread_switcher.row"
-	HitCodePickerRow     HitKind = "code_picker.row"
+	HitPaneSurface        HitKind = "pane.surface"
+	HitPaneLogs           HitKind = "pane.logs"
+	HitPaneCopyLogs       HitKind = "pane.copy_logs"
+	HitPaneRestart        HitKind = "pane.restart"
+	HitCommandPalette     HitKind = "command_palette"
+	HitCommandPaletteRow  HitKind = "command_palette.row"
+	HitStartCompletion    HitKind = "start_completion"
+	HitStartCompletionRow HitKind = "start_completion.row"
+	HitHelpResult         HitKind = "help.result"
+	HitHelpDetail         HitKind = "help.detail"
+	HitRegisteredAppRow   HitKind = "registered_apps.row"
+	HitPaneReopenRow      HitKind = "pane_reopen.row"
+	HitResponse           HitKind = "response"
+	HitComposer           HitKind = "composer"
+	HitModal              HitKind = "modal"
+	HitTransient          HitKind = "transient"
+	HitThreadSwitcherRow  HitKind = "thread_switcher.row"
+	HitCodePickerRow      HitKind = "code_picker.row"
 )
 
 type HitRegion struct {
@@ -71,7 +76,7 @@ func (h *HitMap) Add(region HitRegion) bool {
 	if h == nil || !region.Rect.Valid() || region.Kind == "" {
 		return false
 	}
-	if (region.Kind == HitPaneSurface || region.Kind == HitPaneLogs || region.Kind == HitPaneCopyLogs) && region.PaneID == "" {
+	if (region.Kind == HitPaneSurface || region.Kind == HitPaneLogs || region.Kind == HitPaneCopyLogs || region.Kind == HitPaneRestart) && region.PaneID == "" {
 		return false
 	}
 	h.regions = append(h.regions, region)

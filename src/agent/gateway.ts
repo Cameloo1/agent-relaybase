@@ -915,7 +915,8 @@ export class AgentGatewayService {
       },
       message.content,
       input.knownSecrets,
-      result.diagnostics
+      result.diagnostics,
+      result.modelOutputProduced ?? false
     );
   }
 
@@ -951,7 +952,8 @@ export class AgentGatewayService {
     diagnostic: AgentDiagnostic,
     content: string,
     knownSecrets: string[],
-    diagnostics: AgentDiagnostic[] = [diagnostic]
+    diagnostics: AgentDiagnostic[] = [diagnostic],
+    modelOutputProduced = false
   ): void {
     run.status = diagnostic.code === "AGENT_RUN_CANCELLED" ? "cancelled" : "failed";
     run.completedAt = new Date().toISOString();
@@ -963,7 +965,7 @@ export class AgentGatewayService {
       {
         diagnostic,
         cancelled: run.status === "cancelled",
-        modelOutputProduced: false
+        modelOutputProduced
       },
       knownSecrets
     );

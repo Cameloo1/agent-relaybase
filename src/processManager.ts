@@ -42,6 +42,15 @@ interface RuntimeEntry {
   stopVerification?: StopVerification;
 }
 
+const WINDOWS_COMMAND_SHIMS = new Set(["npm", "npx", "pnpm", "yarn", "corepack"]);
+
+export function normalizeWindowsCommandShim(command: string, platform = process.platform): string {
+  if (platform !== "win32") {
+    return command;
+  }
+  return command.replace(/^(\s*)(npm|npx|pnpm|yarn|corepack)(?=\s|$)/i, "$1$2.cmd");
+}
+
 function throwIfLifecycleAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
     throw lifecycleAbortError(signal);
@@ -1063,6 +1072,14 @@ export class ProcessManager {
       return { command, args: [], shell: true };
     }
 
+    if (process.platform === "win32" && WINDOWS_COMMAND_SHIMS.has(executable.toLowerCase())) {
+      return {
+        command: normalizeWindowsCommandShim(command),
+        args: [],
+        shell: true
+      };
+    }
+
     return {
       command: executable,
       args: tokens.slice(1),
@@ -1082,6 +1099,13 @@ export class ProcessManager {
       return {
         command: process.env.ComSpec ?? "cmd.exe",
         args: ["/d", "/s", "/c", executable, ...args],
+        shell: false
+      };
+    }
+    if (process.platform === "win32" && WINDOWS_COMMAND_SHIMS.has(executable.toLowerCase())) {
+      return {
+        command: process.env.ComSpec ?? "cmd.exe",
+        args: ["/d", "/s", "/c", `${executable}.cmd`, ...args],
         shell: false
       };
     }

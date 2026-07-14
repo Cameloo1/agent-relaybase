@@ -79,6 +79,19 @@ type PaneSnapshot struct {
 	ScrollOffset  int
 }
 
+// ReopenCandidate describes a currently hidden pane that can be restored
+// without changing the daemon-owned lifecycle state of its app.
+type ReopenCandidate struct {
+	PaneID      string
+	AppID       string
+	DisplayName string
+	Title       string
+	PaneLabel   string
+	Status      string
+	UserClosed  bool
+	StableOrder int
+}
+
 type LogTarget struct {
 	PaneID string
 	AppID  string
@@ -99,6 +112,7 @@ type Layout struct {
 
 type Manager struct {
 	panes         map[string]*Pane
+	current       map[string]bool
 	order         []string
 	selectedIndex int
 	page          int
@@ -109,6 +123,7 @@ type Manager struct {
 	maxScrollback int
 	pinnedPrefs   map[string]bool
 	hiddenPrefs   map[string]bool
+	recentHidden  []string
 	orderPrefs    []string
 	colorPrefs    map[string]string
 }
@@ -117,6 +132,7 @@ func NewManager() Manager {
 	initialLayout := CalculateLayout(80, 18, 1)
 	return Manager{
 		panes:         map[string]*Pane{},
+		current:       map[string]bool{},
 		order:         []string{},
 		selectedIndex: 0,
 		page:          0,
@@ -128,6 +144,7 @@ func NewManager() Manager {
 		maxScrollback: DefaultMaxScrollback,
 		pinnedPrefs:   map[string]bool{},
 		hiddenPrefs:   map[string]bool{},
+		recentHidden:  []string{},
 		orderPrefs:    []string{},
 		colorPrefs:    map[string]string{},
 	}
@@ -216,6 +233,7 @@ func (m *Manager) ApplyState(state *relaybaseclient.RelaybaseState) []Diagnostic
 			pane.Hidden = true
 		}
 	}
+	m.current = seen
 
 	m.sortOrder()
 	m.restoreSelection(selectedID)
@@ -229,6 +247,7 @@ func (m *Manager) ApplyPreferences(pinned []string, hidden []string, order []str
 	}
 	m.pinnedPrefs = boolSet(pinned)
 	m.hiddenPrefs = boolSet(hidden)
+	m.recentHidden = uniqueStrings(hidden)
 	m.orderPrefs = uniqueStrings(order)
 	m.colorPrefs = copyStringMap(colors)
 	for id, pane := range m.panes {
@@ -366,9 +385,17 @@ func (m Manager) PinnedIDs() []string {
 
 func (m Manager) HiddenIDs() []string {
 	ids := []string{}
-	for _, id := range m.order {
+	seen := map[string]bool{}
+	for _, id := range m.recentHidden {
 		pane := m.panes[id]
 		if pane != nil && pane.UserHidden {
+			ids = append(ids, id)
+			seen[id] = true
+		}
+	}
+	for _, id := range m.order {
+		pane := m.panes[id]
+		if pane != nil && pane.UserHidden && !seen[id] {
 			ids = append(ids, id)
 		}
 	}
@@ -521,6 +548,7 @@ func (m *Manager) CloseSelected() {
 	pane.Hidden = true
 	pane.UserHidden = true
 	pane.Pinned = false
+	m.recentHidden = moveToFront(m.recentHidden, pane.ID)
 	if m.focusedID == pane.ID {
 		m.focusedID = ""
 	}
@@ -529,12 +557,59 @@ func (m *Manager) CloseSelected() {
 }
 
 func (m Manager) CanReopen() bool {
-	return m.reopenCandidate() != nil
+	return len(m.ReopenCandidates()) > 0
 }
 
-func (m *Manager) ReopenSelectedOrFirstAvailable() bool {
-	pane := m.reopenCandidate()
-	if pane == nil {
+// ReopenCandidates returns user-closed panes in most-recently-closed order,
+// followed by other hidden panes in stable pane order.
+func (m Manager) ReopenCandidates() []ReopenCandidate {
+	result := []ReopenCandidate{}
+	seen := map[string]bool{}
+	appendCandidate := func(id string, userClosed bool) {
+		pane := m.panes[id]
+		if pane == nil || !m.current[id] || !pane.Hidden || seen[id] {
+			return
+		}
+		seen[id] = true
+		result = append(result, ReopenCandidate{
+			PaneID:      pane.ID,
+			AppID:       pane.AppID,
+			DisplayName: pane.DisplayName,
+			Title:       pane.Title,
+			PaneLabel:   pane.PaneLabel,
+			Status:      pane.Status,
+			UserClosed:  userClosed,
+			StableOrder: len(result),
+		})
+	}
+	for _, id := range m.recentHidden {
+		pane := m.panes[id]
+		appendCandidate(id, pane != nil && pane.UserHidden)
+	}
+	for _, id := range m.order {
+		appendCandidate(id, false)
+	}
+	return result
+}
+
+// PaneIDsForApp returns every pane for an app in stable pane order, including
+// panes that are currently hidden.
+func (m Manager) PaneIDsForApp(appID string) []string {
+	ids := []string{}
+	for _, id := range m.order {
+		pane := m.panes[id]
+		if pane != nil && m.current[id] && pane.AppID == appID {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// RevealAndSelectPane restores the exact pane requested and selects it. It
+// never starts, stops, or restarts the daemon-owned app.
+func (m *Manager) RevealAndSelectPane(paneID string) bool {
+	pane := m.panes[paneID]
+	if pane == nil || !m.current[paneID] {
 		return false
 	}
 	pane.UserHidden = false
@@ -543,7 +618,7 @@ func (m *Manager) ReopenSelectedOrFirstAvailable() bool {
 		pane.Pinned = true
 	}
 	for index, id := range m.visibleIDs() {
-		if id == pane.ID {
+		if id == paneID {
 			m.selectedIndex = index
 			m.page = index / m.pageCapacity()
 			break
@@ -554,14 +629,13 @@ func (m *Manager) ReopenSelectedOrFirstAvailable() bool {
 	return true
 }
 
-func (m Manager) reopenCandidate() *Pane {
-	for _, id := range m.order {
-		candidate := m.panes[id]
-		if candidate != nil && candidate.Hidden {
-			return candidate
-		}
+// ReopenPane restores one explicit candidate and removes it from close recency.
+func (m *Manager) ReopenPane(paneID string) bool {
+	if !m.RevealAndSelectPane(paneID) {
+		return false
 	}
-	return nil
+	m.recentHidden = removeString(m.recentHidden, paneID)
+	return true
 }
 
 func (m *Manager) ToggleFollowSelected() {
@@ -1281,6 +1355,30 @@ func uniqueStrings(values []string) []string {
 		}
 		seen[trimmed] = true
 		result = append(result, trimmed)
+	}
+	return result
+}
+
+func moveToFront(values []string, value string) []string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return uniqueStrings(values)
+	}
+	result := []string{trimmed}
+	for _, candidate := range uniqueStrings(values) {
+		if candidate != trimmed {
+			result = append(result, candidate)
+		}
+	}
+	return result
+}
+
+func removeString(values []string, value string) []string {
+	result := []string{}
+	for _, candidate := range uniqueStrings(values) {
+		if candidate != value {
+			result = append(result, candidate)
+		}
 	}
 	return result
 }

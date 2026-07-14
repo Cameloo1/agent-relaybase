@@ -11,6 +11,7 @@ import (
 	"github.com/cameloo/relaybase/tui/internal/relaybaseclient"
 	"github.com/cameloo/relaybase/tui/internal/tui/commands"
 	"github.com/cameloo/relaybase/tui/internal/tui/components"
+	"github.com/cameloo/relaybase/tui/internal/tui/slash"
 	"github.com/cameloo/relaybase/tui/internal/tui/views"
 )
 
@@ -84,7 +85,7 @@ func TestSearchableHelpOwnsPrintableKeysAndClosesInOneStep(t *testing.T) {
 	}
 }
 
-func TestPaneCopyButtonCopiesLastTwentyAndPlaceholdersAreInert(t *testing.T) {
+func TestPaneCopyRestartAndRemainingPlaceholderControls(t *testing.T) {
 	previousWriter := writeClipboardText
 	previousCapability := clipboardWriteAvailable
 	defer func() {
@@ -127,10 +128,22 @@ func TestPaneCopyButtonCopiesLastTwentyAndPlaceholdersAreInert(t *testing.T) {
 		t.Fatalf("unexpected copied tail (%d): %q", len(lines), copied)
 	}
 
-	updated, placeholderCmd := model.Update(tea.MouseClickMsg{X: copyRegion.Rect.X + 5, Y: copyRegion.Rect.Y, Button: tea.MouseLeft})
+	restartRegion, ok := firstHit(views.BuildShell(model.styles, model.shellData()), components.HitPaneRestart)
+	if !ok {
+		t.Fatal("restart control has no hit region")
+	}
+	updated, restartCmd := model.Update(tea.MouseClickMsg{X: restartRegion.Rect.X, Y: restartRegion.Rect.Y, Button: tea.MouseLeft})
+	model = updated.(RootModel)
+	if restartCmd != nil || !model.PendingConfirmation() || model.pendingConfirm.Command.Kind != slash.KindRestart {
+		t.Fatalf("restart must open the existing confirmation gate, cmd=%v pending=%#v", restartCmd, model.pendingConfirm)
+	}
+	updated, _ = model.Update(keyPress("esc"))
+	model = updated.(RootModel)
+
+	updated, placeholderCmd := model.Update(tea.MouseClickMsg{X: restartRegion.Rect.X + 5, Y: restartRegion.Rect.Y, Button: tea.MouseLeft})
 	model = updated.(RootModel)
 	if placeholderCmd != nil || model.PendingConfirmation() {
-		t.Fatalf("placeholder must be inert, cmd=%v pending=%v", placeholderCmd, model.PendingConfirmation())
+		t.Fatalf("remaining placeholder must be inert, cmd=%v pending=%v", placeholderCmd, model.PendingConfirmation())
 	}
 }
 

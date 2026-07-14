@@ -17,6 +17,8 @@ func TestParseSlashCommands(t *testing.T) {
 		scope  string
 	}{
 		{name: "launch", input: "/launch api", kind: KindLaunch, target: "api"},
+		{name: "start chooser", input: "/start", kind: KindStart},
+		{name: "start app", input: "/start api", kind: KindStart, target: "api"},
 		{name: "stop", input: "/stop api --confirm", kind: KindStop, target: "api"},
 		{name: "restart", input: "/restart backend", kind: KindRestart, target: "backend"},
 		{name: "logs export", input: "/logs export pane", kind: KindLogsExport, scope: ScopePane},
@@ -26,6 +28,7 @@ func TestParseSlashCommands(t *testing.T) {
 		{name: "unpin", input: "/unpin current", kind: KindUnpin, target: "current"},
 		{name: "theme", input: "/theme dark", kind: KindTheme},
 		{name: "help", input: "/help", kind: KindHelp},
+		{name: "list", input: "/list", kind: KindList},
 		{name: "usage", input: "/usage", kind: KindUsage},
 		{name: "confirm", input: "/confirm", kind: KindConfirm},
 		{name: "cancel", input: "/cancel", kind: KindCancel},
@@ -70,6 +73,18 @@ func TestParseSlashCommands(t *testing.T) {
 				t.Fatalf("expected scope %s, got %#v", test.scope, command)
 			}
 		})
+	}
+}
+
+func TestStartAcceptsOnlyTargetedConfirmFlag(t *testing.T) {
+	for _, input := range []string{"/start --confirm", "/start notes --dry-run", "/start notes --no-verify"} {
+		if _, err := Parse(input); err == nil {
+			t.Fatalf("unsupported start flags were accepted for %q", input)
+		}
+	}
+	command, err := Parse("/start notes --confirm")
+	if err != nil || !command.Confirm || command.Target != "notes" {
+		t.Fatalf("targeted confirmation flag was rejected: command=%#v err=%v", command, err)
 	}
 }
 
@@ -171,6 +186,8 @@ func TestParseRequiredSlashCommandMatrix(t *testing.T) {
 		{input: "/component label notes Notes frontend", kind: KindComponentLabel, target: "notes", value: "Notes frontend"},
 		{input: "/port pinned notes 5173", kind: KindPortPinned, target: "notes"},
 		{input: "/launch notes", kind: KindLaunch, target: "notes"},
+		{input: "/start", kind: KindStart},
+		{input: "/start notes", kind: KindStart, target: "notes"},
 		{input: "/stop notes --confirm", kind: KindStop, target: "notes", confirmed: true},
 		{input: "/restart backend", kind: KindRestart, target: "backend"},
 		{input: "/logs export pane 2", kind: KindLogsExport, target: "2", scope: ScopePane},
@@ -201,6 +218,7 @@ func TestParseRequiredSlashCommandMatrix(t *testing.T) {
 		{input: "/daemon repair", kind: KindDaemonRepair},
 		{input: "/daemon retry", kind: KindDaemonRepair},
 		{input: "/help", kind: KindHelp},
+		{input: "/list", kind: KindList},
 		{input: "/usage", kind: KindUsage},
 		{input: "/confirm", kind: KindConfirm},
 		{input: "/cancel", kind: KindCancel},
@@ -246,6 +264,7 @@ func TestParseCaseAndWhitespaceVariants(t *testing.T) {
 		target string
 	}{
 		{input: "  /LAUNCH Notes  ", kind: KindLaunch, target: "Notes"},
+		{input: "  /START Notes  ", kind: KindStart, target: "Notes"},
 		{input: "\t/Configure CWD\t", kind: KindConfigure},
 		{input: " /THREAD EXPORT JSON ", kind: KindThreadExport},
 		{input: " /HEALTH Notes --PROVE ", kind: KindHealthProve, target: "Notes"},
@@ -334,6 +353,8 @@ func TestParseRejectsInvalidArgumentsAndFlags(t *testing.T) {
 		{input: "/unpin", want: "Use /unpin <pane>."},
 		{input: "/theme purple", want: "Theme must be light, dark, or auto."},
 		{input: "/help now", want: "Use /help."},
+		{input: "/list now", want: "Use /list."},
+		{input: "/list --confirm", want: "Use /list."},
 		{input: "/confirm now", want: "Use /confirm."},
 		{input: "/cancel now", want: "Use /cancel."},
 		{input: "/daemon", want: "Use /daemon <status|repair|retry>."},

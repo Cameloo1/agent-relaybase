@@ -3,6 +3,7 @@ package views
 import (
 	"fmt"
 	"image/color"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -85,10 +86,10 @@ func TestOperatorResponsivePagesKeepFullMetadataPanesScrollable(t *testing.T) {
 	}{
 		{name: "narrow", width: 70, height: 24, visible: 1},
 		{name: "narrow_79", width: 79, height: 24, visible: 1},
-		{name: "medium_80", width: 80, height: 24, visible: 2},
+		{name: "medium_80", width: 80, height: 24, visible: 4},
 		{name: "medium_100", width: 100, height: 30, visible: 6},
-		{name: "medium_110", width: 110, height: 32, visible: 6},
-		{name: "wide_120", width: 120, height: 32, visible: 8},
+		{name: "medium_110", width: 110, height: 32, visible: 8},
+		{name: "wide_120", width: 120, height: 32, visible: 6},
 	}
 
 	for _, test := range tests {
@@ -140,7 +141,7 @@ func TestMinimumPaneGeometryRetainsCompleteBorderAndLogHit(t *testing.T) {
 	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
 	style := styles.New(theme)
 	pane := paneSnapshots(1)[0]
-	rendered := renderPane(style, pane, 28, 6, true)
+	rendered := renderPane(style, pane, 28, 6, true, true)
 	if got := lipgloss.Width(rendered); got != 28 {
 		t.Fatalf("minimum pane width = %d, want 28: %q", got, ansiEscapePattern.ReplaceAllString(rendered, ""))
 	}
@@ -151,7 +152,7 @@ func TestMinimumPaneGeometryRetainsCompleteBorderAndLogHit(t *testing.T) {
 	if !strings.Contains(plain, "└") || !strings.Contains(plain, "┘") || !strings.Contains(plain, "ready") {
 		t.Fatalf("minimum pane lost its border or log row:\n%s", plain)
 	}
-	regions := paneRegionsForRendered(style, pane, 0, 0, 28, 6, true)
+	regions := paneRegionsForRendered(style, pane, 0, 0, 28, 6, true, true)
 	foundLog := false
 	for _, region := range regions {
 		if region.Kind == components.HitPaneLogs {
@@ -187,9 +188,17 @@ func TestOperatorShellPreservesThemeAndSemanticIndicatorColors(t *testing.T) {
 
 	rendered := BuildShell(style, data).Text
 	plain := ansiEscapePattern.ReplaceAllString(rendered, "")
-	for _, expected := range []string{"2 active", "3 registered", "Events failed (42)", "Page 2/2", "[focused]"} {
+	for _, expected := range []string{"Apps 2 active", "Events failed", "Page 2/2", "[focused]"} {
 		if !strings.Contains(plain, expected) {
 			t.Fatalf("operator rail/focus omitted %q:\n%s", expected, plain)
+		}
+	}
+	wide := data
+	wide.Width = 240
+	widePlain := ansiEscapePattern.ReplaceAllString(BuildShell(style, wide).Text, "")
+	for _, expected := range []string{"2 active", "3 registered"} {
+		if !strings.Contains(widePlain, expected) {
+			t.Fatalf("wide operator rail omitted full app-count wording %q:\n%s", expected, widePlain)
 		}
 	}
 	for _, expected := range []string{
@@ -259,12 +268,24 @@ func TestOperatorPaneLogLinesKeepTheirSemanticToneAssociation(t *testing.T) {
 	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
 	style := styles.New(theme)
 	data := operatorCompatibilityData(100, 32, 1)
+	startLine, ok := panes.ProjectLogEvent(relaybaseclient.LogEvent{
+		Stream: "stdout", Source: "start", Level: "info", Message: "start-marker",
+	})
+	if !ok {
+		t.Fatal("daemon start event did not project")
+	}
+	stopLine, ok := panes.ProjectLogEvent(relaybaseclient.LogEvent{
+		Stream: "stdout", Source: "stop", Level: "info", Message: "stop-marker",
+	})
+	if !ok {
+		t.Fatal("daemon stop event did not project")
+	}
 	data.Panes[0].LogLineModels = []panes.PaneLogLine{
 		{Text: "success-marker", Tone: panes.LogToneSuccess},
 		{Text: "warning-marker", Tone: panes.LogToneWarning},
 		{Text: "error-marker", Tone: panes.LogToneError},
-		{Text: "start-marker", Tone: panes.LogToneStart},
-		{Text: "stop-marker", Tone: panes.LogToneStop},
+		startLine,
+		stopLine,
 	}
 	rendered := BuildShell(style, data).Text
 	tests := []struct {
@@ -334,6 +355,86 @@ func TestWideOperatorRailRetainsLegacyGroupCountWhenItFits(t *testing.T) {
 	if !strings.Contains(plain, "Groups 4") {
 		t.Fatalf("wide operator rail dropped the compatible group count:\n%s", plain)
 	}
+}
+
+func TestOperatorRailColumnsStayFixedAcrossStatusUpdates(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	style := styles.New(theme)
+	for _, width := range []int{80, 81, 119, 120, 121, 160} {
+		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
+			before := operatorCompatibilityData(width, 32, 1)
+			before.AgentStatus = "waiting"
+			before.ActiveAppCount = 2
+			before.RegisteredAppCount = 3
+			before.EventStatus = "waiting"
+
+			after := before
+			after.ConnectionStatus = "reconnecting"
+			after.AgentStatus = "ready_no_thread"
+			after.ActiveAppCount = 42
+			after.RegisteredAppCount = 105
+			after.EventStatus = "failed"
+			after.EventCount = 999
+			after.Diagnostics = []DiagnosticLine{{Severity: "error"}, {Severity: "warning"}, {Severity: "info"}}
+
+			beforeLine := ansiEscapePattern.ReplaceAllString(renderOperatorRail(style, before, width), "")
+			afterLine := ansiEscapePattern.ReplaceAllString(renderOperatorRail(style, after, width), "")
+			beforeDividers := visibleColumnsOf(beforeLine, operatorRailDivider)
+			afterDividers := visibleColumnsOf(afterLine, operatorRailDivider)
+			if !slices.Equal(beforeDividers, afterDividers) {
+				t.Fatalf("divider columns moved after an update: before=%v after=%v\n%s\n%s", beforeDividers, afterDividers, beforeLine, afterLine)
+			}
+			if len(beforeDividers) != 4 {
+				t.Fatalf("divider count=%d, want 4: %q", len(beforeDividers), beforeLine)
+			}
+			spans := []int{beforeDividers[0]}
+			for index := 1; index < len(beforeDividers); index++ {
+				spans = append(spans, beforeDividers[index]-beforeDividers[index-1])
+			}
+			spans = append(spans, width-beforeDividers[len(beforeDividers)-1])
+			minimum, maximum := spans[0], spans[0]
+			for _, span := range spans[1:] {
+				minimum = minInt(minimum, span)
+				maximum = maxInt(maximum, span)
+			}
+			if maximum-minimum > 1 {
+				t.Fatalf("rail columns are not evenly distributed: width=%d dividers=%v spans=%v", width, beforeDividers, spans)
+			}
+			for _, label := range []string{"Relaybase", "Agent", "Apps", "Events", "Attention"} {
+				beforeColumn := visibleColumnOf(beforeLine, label)
+				afterColumn := visibleColumnOf(afterLine, label)
+				if beforeColumn < 0 || beforeColumn != afterColumn {
+					t.Fatalf("%s column moved after an update: before=%d after=%d\n%s\n%s", label, beforeColumn, afterColumn, beforeLine, afterLine)
+				}
+			}
+			if strings.Contains(beforeLine, "•") || strings.Contains(afterLine, "•") {
+				t.Fatalf("operator rail retained the dot separator:\n%s\n%s", beforeLine, afterLine)
+			}
+		})
+	}
+}
+
+func visibleColumnsOf(value string, target string) []int {
+	columns := []int{}
+	searchFrom := 0
+	for searchFrom < len(value) {
+		relative := strings.Index(value[searchFrom:], target)
+		if relative < 0 {
+			break
+		}
+		index := searchFrom + relative
+		columns = append(columns, lipgloss.Width(value[:index]))
+		searchFrom = index + len(target)
+	}
+	return columns
+}
+
+func visibleColumnOf(value string, target string) int {
+	index := strings.Index(value, target)
+	if index < 0 {
+		return -1
+	}
+	return lipgloss.Width(value[:index])
 }
 
 func TestOperatorUsageOverlayShowsCompleteRowsFooterAndBox(t *testing.T) {
@@ -564,40 +665,114 @@ func TestOperatorThreadSwitcherRowsMatchVisiblePaddedContent(t *testing.T) {
 
 func TestResponseBottomOffsetMatchesRenderedSafeMarkdownViewport(t *testing.T) {
 	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
-	data := operatorCompatibilityData(100, 30, 1)
+	style := styles.New(theme)
+	data := operatorCompatibilityData(160, 36, 1)
 	lines := make([]string, 40)
 	for index := range lines {
 		lines[index] = fmt.Sprintf("response line %02d", index+1)
 	}
 	data.ResponseSource = strings.Join(lines, "\n\n")
-	data.ResponseOffset = ResponseBottomOffset(data)
-	if data.ResponseOffset <= 0 || data.ResponseOffset != ResponseScrollMax(data) {
+	data.ResponseOffset = ResponseBottomOffset(style, data)
+	if data.ResponseOffset <= 0 || data.ResponseOffset != ResponseScrollMax(style, data) {
 		t.Fatalf("invalid response bottom offset %d", data.ResponseOffset)
 	}
-	plain := ansiEscapePattern.ReplaceAllString(BuildShell(styles.New(theme), data).Text, "")
+	plain := ansiEscapePattern.ReplaceAllString(BuildShell(style, data).Text, "")
 	if !strings.Contains(plain, "response line 40") {
 		t.Fatalf("bottom response offset did not reveal final rendered line:\n%s", plain)
+	}
+}
+
+func TestAgentDockUsesUpperThirdWithoutGrowingComposer(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	data := operatorCompatibilityData(160, 30, 1)
+	rows := make([]string, 20)
+	for index := range rows {
+		rows[index] = fmt.Sprintf("response-row-%02d", index+1)
+	}
+	data.ResponseSource = strings.Join(rows, "\n")
+	data.ResponseOffset = 0
+	frame := BuildShell(styles.New(theme), data)
+	metrics := layout.Compute(data.Width, data.Height, data.ComposerRows)
+	if !metrics.AgentDocked || metrics.Agent.Width != data.Width/3 || metrics.Panes.Width != data.Width-data.Width/3 || metrics.Composer.Height != data.ComposerRows+2 {
+		t.Fatalf("Agent/composer geometry diverged: %#v", metrics)
+	}
+	if lipgloss.Width(frame.Text) != data.Width || lipgloss.Height(frame.Text) != data.Height {
+		t.Fatalf("Agent dock escaped terminal geometry: %dx%d", lipgloss.Width(frame.Text), lipgloss.Height(frame.Text))
+	}
+	plain := ansiEscapePattern.ReplaceAllString(frame.Text, "")
+	if !strings.Contains(plain, "response-row-20") || !strings.Contains(plain, "Ctrl+G agent pane") {
+		t.Fatalf("Agent dock or Composer pointer is missing:\n%s", plain)
+	}
+}
+
+func TestAgentModalUsesTheDockResponseRendererAndExclusiveHitMap(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	style := styles.New(theme)
+	dock := operatorCompatibilityData(160, 30, 2)
+	dock.ResponseSource = "shared-agent-token\n\nsecond line"
+	dockPlain := ansiEscapePattern.ReplaceAllString(BuildShell(style, dock).Text, "")
+
+	modal := dock
+	modal.Width = 100
+	modal.ResponseDetails = true
+	modalPlain := ansiEscapePattern.ReplaceAllString(BuildShell(style, modal).Text, "")
+	for _, expected := range []string{"shared-agent-token", "[c] copy", "[b] code"} {
+		if !strings.Contains(dockPlain, expected) || !strings.Contains(modalPlain, expected) {
+			t.Fatalf("shared Agent renderer omitted %q: dock=%q modal=%q", expected, dockPlain, modalPlain)
+		}
+	}
+	frame := BuildShell(style, modal)
+	foundModal := false
+	foundResponse := false
+	for _, region := range frame.HitMap.Regions() {
+		switch region.Kind {
+		case components.HitModal:
+			foundModal = true
+		case components.HitResponse:
+			foundResponse = true
+		case components.HitPaneSurface, components.HitPaneLogs:
+			t.Fatalf("Agent modal leaked background pane hit region: %#v", region)
+		}
+	}
+	if !foundModal || !foundResponse {
+		t.Fatalf("Agent modal omitted owned regions: modal=%v response=%v", foundModal, foundResponse)
+	}
+}
+
+func TestAgentComposerPointerRemainsVisibleInModalFallback(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	data := operatorCompatibilityData(100, 30, 2)
+	frame := BuildShell(styles.New(theme), data)
+	metrics := layout.Compute(data.Width, data.Height, data.ComposerRows)
+	plain := ansiEscapePattern.ReplaceAllString(frame.Text, "")
+	if metrics.AgentDockable || !strings.Contains(plain, "Ctrl+G agent pane") {
+		t.Fatalf("fallback layout lost the Composer Agent pointer: metrics=%#v\n%s", metrics, plain)
+	}
+	if lipgloss.Width(frame.Text) != data.Width || lipgloss.Height(frame.Text) != data.Height {
+		t.Fatalf("fallback shell escaped terminal geometry: %dx%d", lipgloss.Width(frame.Text), lipgloss.Height(frame.Text))
 	}
 }
 
 func operatorCompatibilityData(width int, height int, paneCount int) ShellData {
 	metrics := layout.Compute(width, height, 1)
 	return ShellData{
-		OperatorConsole:  true,
-		Width:            width,
-		Height:           height,
-		ConnectionStatus: "connected",
-		EventStatus:      "connected",
-		AgentStatus:      "running",
-		StateKnown:       true,
-		AppCount:         paneCount,
-		KeyMap:           keymap.Default(),
-		Panes:            paneSnapshots(paneCount),
-		PaneLayout:       panes.CalculateLayout(metrics.Panes.Width, metrics.Panes.Height, paneCount),
-		PageCount:        1,
-		ComposerRows:     1,
-		ComposerView:     "> inspect logs",
-		ResponseSource:   "Agent response",
+		OperatorConsole:   true,
+		Width:             width,
+		Height:            height,
+		ConnectionStatus:  "connected",
+		EventStatus:       "connected",
+		AgentStatus:       "running",
+		StateKnown:        true,
+		AppCount:          paneCount,
+		KeyMap:            keymap.Default(),
+		Panes:             paneSnapshots(paneCount),
+		PaneLayout:        panes.CalculateLayout(metrics.Panes.Width, metrics.Panes.Height, paneCount),
+		PageCount:         1,
+		ComposerRows:      1,
+		ComposerView:      "> inspect logs",
+		ResponseSource:    "Agent response",
+		AgentPaneExpanded: true,
+		ResponseFollow:    true,
 	}
 }
 

@@ -39,10 +39,16 @@ func TestNarrowOperatorRailKeepsMandatoryFieldsBeforeOptionalStatus(t *testing.T
 			if lipgloss.Width(rendered) != width || lipgloss.Height(rendered) != 2 {
 				t.Fatalf("narrow rail escaped %dx2: %dx%d\n%s", width, lipgloss.Width(rendered), lipgloss.Height(rendered), plain)
 			}
-			for _, required := range []string{"Relaybase", "Agent", "Apps", "active", "registered", "Attention"} {
+			for _, required := range []string{"Relaybase", "Agent", "Apps", "active", "Attention", operatorRailDivider} {
 				if !strings.Contains(plain, required) {
 					t.Fatalf("%d-column rail lost mandatory field %q:\n%s", width, required, plain)
 				}
+			}
+			if width >= 60 && !strings.Contains(plain, "registered") {
+				t.Fatalf("%d-column rail omitted full registered count when it fits:\n%s", width, plain)
+			}
+			if strings.Contains(plain, "•") {
+				t.Fatalf("%d-column rail retained the dot separator:\n%s", width, plain)
 			}
 		})
 	}

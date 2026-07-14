@@ -117,6 +117,62 @@ func TestEventStreamParsesDaemonEvent(t *testing.T) {
 	}
 }
 
+func TestStreamingRequestsOutliveBoundedJSONClientTimeout(t *testing.T) {
+	const requestTimeout = 25 * time.Millisecond
+	const delayedEvent = 75 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/__hub/api/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			time.Sleep(delayedEvent)
+			_, _ = w.Write([]byte("id: 12\nevent: daemon.ready\ndata: {\"type\":\"daemon.ready\",\"sequence\":12}\n\n"))
+		case "/__hub/api/agent/sessions/session-1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			time.Sleep(delayedEvent)
+			_, _ = w.Write([]byte("id: 1\nevent: run.started\ndata: {\"type\":\"run.started\",\"sequence\":1}\n\n"))
+		case "/__hub/api/state":
+			time.Sleep(delayedEvent)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"apps":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	httpClient := server.Client()
+	httpClient.Timeout = requestTimeout
+	client := New(server.URL, "test-token", httpClient)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	daemonStream, err := client.OpenEvents(ctx)
+	if err != nil {
+		t.Fatalf("OpenEvents returned error: %v", err)
+	}
+	defer daemonStream.Close()
+	if event, nextErr := daemonStream.Next(ctx); nextErr != nil || event.Type != "daemon.ready" {
+		t.Fatalf("daemon stream event=%#v err=%v", event, nextErr)
+	}
+
+	agentStream, err := client.StreamAgentSessionEvents(ctx, "session-1")
+	if err != nil {
+		t.Fatalf("StreamAgentSessionEvents returned error: %v", err)
+	}
+	defer agentStream.Close()
+	if event, nextErr := agentStream.Next(ctx); nextErr != nil || event.Type != "run.started" {
+		t.Fatalf("agent stream event=%#v err=%v", event, nextErr)
+	}
+
+	if _, err := client.GetState(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("bounded JSON request error=%v, want context deadline exceeded", err)
+	}
+}
+
 func TestAgentEventStreamReconnectsFromLastSequenceAndDeduplicatesReplay(t *testing.T) {
 	connection := 0
 	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

@@ -22,8 +22,10 @@ type KeyMap struct {
 	ContextFallback key.Binding
 	Help            key.Binding
 	Diagnostics     key.Binding
+	AgentPane       key.Binding
 	Tab             key.Binding
 	CopyLogs        key.Binding
+	StopSelected    key.Binding
 	Quit            key.Binding
 }
 
@@ -65,8 +67,10 @@ func WithContextMenu(contextMenu []string) KeyMap {
 		ContextFallback: key.NewBinding(key.WithKeys(fallbackKeys...), key.WithHelp(fallbackHelp, "menu")),
 		Help:            key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Diagnostics:     key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "diagnostics")),
+		AgentPane:       key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "agent pane")),
 		Tab:             key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "complete")),
 		CopyLogs:        key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy 20 logs")),
+		StopSelected:    key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "stop selected pane")),
 		Quit:            key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q/ctrl+c", "quit")),
 	}
 }
@@ -93,8 +97,10 @@ func (k KeyMap) FullHelp() []key.Binding {
 		k.ContextFallback,
 		k.Help,
 		k.Diagnostics,
+		k.AgentPane,
 		k.Tab,
 		k.CopyLogs,
+		k.StopSelected,
 		k.Quit,
 	}
 }

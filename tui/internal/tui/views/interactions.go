@@ -21,7 +21,7 @@ func transformBodyRegion(region components.HitRegion, frame bodyViewportFrame, w
 }
 
 func paneHitRegions(style styles.Styles, data ShellData) []components.HitRegion {
-	if data.Confirmation != nil || data.ContextMenu != nil || data.Help != nil || data.ShowHelp || data.DiagnosticsOpen || strings.TrimSpace(data.SetupPanel) != "" {
+	if data.Confirmation != nil || data.ContextMenu != nil || data.RegisteredApps != nil || data.PaneReopen != nil || data.Help != nil || data.ShowHelp || data.DiagnosticsOpen || data.ResponseDetails || strings.TrimSpace(data.SetupPanel) != "" {
 		return nil
 	}
 	if data.ConnectionStatus != "connected" || !hasRenderableState(data) {
@@ -32,7 +32,7 @@ func paneHitRegions(style styles.Styles, data ShellData) []components.HitRegion 
 		prefixY++
 	}
 	if data.FocusedPane != nil {
-		return paneRegionsForRendered(style, *data.FocusedPane, 0, prefixY, contentWidth(data.Width), maxInt(data.PaneLayout.Height, 8), data.ClipboardWriteReady)
+		return paneRegionsForRendered(style, *data.FocusedPane, 0, prefixY, contentWidth(data.Width), maxInt(data.PaneLayout.Height, 8), data.ClipboardWriteReady, data.ConnectionStatus == "connected")
 	}
 	if len(data.Panes) == 0 {
 		return nil
@@ -53,8 +53,8 @@ func paneHitRegions(style styles.Styles, data ShellData) []components.HitRegion 
 		for _, pane := range data.Panes[start:end] {
 			width := data.PaneLayout.PaneWidth
 			height := data.PaneLayout.PaneHeight
-			rendered := renderPane(style, pane, width, height, data.ClipboardWriteReady)
-			regions = append(regions, paneRegionsForRendered(style, pane, x, y, width, height, data.ClipboardWriteReady)...)
+			rendered := renderPane(style, pane, width, height, data.ClipboardWriteReady, data.ConnectionStatus == "connected")
+			regions = append(regions, paneRegionsForRendered(style, pane, x, y, width, height, data.ClipboardWriteReady, data.ConnectionStatus == "connected")...)
 			x += lipgloss.Width(rendered)
 			rowHeight = maxInt(rowHeight, lipgloss.Height(rendered))
 		}
@@ -63,10 +63,10 @@ func paneHitRegions(style styles.Styles, data ShellData) []components.HitRegion 
 	return regions
 }
 
-func paneRegionsForRendered(style styles.Styles, pane panes.PaneSnapshot, x int, y int, width int, height int, clipboardReady bool) []components.HitRegion {
+func paneRegionsForRendered(style styles.Styles, pane panes.PaneSnapshot, x int, y int, width int, height int, clipboardReady bool, lifecycleReady bool) []components.HitRegion {
 	width = maxInt(width, 8)
 	height = maxInt(height, 6)
-	rendered := renderPane(style, pane, width, height, clipboardReady)
+	rendered := renderPane(style, pane, width, height, clipboardReady, lifecycleReady)
 	contentX := x + style.Pane.GetBorderLeftSize() + style.Pane.GetPaddingLeft()
 	contentY := y + style.Pane.GetBorderTopSize() + style.Pane.GetPaddingTop()
 	line := 2
@@ -102,6 +102,11 @@ func paneRegionsForRendered(style styles.Styles, pane panes.PaneSnapshot, x int,
 			PaneID: pane.ID,
 		})
 	}
+	regions = append(regions, components.HitRegion{
+		Rect:   components.Rect{X: contentX + 4, Y: contentY + controlLine, Width: 3, Height: 1},
+		Kind:   components.HitPaneRestart,
+		PaneID: pane.ID,
+	})
 	return regions
 }
 
@@ -118,6 +123,25 @@ func commandPaletteHitRegions(data CommandPaletteData, rendered string, width in
 		regions = append(regions, components.HitRegion{
 			Rect:  components.Rect{X: 1, Y: 1 + index, Width: maxInt(1, width-2), Height: 1},
 			Kind:  components.HitCommandPaletteRow,
+			Index: index,
+		})
+	}
+	return regions
+}
+
+func startCompletionHitRegions(data StartCompletionData, rendered string, width int) []components.HitRegion {
+	if rendered == "" {
+		return nil
+	}
+	regions := []components.HitRegion{{
+		Rect: components.Rect{X: 0, Y: 0, Width: maxInt(1, width), Height: lipgloss.Height(rendered)},
+		Kind: components.HitStartCompletion,
+	}}
+	// Palette border, title, and table header precede the first app row.
+	for index := range data.Items {
+		regions = append(regions, components.HitRegion{
+			Rect:  components.Rect{X: 1, Y: 3 + index, Width: maxInt(1, width-2), Height: 1},
+			Kind:  components.HitStartCompletionRow,
 			Index: index,
 		})
 	}
@@ -158,5 +182,41 @@ func helpHitRegions(data ShellData) []components.HitRegion {
 		Rect: components.Rect{X: 0, Y: 4 + end - start, Width: maxInt(1, width), Height: detailHeight},
 		Kind: components.HitHelpDetail,
 	})
+	return regions
+}
+
+func registeredAppHitRegions(data ShellData) []components.HitRegion {
+	if data.RegisteredApps == nil || len(data.RegisteredApps.Items) == 0 {
+		return nil
+	}
+	rows := registeredAppsViewportRows(data)
+	start := clampInt(data.RegisteredApps.Offset, 0, maxInt(0, len(data.RegisteredApps.Items)-rows))
+	end := minInt(len(data.RegisteredApps.Items), start+rows)
+	regions := make([]components.HitRegion, 0, end-start)
+	for index := start; index < end; index++ {
+		regions = append(regions, components.HitRegion{
+			Rect:  components.Rect{X: 0, Y: 5 + index - start, Width: maxInt(1, contentWidth(data.Width)), Height: 1},
+			Kind:  components.HitRegisteredAppRow,
+			Index: index,
+		})
+	}
+	return regions
+}
+
+func paneReopenHitRegions(data ShellData) []components.HitRegion {
+	if data.PaneReopen == nil || len(data.PaneReopen.Items) == 0 {
+		return nil
+	}
+	rows := paneReopenViewportRows(data)
+	start := clampInt(data.PaneReopen.Offset, 0, maxInt(0, len(data.PaneReopen.Items)-rows))
+	end := minInt(len(data.PaneReopen.Items), start+rows)
+	regions := make([]components.HitRegion, 0, end-start)
+	for index := start; index < end; index++ {
+		regions = append(regions, components.HitRegion{
+			Rect:  components.Rect{X: 0, Y: 5 + index - start, Width: maxInt(1, contentWidth(data.Width)), Height: 1},
+			Kind:  components.HitPaneReopenRow,
+			Index: index,
+		})
+	}
 	return regions
 }

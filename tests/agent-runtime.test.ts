@@ -243,6 +243,35 @@ test("Agent Gateway streams runtime events through session event model", async (
   });
 });
 
+test("Agent Gateway records when an output guardrail blocks produced model output", async () => {
+  await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-output-guardrail-secret", async () => {
+    const gateway = new AgentGatewayService({
+      agentRuntime: new OperatorAgentRuntime({
+        runnerFactory: () => new FakeRunner("I guessed the app port is 3000.", ["I guessed ", "the app port is 3000."])
+      })
+    });
+    gateway.updateConfig({
+      enabled: true,
+      provider: {
+        modelSlug: "openrouter/test-model",
+        remoteModelEnabled: true,
+        apiKeyEnvVar: "RELAYBASE_TEST_OPENROUTER_KEY"
+      }
+    });
+    const relaybase = fakeRelaybaseRuntime();
+    const session = await gateway.createSession(relaybase, {});
+    const result = await submitAndWait(
+      gateway,
+      gateway.addMessage(relaybase, session.id, { content: "inspect setup" })
+    );
+
+    assert.equal(result.run.status, "failed");
+    assert.equal(result.run.diagnostic?.code, "AGENT_PORT_STRATEGY_INVENTED");
+    const failed = gateway.sessionEvents(session.id).findLast((event) => event.type === "run.failed");
+    assert.equal((failed?.data as { modelOutputProduced?: boolean } | undefined)?.modelOutputProduced, true);
+  });
+});
+
 test("Agent Gateway queues promptly, enforces one active run, and supports idempotent cancel and retry", async () => {
   await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-queued-run-secret", async () => {
     const gateway = new AgentGatewayService({
@@ -912,6 +941,17 @@ test("RA008 policy guardrails separate read-only tools, approval-required tools,
   assert.equal(outputGuardrail("Status: Stopped", 0), undefined);
   assert.equal(outputGuardrail("The preview wrote relaybase.app.json.", 1)?.code, "AGENT_PREVIEW_CLAIMS_WRITE");
   assert.equal(outputGuardrail("Once approved, I will use apply_setup_plan to register these changes.", 1), undefined);
+  assert.equal(
+    outputGuardrail(
+      "Operators should not have to guess. Runtime detected from files X/Y. Command candidate inferred from package.json or main.go. Port strategy inferred from framework markers.",
+      0
+    ),
+    undefined
+  );
+  assert.equal(
+    outputGuardrail("I guessed the app port is 3000 and invented the framework flag.", 0)?.code,
+    "AGENT_PORT_STRATEGY_INVENTED"
+  );
   assert.equal(
     outputGuardrail("I need your approval to apply the setup plan and create files. Would you like me to proceed?", 3)
       ?.code,

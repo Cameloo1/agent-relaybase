@@ -12,6 +12,7 @@ import (
 
 const (
 	KindLaunch          = "launch"
+	KindStart           = "start"
 	KindStop            = "stop"
 	KindRestart         = "restart"
 	KindLogsExport      = "logs_export"
@@ -21,6 +22,7 @@ const (
 	KindUnpin           = "unpin"
 	KindTheme           = "theme"
 	KindHelp            = "help"
+	KindList            = "list"
 	KindUsage           = "usage"
 	KindConfirm         = "confirm"
 	KindCancel          = "cancel"
@@ -179,6 +181,15 @@ func Parse(input string) (ParsedCommand, error) {
 		}
 		parsed.Kind = KindLaunch
 		parsed.Target = target
+	case "start":
+		if err := rejectUnexpectedFlags(args, "/start [app]"); err != nil {
+			return ParsedCommand{}, err
+		}
+		parsed.Kind = KindStart
+		parsed.Target = strings.TrimSpace(strings.Join(args, " "))
+		if dryRun || noVerify || (parsed.Target == "" && confirm) {
+			return ParsedCommand{}, ParseError{Message: "Use /start or /start <app> [--confirm]."}
+		}
 	case "stop":
 		if err := rejectUnexpectedFlags(args, "/stop <app|group|role>"); err != nil {
 			return ParsedCommand{}, err
@@ -284,6 +295,14 @@ func Parse(input string) (ParsedCommand, error) {
 			return ParsedCommand{}, ParseError{Message: "Use /help."}
 		}
 		parsed.Kind = KindHelp
+	case "list":
+		if err := rejectUnexpectedFlags(args, "/list"); err != nil {
+			return ParsedCommand{}, err
+		}
+		if len(args) != 0 || confirm || dryRun || noVerify {
+			return ParsedCommand{}, ParseError{Message: "Use /list."}
+		}
+		parsed.Kind = KindList
 	case "usage":
 		if err := rejectUnexpectedFlags(args, "/usage"); err != nil {
 			return ParsedCommand{}, err
@@ -538,6 +557,8 @@ func Parse(input string) (ParsedCommand, error) {
 
 func RequiresConfirmation(command ParsedCommand) bool {
 	switch command.Kind {
+	case KindStart:
+		return strings.TrimSpace(command.Target) != ""
 	case KindLaunch, KindStop, KindRestart, KindLogsExport, KindLaunchPackage, KindDeletePackage,
 		KindPackageRunRetry, KindPackageRunAbort,
 		KindAddApp, KindRegister, KindConfigure, KindOpen, KindProve, KindHealthProve,

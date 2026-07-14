@@ -17,17 +17,22 @@ This is the required keymap for the Relaybase Bubble Tea TUI.
 | Ctrl+Shift+V    | Paste the system clipboard into the assistant input.                                                                                     |
 | Ctrl+C          | Copy the current assistant input while the input is active; outside active input, it is left to the terminal/runtime.                    |
 | Ctrl+Shift+C    | Copy the current assistant input while the input is active.                                                                              |
+| Ctrl+Left/Right | Move the active assistant-input cursor by one word.                                                                                      |
+| Ctrl+Backspace  | Delete the previous word in the active assistant input.                                                                                  |
+| Ctrl+Delete     | Delete the next word in the active assistant input.                                                                                      |
 | Ctrl+Z          | Open the contextual menu when the terminal supports it.                                                                                  |
 | Ctrl+O          | Open the contextual menu as the guaranteed fallback.                                                                                     |
+| Ctrl+R          | From pane navigation, open a confirmation to stop the selected pane's app/component.                                                     |
+| Ctrl+G          | Toggle the Agent output surface; use the dedicated Agent modal when the terminal cannot fit the right-side pane.                         |
 | Ctrl+D          | Toggle the diagnostics drawer when diagnostics are present.                                                                              |
 | `?`             | Open help.                                                                                                                               |
 | `q`             | Start the quit flow.                                                                                                                     |
 
 ## Pane Log Controls
 
-Each pane places `[c] [·] [·]` below its PID/backend-port metadata. The active `[c]` control copies the newest 20 non-empty retained log lines, in chronological order, to the system clipboard. It copies only the sanitized display lines and never echoes the payload into TUI history or diagnostics. The `c` key performs the same copy action only while that pane is focused. If the host clipboard is unavailable or the pane has no retained logs, Relaybase reports a safe diagnostic instead of claiming success.
+Each pane places `[c] [r] [·]` below its PID/backend-port metadata. The active `[c]` control copies the newest 20 non-empty retained log lines, in chronological order, to the system clipboard. It copies only the sanitized display lines and never echoes the payload into TUI history or diagnostics. The `c` key performs the same copy action only while that pane is focused. If the host clipboard is unavailable or the pane has no retained logs, Relaybase reports a safe diagnostic instead of claiming success.
 
-The two dot controls are intentionally inert reserved space for future pane-local controls. They do not change focus, lifecycle state, or clipboard state.
+Clicking `[r]` selects that pane and opens the existing confirmation preview to restart its app/component through the daemon lifecycle API. It never restarts before confirmation. If the daemon becomes unavailable, the shared lifecycle gate reports recovery guidance without creating lifecycle work; the established full offline screen continues to replace pane content while disconnected. Plain `r` remains normal assistant input. The final dot control remains intentionally inert reserved space.
 
 Mouse-wheel scrolling applies to a compact dashboard pane only while the pointer is over that pane's log content. It changes that pane's retained-log offset without selecting, focusing, or scrolling a different pane. At the older-log boundary, Relaybase may request an older daemon log page for that same app. Wheel events over non-log content retain their existing body-scroll behavior.
 
@@ -36,6 +41,8 @@ Mouse-wheel scrolling applies to a compact dashboard pane only while the pointer
 `?` opens searchable help with a focused text input at the top. Search matches command names, aliases, descriptions, categories, and keywords. Up/Down select results; PageUp/PageDown move five results; Home/End jump; Ctrl+Up/Ctrl+Down scroll the selected command's usage/example detail; Enter inserts the selected command into the normal assistant input without executing it; Esc closes help in one step.
 
 Typing `/` in the assistant input shows a temporary command palette directly above the pinned input. It displays up to five filtered commands at normal terminal heights (and fewer only when the terminal is too short), each with a concise description. Up/Down, PageUp/PageDown, Home/End, mouse wheel, and mouse click move/select the result. Tab always inserts the selected command; Enter inserts it when the current slash text is incomplete, or submits it once it is syntactically complete. Filtering is recalculated after typing and backspacing.
+
+After `/start` is complete, the command palette becomes a dedicated registered-app completion table with the same `Name` / shortened `Project` / `Status` projection as `/list`. Typing filters by stable app id or display name. Tab or the first Enter on a partial match inserts the selected stable app id without starting it; a separate Enter submits the completed command. A bare `/start` submits immediately and opens the complete registered-app window.
 
 ## Navigation Model
 
@@ -49,7 +56,11 @@ On the dashboard, PageUp and PageDown move between pane pages. This is how 9+ pa
 
 Inside a focused pane, PageUp and PageDown scroll logs. PageUp may request older logs from the daemon when the current pane has older scrollback available. They must not start lifecycle actions, dismiss modal state, or bypass confirmation gates.
 
-In diagnostics, setup, confirmation, and stopped-app inventory surfaces, Up/Down scroll by line, PageUp/PageDown scroll by a viewport page, and Home/End move to the beginning/end. Searchable help owns those keys for its result list as described above. The assistant bar remains pinned while the body scrolls.
+In diagnostics, setup, confirmation, stopped-app inventory, and the Agent surface, Up/Down scroll by line, PageUp/PageDown scroll by a viewport page, and Home/End move to the beginning/end. Searchable help owns those keys for its result list as described above. The composer remains pinned while the active surface scrolls.
+
+At supported terminal sizes, the Agent output pane occupies the rightmost one-third of the terminal above the composer, including its left divider. App panes retain the other two-thirds. The composer remains full width and independently grows from one to three visible input rows. Collapsing the Agent pane returns its width to the app workspace without changing the selected app pane or moving the composer.
+
+The dock is used only when the Agent side can retain at least 36 columns and the app workspace at least 80 columns. At smaller usable widths, Ctrl+G opens a dedicated Agent modal instead of compressing either surface. Growing or shrinking the terminal transfers an open Agent surface between the dock and modal while preserving the selected pane, valid dashboard page, Agent scroll/follow state, and prior keyboard focus. Esc returns focus to the surface that owned input before the Agent pane; Ctrl+G closes either presentation. The Composer header keeps the visible `[Ctrl+G agent pane]` pointer in both layouts.
 
 ## Contextual Menu
 
@@ -57,14 +68,14 @@ Ctrl+Z is allowed only when the terminal delivers it to the TUI. Ctrl+O is the r
 
 The pane contextual menu currently supports:
 
+- restart app/component through the daemon lifecycle API after confirmation; disabled with a daemon-offline reason when the TUI is not connected
+- stop app/component through the daemon lifecycle API after confirmation; disabled with a daemon-offline reason when the TUI is not connected
 - close pane
+- open a dedicated `Reopen pane…` chooser for hidden or stopped panes; user-closed panes are listed most-recently closed first, followed by other hidden panes in stable pane order
 - pin or unpin pane
-- reopen a hidden or stopped pane when pane state is still available
-- change pane color
 - show route when the selected pane has one; the pane-local `[c]` control copies the retained log tail
 - export pane logs through the daemon export API; disabled with a daemon-offline reason when the TUI is not connected
-- stop app/component through the daemon lifecycle API after confirmation; disabled with a daemon-offline reason when the TUI is not connected
-- restart app/component through the daemon lifecycle API after confirmation; disabled with a daemon-offline reason when the TUI is not connected
+- change pane color
 - show current diagnostics
 
 The assistant contextual menu currently supports:
@@ -90,6 +101,7 @@ Implemented deterministic slash commands:
 - `/add <path> using <command>`
 - `/add app <path> using <command>` (temporary compatibility alias)
 - `/launch <app|group|role>`
+- `/start [app]`
 - `/stop <app|group|role>`
 - `/restart <app|group|role>`
 - `/logs export <pane|app|group|page|all>`
@@ -99,6 +111,7 @@ Implemented deterministic slash commands:
 - `/unpin <pane>`
 - `/theme <light|dark|auto>`
 - `/help`
+- `/list`
 - `/usage`
 - `/thread list`
 - `/thread new [title]`
@@ -134,7 +147,9 @@ Implemented deterministic slash commands:
 - `/component group <app> <groupId>`
 - `/component label <app> <label>`
 
-Pane targets may use `current`, the exact pane/app label, or the visible pane number on the current page. Start, stop, restart, log export, package launch/delete/run retry/run abort, setup apply, manifest registration, project open/prove, and safe manifest patch commands require a confirmation preview unless the command includes `--confirm`. `/configure <path> --dry-run`, `/repair <app-or-path>`, and `/manifest inspect <app-or-path>` are read-only daemon requests and do not require confirmation. The preview shows action, target, risk, and expected result. Ambiguous targets ask the user to choose a more specific app id, group id, or pane id; unknown targets return an actionable error.
+Pane targets may use `current`, the exact pane/app label, or the visible pane number on the current page. Targeted start, launch, stop, restart, log export, package launch/delete/run retry/run abort, setup apply, manifest registration, project open/prove, and safe manifest patch commands require a confirmation preview unless the command includes `--confirm`. Bare `/start` is read-only and opens the chooser. `/configure <path> --dry-run`, `/repair <app-or-path>`, and `/manifest inspect <app-or-path>` are read-only daemon requests and do not require confirmation. The preview shows action, target, risk, and expected result. Ambiguous targets ask the user to choose a more specific app id, group id, or pane id; unknown targets return an actionable error.
+
+`/list` and bare `/start` open the same dedicated registered-app window from any normal dashboard state, including while monitoring panes are open. The window uses a `Name` / shortened `Project` directory / `Status` table; running/healthy status is green, stopped/transitional status is yellow, failed/error status is red, and unknown status is muted while the status text remains readable without color. Arrow keys, PageUp/PageDown, Home, and End move through the daemon-backed inventory. Enter on a running app opens and focuses its existing monitoring pane; when that app has multiple panes, Relaybase opens a filtered pane chooser. Enter on a stopped app opens the existing confirmation-gated daemon start request. Starting, stopping, failed, degraded, and unavailable apps are never implicitly launched or restarted. Esc returns to the prior dashboard focus. When the daemon is offline, the window labels any retained inventory as last known and provides daemon recovery guidance.
 
 `/create-package` persists an ordered package only after every quoted member resolves to one registered app id or a unique registered display name. It refuses empty, duplicate, ambiguous, unknown, reserved, or conflicting names without starting an app. `/launch-package` creates a daemon-owned package run only after confirmation; it preflights the entire package, skips healthy running members, starts at most four members concurrently, continues after individual failures, and never rolls back already-started apps. `/package-run retry` retries only failed, skipped, or interrupted members. `/package-run abort` prevents remaining members from being enqueued; it does not stop apps that were already started.
 
@@ -154,7 +169,7 @@ Ordinary dashboard text first checks deterministic assistant phrases. This mode 
 
 Path-rich setup phrases are treated as daemon Agent Gateway setup input instead of local lifecycle targets when the Operator Agent is enabled. Examples include `go start the server in C:\path\to\app`, `start project .\apps\notes`, `configure <path> and start it`, `add <path>`, `add <path> using npm run dev`, `use npm run dev in <path>`, `open <path>`, and `repair <path>`. The TUI strips common prompt artifacts such as a trailing PowerShell `>` and preserves Windows paths, relative paths, quoted paths, and `current folder`/`cwd` wording. If the daemon or Agent Gateway is unavailable, the TUI shows the exact `relaybase serve ...` recovery command when relevant plus a slash fallback such as `/configure <path> --dry-run`, `/add <path> using npm run dev`, `/open <path>`, or `/repair <path>`.
 
-The bottom assistant bar is a single-line input surface. Backspace and Ctrl+H remove the previous character, Delete is inert at the end of the line, Ctrl+U clears the current input, and pasted multiline text is normalized into a single line. Bracketed terminal paste, Ctrl+V, Ctrl+Shift+V, and Shift+Insert paste into the assistant bar. Ctrl+C and Ctrl+Shift+C copy only the current active assistant input without logging the copied value. If the host clipboard command is unavailable, the TUI shows a diagnostic instead of pretending the action worked. The body above the assistant bar scrolls independently, and the assistant bar stays pinned at the bottom.
+The bottom composer is a multiline input surface that grows from one to three visible rows while retaining longer drafts internally. Backspace and Ctrl+H remove the previous character, Delete removes the next character, Ctrl+Left/Ctrl+Right move by word, Ctrl+Backspace/Ctrl+Delete remove the previous/next word, Ctrl+Home/Ctrl+End move to the draft boundaries, Ctrl+U clears text before the cursor, and Ctrl+J inserts a newline. Bracketed terminal paste, Ctrl+V, Ctrl+Shift+V, and Shift+Insert paste sanitized text into the composer while preserving safe line breaks. Ctrl+C and Ctrl+Shift+C copy only the current active composer input without logging the copied value. If the host clipboard command is unavailable, the TUI shows a diagnostic instead of pretending the action worked. The Agent response and app panes scroll independently, and the composer stays pinned at the bottom.
 
 Implemented deterministic phrases:
 

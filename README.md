@@ -44,6 +44,8 @@ relaybase register . --no-verify
 
 Use `/add <folder>` in the operator console for the simplest project-discovery flow. Use `/register <folder>` when you want detection, preview, approval, registration, and the bounded proof as one coordinated flow. Use `/register <folder> --no-verify` to opt out. An exact `/register <path>/relaybase.app.json` remains strict and does not search other folders.
 
+Inside the operator console, use `/start` to open the registered-app table, or type `/start ` and press Tab to complete a saved app id before reviewing its start confirmation.
+
 The normal loop is intentionally small:
 
 ```bash

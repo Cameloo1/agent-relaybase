@@ -238,13 +238,13 @@ func TestKnownSlashParseErrorsRemainSlashSpecific(t *testing.T) {
 	}
 }
 
-func TestSlashPrefixedNaturalPhraseStillParses(t *testing.T) {
-	parsed, err := ParseInput("/start notes frontend")
+func TestFirstClassStartSlashCommandParsesAsSlash(t *testing.T) {
+	parsed, err := ParseInput("/start notes")
 	if err != nil {
 		t.Fatalf("ParseInput returned error: %v", err)
 	}
-	if parsed.Source != SourceNatural || parsed.Command.Kind != slash.KindLaunch || parsed.Command.Target != "notes frontend" {
-		t.Fatalf("expected slash-prefixed natural start command, got %#v", parsed)
+	if parsed.Source != SourceSlash || parsed.Command.Kind != slash.KindStart || parsed.Command.Target != "notes" {
+		t.Fatalf("expected first-class slash start command, got %#v", parsed)
 	}
 }
 

@@ -48,8 +48,9 @@ type AssistantPreference struct {
 }
 
 type LayoutPreferences struct {
-	LastPage int    `json:"lastPage"`
-	Density  string `json:"density"`
+	LastPage           int    `json:"lastPage"`
+	Density            string `json:"density"`
+	AgentPaneCollapsed bool   `json:"agentPaneCollapsed"`
 }
 
 type Diagnostic struct {
@@ -222,8 +223,9 @@ func Default() Preferences {
 			Provider:             assistant.DefaultProviderConfig(),
 		},
 		Layout: LayoutPreferences{
-			LastPage: 0,
-			Density:  "compact",
+			LastPage:           0,
+			Density:            "compact",
+			AgentPaneCollapsed: false,
 		},
 	}
 }
@@ -269,7 +271,9 @@ func normalize(preferences Preferences) Preferences {
 	preferences.Theme = oneOf(preferences.Theme, []string{"auto", "light", "dark"}, defaults.Theme)
 	preferences.Keymap.ContextMenu = normalizeContextMenu(preferences.Keymap.ContextMenu)
 	preferences.Panes.Pinned = uniqueSorted(preferences.Panes.Pinned)
-	preferences.Panes.Hidden = uniqueSorted(preferences.Panes.Hidden)
+	// Hidden pane order is meaningful: most-recently closed panes are stored
+	// first so the reopen chooser remains deterministic across sessions.
+	preferences.Panes.Hidden = uniquePreserveOrder(preferences.Panes.Hidden)
 	preferences.Panes.Order = uniquePreserveOrder(preferences.Panes.Order)
 	if preferences.Panes.Colors == nil {
 		preferences.Panes.Colors = map[string]string{}

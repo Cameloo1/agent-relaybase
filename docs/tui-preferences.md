@@ -45,7 +45,8 @@ This keeps preferences out of arbitrary project folders and avoids adding a daem
   },
   "layout": {
     "lastPage": 0,
-    "density": "compact"
+    "density": "compact",
+    "agentPaneCollapsed": false
   }
 }
 ```
@@ -65,13 +66,14 @@ This keeps preferences out of arbitrary project folders and avoids adding a daem
 - Theme mode.
 - Context menu primary/fallback key bindings.
 - Pane pins.
-- Hidden/closed panes.
+- Hidden/closed panes, ordered most-recently closed first for the reopen chooser.
 - Pane order.
 - Pane border/accent colors.
 - Assistant bar color.
 - Optional assistant provider shell configuration.
 - Last dashboard page.
 - Layout density.
+- Whether the dockable Agent output pane is collapsed.
 
 Pane preferences are keyed by stable pane IDs derived from daemon group/component state. They do not create apps, mutate lifecycle, or infer process state.
 

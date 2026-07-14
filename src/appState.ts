@@ -49,6 +49,8 @@ export async function getAppState(runtime: RelaybaseRuntime, id: string): Promis
 export function composeAppState(input: {
   id: string;
   name?: string;
+  cwd?: string;
+  manifestPath?: string;
   registered: boolean;
   runtime: RuntimeView;
   hubHost: string;
@@ -75,6 +77,8 @@ export function composeAppState(input: {
   return {
     id: input.id,
     name: input.name ?? input.id,
+    ...(input.cwd ? { cwd: input.cwd } : {}),
+    ...(input.manifestPath ? { manifestPath: input.manifestPath } : {}),
     registered: input.registered,
     runtime: input.runtime,
     ...(input.backendPort ? { backendPort: input.backendPort } : {}),
@@ -120,6 +124,8 @@ async function buildAppState(
   const state = composeAppState({
     id,
     name: status?.name,
+    cwd: status?.cwd,
+    manifestPath: status?.manifestPath,
     registered: Boolean(status),
     runtime: runtimeView,
     hubHost: runtime.host,

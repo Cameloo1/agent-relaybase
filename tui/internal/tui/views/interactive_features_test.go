@@ -11,7 +11,7 @@ import (
 	"github.com/cameloo/relaybase/tui/internal/tui/styles"
 )
 
-func TestPaneControlsAndHitMapExposeOnlyCopyAndLogs(t *testing.T) {
+func TestPaneControlsAndHitMapExposeCopyRestartAndLogs(t *testing.T) {
 	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
 	data := ShellData{
 		Width: 100, Height: 24, ConnectionStatus: "connected", EventStatus: "connected", StateKnown: true,
@@ -20,14 +20,15 @@ func TestPaneControlsAndHitMapExposeOnlyCopyAndLogs(t *testing.T) {
 		PaneLayout: panes.CalculateLayout(100, 14, 1), PageCount: 1,
 	}
 	frame := BuildShell(styles.New(theme), data)
-	if !strings.Contains(frame.Text, "backend port 17001") || !strings.Contains(frame.Text, "[c]") || !strings.Contains(frame.Text, "[·] [·]") {
+	plain := compactSnapshot(frame.Text)
+	if !strings.Contains(plain, "backend port 17001") || !strings.Contains(plain, "[c] [r]") || !strings.Contains(frame.Text, "[·]") {
 		t.Fatalf("pane controls/metadata missing:\n%s", frame.Text)
 	}
 	kinds := map[components.HitKind]int{}
 	for _, region := range frame.HitMap.Regions() {
 		kinds[region.Kind]++
 	}
-	if kinds[components.HitPaneSurface] != 1 || kinds[components.HitPaneCopyLogs] != 1 || kinds[components.HitPaneLogs] != 1 || len(kinds) != 3 {
+	if kinds[components.HitPaneSurface] != 1 || kinds[components.HitPaneCopyLogs] != 1 || kinds[components.HitPaneRestart] != 1 || kinds[components.HitPaneLogs] != 1 || len(kinds) != 4 {
 		t.Fatalf("unexpected pane hit regions: %#v", kinds)
 	}
 }

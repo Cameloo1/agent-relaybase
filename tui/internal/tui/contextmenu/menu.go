@@ -69,14 +69,14 @@ func PaneMenu(pane *panes.PaneSnapshot, options ...PaneMenuOptions) Menu {
 		Title:   "Pane Menu",
 		Context: ContextPane,
 		Items: []Item{
+			{Label: "Restart app/component", Action: ActionPaneRestart, Enabled: hasPane && daemonConnected, DisabledReason: reasonDaemonAction(hasPane, daemonConnected)},
+			{Label: "Stop app/component", Action: ActionPaneStop, Enabled: hasPane && daemonConnected, DisabledReason: reasonDaemonAction(hasPane, daemonConnected)},
 			{Label: "Close pane", Action: ActionPaneClose, Enabled: hasPane, DisabledReason: reasonNoSelectedPane(hasPane)},
+			{Label: "Reopen pane…", Action: ActionPaneReopen, Enabled: opts.CanReopen, DisabledReason: reasonNoReopenCandidate(opts.CanReopen)},
 			{Label: pinnedLabel, Action: ActionPanePinToggle, Enabled: hasPane, DisabledReason: reasonNoSelectedPane(hasPane)},
-			{Label: "Reopen hidden/stopped pane", Action: ActionPaneReopen, Enabled: opts.CanReopen, DisabledReason: reasonNoReopenCandidate(opts.CanReopen)},
-			{Label: "Change pane color", Action: ActionPaneColor, Enabled: hasPane, DisabledReason: reasonNoSelectedPane(hasPane)},
 			{Label: "Show route", Action: ActionPaneCopyRoute, Enabled: hasRoute, DisabledReason: reasonNoRoute(hasPane, hasRoute)},
 			{Label: "Export pane logs", Action: ActionPaneExportLogs, Enabled: hasPane && daemonConnected, DisabledReason: reasonDaemonAction(hasPane, daemonConnected)},
-			{Label: "Stop app/component", Action: ActionPaneStop, Enabled: hasPane && daemonConnected, DisabledReason: reasonDaemonAction(hasPane, daemonConnected)},
-			{Label: "Restart app/component", Action: ActionPaneRestart, Enabled: hasPane && daemonConnected, DisabledReason: reasonDaemonAction(hasPane, daemonConnected)},
+			{Label: "Change pane color", Action: ActionPaneColor, Enabled: hasPane, DisabledReason: reasonNoSelectedPane(hasPane)},
 			{Label: "Show diagnostics", Action: ActionPaneDiagnostics, Enabled: true},
 		},
 	}

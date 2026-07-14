@@ -67,10 +67,6 @@ func ClassifyLogTone(event relaybaseclient.LogEvent) LogTone {
 		return LogToneSuccess
 	case "app.lifecycle_operation_failed", "lifecycle_operation_failed":
 		return LogToneError
-	case "lifecycle_start_command", "start_command":
-		return LogToneStart
-	case "lifecycle_stop_command", "stop_command":
-		return LogToneStop
 	}
 
 	level := strings.ToLower(strings.TrimSpace(event.Level))
@@ -83,6 +79,16 @@ func ClassifyLogTone(event relaybaseclient.LogEvent) LogTone {
 		return LogToneWarning
 	case "debug", "trace":
 		return LogToneMuted
+	}
+
+	// These values are the daemon's durable LifecycleHookName vocabulary.
+	// Apply lifecycle tone only after explicit severity so stderr/error output
+	// from a start or stop command remains visibly diagnostic.
+	switch source {
+	case "prestart", "start", "lifecycle_start_command", "start_command":
+		return LogToneStart
+	case "stop", "verifystopped", "lifecycle_stop_command", "stop_command":
+		return LogToneStop
 	}
 	if strings.EqualFold(strings.TrimSpace(event.Stream), "stderr") {
 		return LogToneWarning

@@ -150,6 +150,10 @@ func New(width int) Model {
 	input.Prompt = "> "
 	input.Placeholder = "Ask Relaybase or enter a slash command"
 	input.KeyMap.InsertNewline.SetKeys("ctrl+j")
+	input.KeyMap.WordForward.SetKeys("alt+right", "alt+f", "ctrl+right")
+	input.KeyMap.WordBackward.SetKeys("alt+left", "alt+b", "ctrl+left")
+	input.KeyMap.DeleteWordBackward.SetKeys("alt+backspace", "ctrl+w", "ctrl+backspace")
+	input.KeyMap.DeleteWordForward.SetKeys("alt+delete", "alt+d", "ctrl+delete")
 	input.KeyMap.Paste.SetEnabled(false)
 	input.SetVirtualCursor(true)
 	input.SetWidth(max(8, width))

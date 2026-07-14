@@ -16,9 +16,10 @@ import (
 var ErrMissingToken = errors.New("relaybase auth token is missing")
 
 type Client struct {
-	baseURL string
-	token   string
-	http    *http.Client
+	baseURL    string
+	token      string
+	http       *http.Client
+	streamHTTP *http.Client
 }
 
 type APIError struct {
@@ -38,10 +39,37 @@ func New(baseURL string, token string, httpClient *http.Client) *Client {
 		httpClient = http.DefaultClient
 	}
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   strings.TrimSpace(token),
-		http:    httpClient,
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		token:      strings.TrimSpace(token),
+		http:       httpClient,
+		streamHTTP: newStreamingHTTPClient(httpClient),
 	}
+}
+
+// newStreamingHTTPClient preserves the request client's transport and header
+// timeout while removing its whole-request timeout. A whole-request timeout is
+// correct for JSON calls but will terminate a healthy SSE response body on
+// every interval.
+func newStreamingHTTPClient(requestClient *http.Client) *http.Client {
+	streamClient := *requestClient
+	streamClient.Timeout = 0
+
+	var transport *http.Transport
+	switch configured := requestClient.Transport.(type) {
+	case nil:
+		if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+			transport = defaultTransport.Clone()
+		}
+	case *http.Transport:
+		transport = configured.Clone()
+	}
+	if transport != nil {
+		if transport.ResponseHeaderTimeout == 0 && requestClient.Timeout > 0 {
+			transport.ResponseHeaderTimeout = requestClient.Timeout
+		}
+		streamClient.Transport = transport
+	}
+	return &streamClient
 }
 
 func (c *Client) BaseURL() string {
@@ -69,7 +97,7 @@ func (c *Client) OpenEvents(ctx context.Context) (*EventStream, error) {
 	}
 	req.Header.Set("Accept", "text/event-stream")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.streamHTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -314,7 +342,7 @@ func (c *Client) openAgentSessionEventResponse(ctx context.Context, sessionID st
 	if afterSequence > 0 {
 		req.Header.Set("Last-Event-ID", strconv.FormatInt(afterSequence, 10))
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.streamHTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}

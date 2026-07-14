@@ -353,6 +353,8 @@ export interface AppGroup {
 export interface AppState {
   id: string;
   name: string;
+  cwd?: string;
+  manifestPath?: string;
   registered: boolean;
   runtime: RuntimeView;
   backendPort?: number;

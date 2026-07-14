@@ -120,7 +120,7 @@ func TestTransientOutsideClickClosesWithoutActivatingBackground(t *testing.T) {
 
 func TestAgentApprovalWheelCannotScrollBackgroundResponse(t *testing.T) {
 	root := newTestModelWithPanes(t, 1)
-	updated, _ := root.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	updated, _ := root.Update(tea.WindowSizeMsg{Width: 160, Height: 36})
 	root = updated.(RootModel)
 	root.responseFollow = false
 	root.responseOffset = 4

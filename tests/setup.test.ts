@@ -99,6 +99,19 @@ test("configure writes inspectable setup artifacts and registers without startin
   assert.equal((await registry.get("sample-app"))?.manifestPath, path.join(project, "relaybase.app.json"));
 });
 
+test("setup uses the platform package-manager command for a nonstandard detected script", async () => {
+  const project = await tempProject("relaybase-nonstandard-script-");
+  await fs.writeFile(
+    path.join(project, "package.json"),
+    JSON.stringify({ name: "serve-only-app", scripts: { serve: "node server.js" } }, null, 2)
+  );
+
+  const detection = await detectProject(project);
+  const plans = await proposeSetupPlans(detection);
+
+  assert.equal(plans[0]?.manifest.command, `${process.platform === "win32" ? "npm.cmd" : "npm"} run serve`);
+});
+
 test("configure guarded env writes preserve existing secrets and remain idempotent", async () => {
   const project = await tempProject("relaybase-env-");
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-env-state-"));

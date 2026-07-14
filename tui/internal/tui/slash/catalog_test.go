@@ -8,8 +8,8 @@ import (
 
 func TestCatalogCoversEveryCurrentCommandKindWithParseableExamples(t *testing.T) {
 	wantKinds := []string{
-		KindLaunch, KindStop, KindRestart, KindLogsExport, KindPage, KindPaneColor, KindPin, KindUnpin,
-		KindTheme, KindHelp, KindUsage, KindConfirm, KindCancel, KindDaemonStatus, KindDaemonRepair,
+		KindLaunch, KindStart, KindStop, KindRestart, KindLogsExport, KindPage, KindPaneColor, KindPin, KindUnpin,
+		KindTheme, KindHelp, KindList, KindUsage, KindConfirm, KindCancel, KindDaemonStatus, KindDaemonRepair,
 		KindCreatePackage, KindPackages, KindLaunchPackage, KindDeletePackage, KindPackageRunRetry, KindPackageRunAbort,
 		KindThreadList, KindThreadNew, KindThreadSwitch, KindThreadRename, KindThreadClear, KindThreadExport, KindThreadPreview,
 		KindAddApp, KindRegister, KindConfigure, KindOpen, KindProve, KindHealthProve, KindRepair,
@@ -63,6 +63,21 @@ func TestCatalogApprovalMetadataMatchesRepresentativeCommands(t *testing.T) {
 		if got := RequiresConfirmation(parsed); got != descriptor.Approval {
 			t.Errorf("approval for %q = %v, want %v", descriptor.Kind, got, descriptor.Approval)
 		}
+	}
+}
+
+func TestStartCatalogDeclaresConditionalConfirmation(t *testing.T) {
+	descriptor, ok := DescriptorForKind(KindStart)
+	if !ok || descriptor.ConfirmationPolicy != ConfirmationWhenTargeted {
+		t.Fatalf("start descriptor does not expose conditional safety: %#v", descriptor)
+	}
+	chooser, err := Parse("/start")
+	if err != nil || RequiresConfirmation(chooser) {
+		t.Fatalf("bare start must remain read-only: command=%#v err=%v", chooser, err)
+	}
+	targeted, err := Parse("/start notes")
+	if err != nil || !RequiresConfirmation(targeted) {
+		t.Fatalf("targeted start must require confirmation: command=%#v err=%v", targeted, err)
 	}
 }
 
