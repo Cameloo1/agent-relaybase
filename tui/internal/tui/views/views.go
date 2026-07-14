@@ -3,7 +3,7 @@ package views
 import (
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -1481,18 +1481,20 @@ func shortProjectPath(value string, width int) string {
 	if cleaned == "" {
 		return "—"
 	}
-	cleaned = filepath.Clean(cleaned)
+	// Registered apps can originate on a different host than the TUI. Treat
+	// both path separators as display separators so the same daemon state has
+	// the same readable projection on Windows, Linux, and macOS.
+	cleaned = path.Clean(strings.ReplaceAll(cleaned, `\`, "/"))
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		home = filepath.Clean(home)
+		home = path.Clean(strings.ReplaceAll(home, `\`, "/"))
 		lowerPath := strings.ToLower(cleaned)
 		lowerHome := strings.ToLower(home)
 		if lowerPath == lowerHome {
 			cleaned = "~"
-		} else if strings.HasPrefix(lowerPath, lowerHome+strings.ToLower(string(filepath.Separator))) {
+		} else if strings.HasPrefix(lowerPath, lowerHome+"/") {
 			cleaned = "~" + cleaned[len(home):]
 		}
 	}
-	cleaned = filepath.ToSlash(cleaned)
 	if ansi.StringWidth(cleaned) <= width {
 		return cleaned
 	}

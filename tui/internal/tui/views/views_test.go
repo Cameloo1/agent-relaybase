@@ -535,9 +535,23 @@ func TestAppTableStatusToneAndProjectPathStaySemanticAndBounded(t *testing.T) {
 			t.Fatalf("status %q color=%v, want %v", test.status, got, test.want)
 		}
 	}
-	project := shortProjectPath(`C:\very\long\workspace\relaybase\examples\dashboard`, 24)
-	if lipgloss.Width(project) > 24 || !strings.Contains(project, "dashboard") {
-		t.Fatalf("short project path=%q width=%d", project, lipgloss.Width(project))
+	windowsProject := shortProjectPath(`C:\very\long\workspace\relaybase\examples\dashboard`, 24)
+	unixProject := shortProjectPath(`/very/long/workspace/relaybase/examples/dashboard`, 24)
+	for _, project := range []string{windowsProject, unixProject} {
+		if lipgloss.Width(project) > 24 || !strings.Contains(project, "dashboard") {
+			t.Fatalf("short project path=%q width=%d", project, lipgloss.Width(project))
+		}
+	}
+	if strings.Contains(windowsProject, `\`) {
+		t.Fatalf("Windows project path was not normalized for display: %q", windowsProject)
+	}
+}
+
+func TestShortProjectPathNormalizesForeignSeparatorsDeterministically(t *testing.T) {
+	windowsPath := shortProjectPath(`C:\work\relaybase\examples\api`, 80)
+	forwardSlashPath := shortProjectPath(`C:/work/relaybase/examples/api`, 80)
+	if windowsPath != forwardSlashPath || windowsPath != "C:/work/relaybase/examples/api" {
+		t.Fatalf("foreign path projections differ: windows=%q forward=%q", windowsPath, forwardSlashPath)
 	}
 }
 
