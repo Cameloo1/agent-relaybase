@@ -25,6 +25,7 @@ Generated outputs should use ignored locations:
   recordings, exported verification bundles, and captured before/after status
   JSON.
 - `dist/` for GoReleaser snapshot archives and checksum outputs.
+- `dist/release/` for hashed npm/GitHub release candidates and `dist/signpath-signed/` for downloaded signing output.
 - `coverage/` for coverage reports.
 - `*.tgz` for npm package dry-run tarballs if a package command creates one.
 - `.relaybase/` for local daemon state inside the repo, though smoke tests
@@ -32,6 +33,7 @@ Generated outputs should use ignored locations:
 - `bin/relaybase-tui/relaybase-tui-*` for generated TUI binaries.
 - `packages/relaybase-tui-*/bin/relaybase-tui-*` for generated platform-package payloads.
 - `dist-runtime/` for the compiled npm runtime generated during package preparation.
+- `tui/cmd/relaybase-tui/rsrc_windows_*.syso` for generated PE version-resource objects; `winres.json` remains tracked source.
 
 `bin/relaybase-tui/README.md` remains tracked so the expected binary directory
 is visible in source. Generated platform binaries in that directory are ignored

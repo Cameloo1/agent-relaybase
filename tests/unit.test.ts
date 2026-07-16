@@ -20,6 +20,7 @@ import { redactDiagnosticText, redactSecretLikeValues, redactValueForExport } fr
 import { Registry } from "../src/registry.ts";
 import { appIdFromHost, resolveRoute } from "../src/router.ts";
 import {
+  formatTuiLaunchFailure,
   formatMissingTuiBinaryDiagnostic,
   checkDaemonReachable,
   resolveTuiBinary,
@@ -710,6 +711,15 @@ test("TUI bridge reports spawn failures and closes bootstrap channel", async () 
   assert.equal(exitCode, 1);
   assert.match(stderr, /could not launch/);
   assert.match(stderr, /spawn UNKNOWN/);
+  assert.match(stderr, /Windows Application Control may have blocked/);
+  assert.match(stderr, /install the current signed Relaybase release/);
+  assert.match(stderr, /will not ask you to disable or weaken system policy/);
+});
+
+test("TUI launch failure guidance is Windows-specific", () => {
+  const diagnostic = formatTuiLaunchFailure("relaybase-tui", new Error("spawn UNKNOWN"), "linux");
+  assert.match(diagnostic, /spawn UNKNOWN/);
+  assert.doesNotMatch(diagnostic, /Application Control/);
 });
 
 test("TUI bridge launches Windows development build before go-run fallback", async () => {
@@ -983,6 +993,7 @@ test("TUI release dry run uses snapshot clean arguments", () => {
 
   const status = runCli(["release-dry-run"], {
     exists: () => false,
+    prepareWindowsResources: () => ({ cleanup: () => undefined }),
     spawn: (command: string, args: string[]) => {
       calls.push({ command, args });
       if (args[0] === "--version") {

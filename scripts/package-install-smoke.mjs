@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { targetForPlatform } from "./tui-go.mjs";
+import { inspectWindowsSignature, verifyAuthenticodeTrust } from "./windows-signature.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -15,11 +17,19 @@ export function runPackageInstallSmoke(options = {}) {
   const workspace = mkdtempSync(path.join(os.tmpdir(), "relaybase-install-smoke-"));
   const cache = path.join(workspace, "npm-cache");
   try {
-    const packageDir = path.join(rootDir, "packages", `relaybase-tui-${target.goos}-${target.goarch}`);
-    const platformTarball = pack(packageDir, workspace, cache);
-    if (!platformTarball) return 1;
-    const rootTarball = pack(rootDir, workspace, cache);
-    if (!rootTarball) return 1;
+    let platformTarball;
+    let rootTarball;
+    if (options.tarballDir) {
+      const candidate = releaseTarballs(path.resolve(options.tarballDir), target);
+      platformTarball = candidate.platformTarball;
+      rootTarball = candidate.rootTarball;
+    } else {
+      const packageDir = path.join(rootDir, "packages", `relaybase-tui-${target.goos}-${target.goarch}`);
+      platformTarball = pack(packageDir, workspace, cache);
+      if (!platformTarball) return 1;
+      rootTarball = pack(rootDir, workspace, cache);
+      if (!rootTarball) return 1;
+    }
     const install = runNpm(["install", "--ignore-scripts", "--no-audit", "--no-fund", platformTarball, rootTarball], {
       cwd: workspace,
       cache
@@ -68,6 +78,52 @@ export function runPackageInstallSmoke(options = {}) {
       console.error("Installed relaybase check attempted to use source-only tooling.");
       return 1;
     }
+    const installedTui = path.join(
+      workspace,
+      "node_modules",
+      "@cameloo",
+      `relaybase-tui-${target.goos}-${target.goarch}`,
+      "bin",
+      target.binary
+    );
+    if (options.requireWindowsTrust) {
+      if (target.goos !== "windows") {
+        console.error("--require-windows-trust must run on a Windows candidate runner.");
+        return 1;
+      }
+      const inspection = inspectWindowsSignature(installedTui);
+      if (!inspection.hasAuthenticode) {
+        console.error(`Installed Windows TUI is unsigned: ${inspection.reason}`);
+        return 1;
+      }
+      const trust = verifyAuthenticodeTrust(installedTui);
+      if (!trust.trusted) {
+        console.error(`Installed Windows TUI signature is not trusted: ${trust.status} (${trust.statusMessage})`);
+        return 1;
+      }
+      console.log(`Installed Windows TUI signature is trusted${trust.signer ? `: ${trust.signer}` : "."}`);
+    }
+    const tui = runExecutable(
+      installedTui,
+      [
+        "--base-url",
+        "http://127.0.0.1:1",
+        "--state-dir",
+        path.join(workspace, "tui-state"),
+        "--smoke-render",
+        "--smoke-width",
+        "100",
+        "--smoke-height",
+        "30"
+      ],
+      workspace,
+      { timeout: 30_000 }
+    );
+    if (tui.status !== 0 || tui.error || !/Relaybase/i.test(tui.stdout ?? "")) {
+      report(tui);
+      console.error("Installed platform TUI could not execute and render its packaged smoke frame.");
+      return 1;
+    }
     const daemonProbe = runCompiledDaemonProbe(workspace);
     if (daemonProbe.status !== 0) return report(daemonProbe);
     console.log(`Disposable install smoke passed for ${target.goos}/${target.goarch} at version ${expected}.`);
@@ -75,6 +131,33 @@ export function runPackageInstallSmoke(options = {}) {
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
+}
+
+function releaseTarballs(directory, target) {
+  const manifest = JSON.parse(readFileSync(path.join(directory, "release-manifest.json"), "utf8"));
+  if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.packages)) {
+    throw new Error("Release candidate manifest is missing or invalid.");
+  }
+  const rootEntry = manifest.packages.find((entry) => entry.name === "@cameloo/relaybase");
+  const platformName = `@cameloo/relaybase-tui-${target.goos}-${target.goarch}`;
+  const platformEntry = manifest.packages.find((entry) => entry.name === platformName);
+  if (!rootEntry || !platformEntry) {
+    throw new Error(`Release candidate does not contain @cameloo/relaybase and ${platformName}.`);
+  }
+  return {
+    rootTarball: verifiedTarball(directory, rootEntry),
+    platformTarball: verifiedTarball(directory, platformEntry)
+  };
+}
+
+function verifiedTarball(directory, entry) {
+  if (typeof entry.file !== "string" || path.basename(entry.file) !== entry.file || !entry.file.endsWith(".tgz")) {
+    throw new Error(`Release candidate contains an unsafe tarball path for ${entry.name}.`);
+  }
+  const tarball = path.join(directory, entry.file);
+  const digest = createHash("sha256").update(readFileSync(tarball)).digest("hex");
+  if (digest !== entry.sha256) throw new Error(`Release candidate hash mismatch: ${entry.file}`);
+  return tarball;
 }
 
 function runCompiledDaemonProbe(workspace) {
@@ -144,5 +227,10 @@ function report(result) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  process.exitCode = runPackageInstallSmoke();
+  const args = process.argv.slice(2);
+  const tarballIndex = args.indexOf("--tarball-dir");
+  process.exitCode = runPackageInstallSmoke({
+    tarballDir: tarballIndex >= 0 ? args[tarballIndex + 1] : undefined,
+    requireWindowsTrust: args.includes("--require-windows-trust")
+  });
 }

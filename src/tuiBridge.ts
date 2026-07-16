@@ -334,7 +334,7 @@ export async function runRelaybaseTui(
       resolve(code);
     };
     child.once("error", (error) => {
-      stderr.write(`relaybase tui: could not launch ${resolution.path}: ${error.message}\n`);
+      stderr.write(formatTuiLaunchFailure(resolution.path, error, options.platform ?? process.platform));
       finish(1);
     });
     child.once("exit", (code, signal) => {
@@ -390,10 +390,24 @@ export function formatDaemonBootstrapDiagnostic(baseURL: string, result: DaemonE
     .concat("\n");
 }
 
-function formatTuiLaunchFailure(binaryPath: string | undefined, error: unknown): string {
-  return `relaybase tui: could not launch ${binaryPath ?? "relaybase-tui"}: ${
-    error instanceof Error ? error.message : String(error)
-  }\n`;
+export function formatTuiLaunchFailure(
+  binaryPath: string | undefined,
+  error: unknown,
+  platform: NodeJS.Platform = process.platform
+): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const lines = [`relaybase tui: could not launch ${binaryPath ?? "relaybase-tui"}: ${message}`];
+  if (platform === "win32" && /spawn UNKNOWN|EPERM|EACCES|Application Control policy/i.test(message)) {
+    lines.push(
+      /Application Control policy/i.test(message)
+        ? "Windows Application Control blocked this executable."
+        : "Windows Application Control may have blocked this executable.",
+      "Recovery: install the current signed Relaybase release, then retry `relaybase start`.",
+      "Evidence: inspect Microsoft-Windows-CodeIntegrity/Operational in Event Viewer.",
+      "Relaybase will not ask you to disable or weaken system policy."
+    );
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 async function developmentGoRunFallback(options: {

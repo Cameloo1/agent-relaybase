@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { prepareWindowsVersionResources } from "./windows-version-resource.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tuiDir = path.join(root, "tui");
@@ -354,33 +355,26 @@ function runBuild(args, options = {}) {
   const currentTarget = targetForPlatform();
   mkdirSync(outputDir, { recursive: true });
   mkdirSync(devOutputDir, { recursive: true });
-
-  for (const target of selectedTargets) {
-    const outputPath = path.join(outputDir, target.binary);
-    const status = runGoCommand(
-      {
-        action: "build",
-        retryScript: args.includes("--all") ? "npm run tui:build:all" : "npm run tui:build",
-        args: ["build", "-trimpath", "-o", outputPath, "./cmd/relaybase-tui"],
-        env: {
-          CGO_ENABLED: "0",
-          GOOS: target.goos,
-          GOARCH: target.goarch
-        }
-      },
-      options
-    );
-    if (status !== 0) {
-      return status;
+  let windowsResources;
+  try {
+    const windowsArches = selectedTargets.filter((target) => target.goos === "windows").map((target) => target.goarch);
+    if (windowsArches.length > 0) {
+      const prepareResources = options.prepareWindowsResources ?? prepareWindowsVersionResources;
+      windowsResources = prepareResources({
+        rootDir: options.rootDir ?? root,
+        arches: windowsArches,
+        spawn: options.spawn,
+        env: goCommandEnv()
+      });
     }
 
-    if (target.goos === currentTarget.goos && target.goarch === currentTarget.goarch) {
-      const devOutputPath = path.join(devOutputDir, target.binary);
-      const devStatus = runGoCommand(
+    for (const target of selectedTargets) {
+      const outputPath = path.join(outputDir, target.binary);
+      const status = runGoCommand(
         {
           action: "build",
           retryScript: args.includes("--all") ? "npm run tui:build:all" : "npm run tui:build",
-          args: ["build", "-trimpath", "-o", devOutputPath, "./cmd/relaybase-tui"],
+          args: ["build", "-trimpath", "-o", outputPath, "./cmd/relaybase-tui"],
           env: {
             CGO_ENABLED: "0",
             GOOS: target.goos,
@@ -389,10 +383,35 @@ function runBuild(args, options = {}) {
         },
         options
       );
-      if (devStatus !== 0) {
-        return devStatus;
+      if (status !== 0) {
+        return status;
+      }
+
+      if (target.goos === currentTarget.goos && target.goarch === currentTarget.goarch) {
+        const devOutputPath = path.join(devOutputDir, target.binary);
+        const devStatus = runGoCommand(
+          {
+            action: "build",
+            retryScript: args.includes("--all") ? "npm run tui:build:all" : "npm run tui:build",
+            args: ["build", "-trimpath", "-o", devOutputPath, "./cmd/relaybase-tui"],
+            env: {
+              CGO_ENABLED: "0",
+              GOOS: target.goos,
+              GOARCH: target.goarch
+            }
+          },
+          options
+        );
+        if (devStatus !== 0) {
+          return devStatus;
+        }
       }
     }
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  } finally {
+    windowsResources?.cleanup();
   }
 
   return 0;
@@ -666,16 +685,34 @@ function runGoReleaser(args, options = {}) {
     return 1;
   }
 
-  const result = spawn(goreleaser.command, args, {
-    cwd: options.rootDir ?? root,
-    shell: false,
-    stdio: "inherit"
-  });
-  if (result.error) {
-    console.error(`relaybase tui release: could not run ${goreleaser.command}: ${result.error.message}`);
+  let windowsResources;
+  try {
+    if (args.includes("release")) {
+      const prepareResources = options.prepareWindowsResources ?? prepareWindowsVersionResources;
+      windowsResources = prepareResources({
+        rootDir: options.rootDir ?? root,
+        arches: ["amd64", "arm64"],
+        spawn: options.spawn,
+        env: goCommandEnv()
+      });
+    }
+    const result = spawn(goreleaser.command, args, {
+      cwd: options.rootDir ?? root,
+      env: goCommandEnv(),
+      shell: false,
+      stdio: "inherit"
+    });
+    if (result.error) {
+      console.error(`relaybase tui release: could not run ${goreleaser.command}: ${result.error.message}`);
+      return 1;
+    }
+    return result.status ?? 1;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
     return 1;
+  } finally {
+    windowsResources?.cleanup();
   }
-  return result.status ?? 1;
 }
 
 function printUsage() {

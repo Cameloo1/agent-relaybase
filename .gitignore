@@ -23,4 +23,5 @@ bin/relaybase-tui/relaybase-tui-*
 !bin/relaybase-tui/README.md
 packages/relaybase-tui-*/bin/relaybase-tui-*
 packages/relaybase-tui-*/LICENSE
+tui/cmd/relaybase-tui/rsrc_windows_*.syso
 

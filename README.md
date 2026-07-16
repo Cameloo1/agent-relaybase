@@ -121,6 +121,7 @@ Common recovery paths:
 - App will not become healthy: run `relaybase health` and inspect the reported logs and `nextActions`.
 - Registration verification failed: preview the recommended health-route, dynamic-binding, or pinned-port repair; Relaybase never applies the repair without another approval.
 - Registration cleanup failed: do not retry launch verification until the remaining process or backend-port owner is resolved.
+- Windows reports `spawn UNKNOWN`: install the current signed release and retry. Do not weaken Windows Application Control; inspect `Microsoft-Windows-CodeIntegrity/Operational` for the blocking evidence.
 - Port conflict: let Relaybase choose a dynamic port or update the manifest’s explicit port strategy.
 - Token mismatch: use the state directory reported by `relaybase check`; never paste the token into logs or issues.
 
@@ -150,6 +151,7 @@ The source-checkout start path does not silently run `npm link` or replace globa
 | Configure an app manifest        | [App manifest](docs/app-manifest.md)                          |
 | Connect MCP clients              | [MCP](docs/mcp.md)                                            |
 | Understand security boundaries   | [Security and limits](docs/security-and-limits.md)            |
+| Review Windows release signing   | [Code signing policy](docs/code-signing-policy.md)            |
 | Develop or package the TUI       | [TUI toolchain](docs/tui-toolchain.md)                        |
 | Use the optional Operator Agent  | [Operator Agent architecture](docs/tui-agent-architecture.md) |
 
@@ -160,3 +162,9 @@ Relaybase is local-first preview software. It does not currently provide public 
 ## License
 
 MIT
+
+## Code signing policy
+
+Relaybase requires the Windows release candidate to pass Authenticode trust validation and packaged execution on Windows before publication. See the [code signing policy](docs/code-signing-policy.md).
+
+Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).

@@ -141,7 +141,7 @@ npm.cmd run package:check-platforms
 npm.cmd run package:install-smoke
 ```
 
-The normal package check remains usable on hosts without Go and reports when strict binary proof is unavailable. Release verification is strict: the slim root tarball must contain the compiled runtime, pin every optional platform package to the same version, and exclude source, tests, caches, reports, and generated binaries. Every platform tarball must contain its exact executable, and a root-plus-platform tarball install must run from a disposable directory. A normal published installation does not execute TypeScript from `node_modules` and does not require Go.
+The normal package check remains usable on hosts without Go and reports when strict binary proof is unavailable. Release verification is strict: the slim root tarball must contain the compiled runtime, pin every optional platform package to the same version, and exclude source, tests, caches, reports, and generated binaries. Every platform tarball must contain its exact executable, and a root-plus-platform tarball install must execute the packaged TUI and compiled daemon from a disposable directory. A normal published installation does not execute TypeScript from `node_modules` and does not require Go.
 
 Package checks use a newly created OS-temp npm cache by default and remove it when the check finishes, including failure paths. Set `RELAYBASE_PACKAGE_NPM_CACHE` to an explicit directory only when the operator deliberately wants to preserve and reuse that cache.
 
@@ -174,12 +174,41 @@ GoReleaser builds the six supported TUI binary names:
 - `relaybase-tui-linux-amd64`
 - `relaybase-tui-linux-arm64`
 
-`npm run release:dry-run` writes snapshot artifacts under `dist/` and must
-produce `dist/relaybase-tui-checksums.txt` in a GoReleaser-capable environment.
-Do not stage generated `dist/` outputs unless a release task explicitly asks for
-them.
+`npm run release:dry-run` writes unsigned snapshot evidence under `dist/` and must produce `dist/relaybase-tui-checksums.txt` in a GoReleaser-capable environment. Snapshots verify cross-platform naming and archive configuration; they are not publishable Windows artifacts. Do not stage generated `dist/` outputs.
 
-The protected `.github/workflows/release.yml` workflow verifies version alignment, builds and packages all targets, runs disposable installation proof, creates GitHub release artifacts, publishes standalone platform packages, then publishes `@cameloo/relaybase`. Publication requires the `npm-production` environment and npm credentials; CI and local dry-runs never publish.
+The protected `.github/workflows/release.yml` workflow:
+
+1. verifies the tag, source, toolchain, GoReleaser configuration, and all package versions;
+2. builds all six TUI targets with deterministic Windows version metadata;
+3. uploads only the two Windows executables to SignPath's GitHub trusted-build connector;
+4. waits for the required SignPath approval, accepts the signed files, and rejects missing certificate tables;
+5. packs and hashes the root package plus six platform packages without rebuilding the signed files;
+6. installs the exact candidate on a Windows runner, requires valid Windows Authenticode trust, and executes the packaged TUI;
+7. publishes those exact tarballs to npm and the GitHub release only after every prior gate passes.
+
+Production GitHub assets are the npm `.tgz` files, `release-manifest.json`, and `relaybase-release-checksums.txt` under generated `dist/release/`. The workflow is idempotent: an already-published package version is verified and skipped; unexpected npm lookup failures stop publication.
+
+## One-time publisher configuration
+
+Windows signing uses SignPath Foundation rather than Azure. The public [code signing policy](code-signing-policy.md) and `.signpath/windows-binaries.xml` are the repository-owned configuration. After SignPath approves the project, configure:
+
+- repository secret `SIGNPATH_API_TOKEN`;
+- repository variable `SIGNPATH_ORGANIZATION_ID`;
+- SignPath project `relaybase`;
+- signing policy `release-signing`;
+- artifact configuration `windows-binaries`, using the checked-in XML.
+
+SignPath Foundation requires a manual approval for each release. The unsigned workflow artifact has one-day retention and is never uploaded to the public GitHub release.
+
+npm trusted publishing is configured separately for all seven packages. For each package, select GitHub Actions and enter:
+
+- organization or user: `Cameloo1`;
+- repository: `relaybase`;
+- workflow filename: `release.yml`;
+- environment: `npm-production`;
+- allowed action: `npm publish`.
+
+The workflow grants `id-token: write`, uses a GitHub-hosted runner, Node 24, and npm 11.5.1 or newer. `NPM_TOKEN` is retained only as an optional bootstrap credential for the first publication before the package settings exist. After all seven trusted publishers are configured and proven, remove that write token. CI and local dry-runs never publish.
 
 See `docs/artifact-hygiene.md` for generated artifact locations, clean-worktree
 checks, and safe cleanup rules.
@@ -192,5 +221,6 @@ Release verification must capture:
 - TUI test, vet, race, and build results
 - direct binary launch result
 - `relaybase tui` bridge launch result
-- GoReleaser checksum artifact path and archive inspection, or an explicit
-  GoReleaser environment blocker
+- GoReleaser checksum artifact path and archive inspection, or an explicit GoReleaser environment blocker
+- Authenticode certificate-table presence for both Windows binaries
+- Windows `Get-AuthenticodeSignature` status and exact-candidate packaged execution

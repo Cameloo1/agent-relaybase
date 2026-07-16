@@ -93,7 +93,7 @@ jobs:
   tui-build:
     name: TUI Build Smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -128,6 +128,11 @@ jobs:
 
       - name: Build platform TUI binary
         run: npm run tui:build
+
+      - name: Execute installed package candidate
+        run: |
+          npm run package:prepare-platforms:current
+          npm run package:install-smoke
 
       - name: Verify clean workspace
         if: always()

@@ -3,7 +3,7 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { targets } from "./tui-go.mjs";
+import { targetForPlatform, targets } from "./tui-go.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -12,8 +12,9 @@ export function preparePlatformPackages(options = {}) {
   const sourceDir = options.sourceDir ?? path.join(rootDir, "bin", "relaybase-tui");
   const version = rootPackageVersion(rootDir);
   const prepared = [];
+  const selectedTargets = options.targets ?? targets;
 
-  for (const target of targets) {
+  for (const target of selectedTargets) {
     const packageName = `relaybase-tui-${target.goos}-${target.goarch}`;
     const packageDir = path.join(rootDir, "packages", packageName);
     const manifestPath = path.join(packageDir, "package.json");
@@ -50,7 +51,9 @@ function rootPackageVersion(rootDir) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    const prepared = preparePlatformPackages();
+    const prepared = preparePlatformPackages({
+      targets: process.argv.slice(2).includes("--current") ? [targetForPlatform()] : targets
+    });
     for (const entry of prepared) {
       console.log(`Prepared ${entry.packageName}: ${path.relative(root, entry.binary)}`);
     }

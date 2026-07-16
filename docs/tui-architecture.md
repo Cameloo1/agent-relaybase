@@ -189,7 +189,9 @@ Local Go builds and checks are driven by `scripts/tui-go.mjs`; `scripts/build-tu
 - `npm run tui:test`, `npm run tui:vet`, and `npm run tui:race` run Go checks from `tui/` through the same missing-tool diagnostics.
 - `npm run doctor:tui` reports local Node, Go, Go environment, package binary, `RELAYBASE_TUI_BIN`, and GoReleaser readiness without installing tools or starting apps.
 
-Release configuration lives in `.goreleaser.yml`. It defines Linux, macOS, and Windows `amd64`/`arm64` TUI artifacts, archives that include the license/readme/TUI docs, and checksum generation. GoReleaser binary names match the bridge/package convention: `relaybase-tui-<os>-<arch>` with `.exe` on Windows. Platform-specific npm packages are not implemented yet; the bridge has a real resolution path for them and fails with an actionable diagnostic when no binary exists.
+Release configuration lives in `.goreleaser.yml`. It defines Linux, macOS, and Windows `amd64`/`arm64` TUI snapshot artifacts and checksum generation. GoReleaser binary names match the bridge/package convention: `relaybase-tui-<os>-<arch>` with `.exe` on Windows. Six platform-specific npm packages carry the matching prebuilt binaries, and the root package selects one through pinned optional dependencies.
+
+Publishable Windows binaries are built with deterministic PE version metadata, signed through SignPath's GitHub trusted-build integration, copied into their platform packages without rebuilding, and verified on a separate Windows runner before publication. Production GitHub release assets are the same hashed npm tarballs that pass candidate installation checks; GoReleaser snapshots remain dry-run evidence only.
 
 CI now separates:
 

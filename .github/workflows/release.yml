@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish GitHub and npm release artifacts
+        description: Publish signed GitHub and npm release artifacts
         required: true
         type: boolean
         default: false
@@ -17,14 +17,15 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: write
   id-token: write
 
 jobs:
-  release:
+  prepare:
+    name: Build, sign, and package
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    environment: npm-production
+    timeout-minutes: 90
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -32,11 +33,11 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24
-          cache: npm
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -54,6 +55,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify release tool versions
+        run: |
+          node --version
+          npm --version
+          node -e "const { execFileSync } = require('node:child_process'); const [major, minor, patch] = execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number); if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) throw new Error('npm 11.5.1 or newer is required for trusted publishing')"
+          go version
+          goreleaser --version
+
       - name: Verify release tag and package versions
         run: node scripts/verify-release-version.mjs
 
@@ -68,69 +77,160 @@ jobs:
       - name: Run source verification
         run: npm run verify -- --release
 
-      - name: Build and prepare npm platform packages
+      - name: Validate GoReleaser configuration
+        run: npm run release:check
+
+      - name: Build all platform TUI binaries
+        run: npm run tui:build:all
+
+      - name: Verify SignPath configuration is available
+        if: github.event_name == 'push' || inputs.publish == true
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
         run: |
-          npm run tui:build:all
+          test -n "$SIGNPATH_API_TOKEN" || { echo "Missing SIGNPATH_API_TOKEN repository secret." >&2; exit 1; }
+          test -n "$SIGNPATH_ORGANIZATION_ID" || { echo "Missing SIGNPATH_ORGANIZATION_ID repository variable." >&2; exit 1; }
+          echo "SIGNPATH_VERSION=$(node scripts/windows-version-resource.mjs --print-version)" >> "$GITHUB_ENV"
+
+      - name: Upload unsigned Windows binaries for origin-verified signing
+        if: github.event_name == 'push' || inputs.publish == true
+        id: upload-unsigned-windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: relaybase-unsigned-windows-${{ github.run_id }}
+          path: |
+            bin/relaybase-tui/relaybase-tui-windows-amd64.exe
+            bin/relaybase-tui/relaybase-tui-windows-arm64.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Submit SignPath Foundation signing request
+        if: github.event_name == 'push' || inputs.publish == true
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: relaybase
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: windows-binaries
+          github-artifact-id: ${{ steps.upload-unsigned-windows.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: ${{ github.workspace }}/dist/signpath-signed
+          parameters: |
+            version: ${{ toJSON(env.SIGNPATH_VERSION) }}
+
+      - name: Accept signed Windows binaries
+        if: github.event_name == 'push' || inputs.publish == true
+        run: node scripts/accept-signed-windows.mjs --source dist/signpath-signed --destination bin/relaybase-tui
+
+      - name: Verify Windows Authenticode certificate tables
+        if: github.event_name == 'push' || inputs.publish == true
+        run: npm run package:check-windows-signatures
+
+      - name: Prepare and inspect npm platform packages
+        run: |
           npm run package:prepare-platforms
           npm run package:check:strict
           npm run package:check-platforms
           npm run package:install-smoke
 
-      - name: Validate release artifacts
-        run: npm run release:check
+      - name: Generate signed release candidate
+        if: github.event_name == 'push' || inputs.publish == true
+        run: |
+          npm run release:prepare
+          npm run package:install-smoke -- --tarball-dir dist/release
 
-      - name: Generate snapshot evidence
+      - name: Generate unsigned snapshot evidence
         if: github.event_name == 'workflow_dispatch' && inputs.publish != true
         run: npm run release:dry-run
 
-      - name: Generate publishable release artifacts
+      - name: Upload signed release candidate
         if: github.event_name == 'push' || inputs.publish == true
-        run: goreleaser release --clean --skip=publish
+        uses: actions/upload-artifact@v4
+        with:
+          name: relaybase-release-candidate
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload dry-run evidence
+        if: github.event_name == 'workflow_dispatch' && inputs.publish != true
+        uses: actions/upload-artifact@v4
+        with:
+          name: relaybase-release-dry-run
+          path: dist/**
+          if-no-files-found: error
+          retention-days: 7
+
+  verify-windows-candidate:
+    name: Verify signed Windows candidate
+    needs: prepare
+    if: github.event_name == 'push' || inputs.publish == true
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Download exact signed release candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: relaybase-release-candidate
+          path: dist/release
+
+      - name: Verify trusted signature and execute packaged Windows TUI
+        run: npm run package:install-smoke -- --tarball-dir dist/release --require-windows-trust
+
+  publish:
+    name: Publish npm and GitHub release
+    needs:
+      - prepare
+      - verify-windows-candidate
+    if: github.event_name == 'push' || inputs.publish == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: npm-production
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js for npm trusted publishing
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Download verified release candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: relaybase-release-candidate
+          path: dist/release
 
       - name: Create or refresh draft GitHub release
-        if: github.event_name == 'push' || inputs.publish == true
         run: |
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes
           fi
-          while IFS= read -r -d '' artifact; do
-            gh release upload "$GITHUB_REF_NAME" "$artifact" --clobber
-          done < <(find dist -maxdepth 2 -type f -print0)
+          gh release upload "$GITHUB_REF_NAME" dist/release/* --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish npm packages idempotently
-        if: github.event_name == 'push' || inputs.publish == true
-        run: |
-          publish_if_missing() {
-            package="$1"
-            name=$(node -p "require('./${package}/package.json').name")
-            version=$(node -p "require('./${package}/package.json').version")
-            if npm view "${name}@${version}" version >/dev/null 2>&1; then
-              echo "Already published: ${name}@${version}"
-            else
-              npm publish "$package" --access public --provenance
-            fi
-          }
-          for package in packages/relaybase-tui-*; do
-            publish_if_missing "$package"
-          done
-          publish_if_missing "."
+      - name: Publish exact npm tarballs idempotently
+        run: npm run release:publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish GitHub release
-        if: github.event_name == 'push' || inputs.publish == true
         run: gh release edit "$GITHUB_REF_NAME" --draft=false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload release evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: relaybase-release-evidence
-          path: |
-            dist/**
-            bin/relaybase-tui/relaybase-tui-*
-          if-no-files-found: warn
