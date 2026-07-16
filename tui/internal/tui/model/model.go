@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -89,129 +90,167 @@ type daemonRetryMsg struct{}
 type eventRetryMsg struct{}
 
 type RootModel struct {
-	cfg                    config.Config
-	client                 *relaybaseclient.Client
-	bootstrapClient        *bootstrap.Client
-	ctx                    context.Context
-	cancel                 context.CancelFunc
-	state                  *relaybaseclient.RelaybaseState
-	stream                 *relaybaseclient.EventStream
-	connectionStatus       string
-	eventStatus            string
-	eventCount             int
-	diagnostics            []Diagnostic
-	theme                  styles.Theme
-	styles                 styles.Styles
-	keymap                 keymap.KeyMap
-	paneManager            panes.Manager
-	appInventory           inventory.Manager
-	contextMenu            contextmenu.Menu
-	preferences            preferences.Preferences
-	preferenceStore        preferences.Store
-	commandInput           string
-	commandActive          bool
-	composer               composer.Model
-	paste                  *pendingPaste
-	pasteGeneration        uint64
-	interaction            interaction.State
-	agentPreviousFocus     interaction.PrimaryFocus
-	responseOffset         int
-	responseFollow         bool
-	responseNewOutput      int
-	assistantHistory       []string
-	assistantTimeline      []string
-	naturalHistory         []assistant.HistoryEntry
-	agentDelta             string
-	lastAssistantLine      string
-	historyExpanded        bool
-	setupSession           setupwizard.State
-	registrationPreview    *relaybaseclient.RegistrationSetupResult
-	regRepairPreview       *relaybaseclient.RegistrationRepairPreviewResult
-	regVerifyAppID         string
-	pendingConfirm         *confirmationRequest
-	quitConfirmation       bool
-	agentConfig            *relaybaseclient.AgentConfig
-	agentStatus            string
-	agentDiagnostics       []relaybaseclient.AgentDiagnostic
-	agentSession           *relaybaseclient.AgentSession
-	agentSessions          []relaybaseclient.AgentSession
-	threadDrafts           map[string]threadDraftState
-	threadResponses        map[string]threadResponseState
-	agentStream            *relaybaseclient.AgentEventStream
-	agentStreamSessionID   string
-	agentStreamGeneration  uint64
-	agentInitialReplay     bool
-	agentReplayStatus      string
-	agentPendingInput      string
-	agentPendingGeneration uint64
-	agentMessageGeneration uint64
-	pendingSubmissionDraft *submissionDraftState
-	authorizedProjectRoots []string
-	pendingAgentApproval   *relaybaseclient.AgentApproval
-	lastNaturalAction      string
-	helpVisible            bool
-	helpSearch             textinput.Model
-	helpMatches            []slash.CommandMatch
-	helpSelected           int
-	helpDetailOffset       int
-	appListVisible         bool
-	appListOffset          int
-	appListRefreshing      bool
-	appListNotice          string
-	appListPaneRefreshID   string
-	paneReopenVisible      bool
-	paneReopenSelected     int
-	paneReopenSelectedID   string
-	paneReopenOffset       int
-	paneReopenAppID        string
-	paneReopenNotice       string
-	usage                  usagecomponent.Model
-	usageRequestGeneration uint64
-	threadSwitcherVisible  bool
-	threadSwitcherLoading  bool
-	threadSwitcherSelected int
-	codePickerVisible      bool
-	codePickerSelected     int
-	commandPalette         commandpalette.Model
-	startCompletion        appcompletion.Model
-	clipboardWriteReady    bool
-	appPackages            []relaybaseclient.AppPackageDefinition
-	activePackageRun       *relaybaseclient.AppPackageRun
-	packageListRequested   bool
-	packageRunProgress     string
-	packageRunPolling      map[string]bool
-	packageRunPollFailures map[string]int
-	packageRunReported     map[string]bool
-	logFetchPending        map[string]string
-	diagnosticsExpanded    bool
-	width                  int
-	height                 int
-	layoutComposerRows     int
-	bodyScrollOffset       int
-	daemonRetryAttempt     int
-	eventRetryAttempt      int
-	lastBootstrapResult    *bootstrap.DaemonResult
-	assistantPrompt        string
-	localThreadGeneration  uint64
-	composerHistoryID      uint64
-	now                    func() time.Time
+	cfg                          config.Config
+	client                       *relaybaseclient.Client
+	bootstrapClient              *bootstrap.Client
+	ctx                          context.Context
+	cancel                       context.CancelFunc
+	state                        *relaybaseclient.RelaybaseState
+	stream                       *relaybaseclient.EventStream
+	connectionStatus             string
+	eventStatus                  string
+	eventCount                   int
+	diagnostics                  []Diagnostic
+	theme                        styles.Theme
+	styles                       styles.Styles
+	keymap                       keymap.KeyMap
+	paneManager                  panes.Manager
+	appInventory                 inventory.Manager
+	contextMenu                  contextmenu.Menu
+	preferences                  preferences.Preferences
+	preferenceStore              preferences.Store
+	commandInput                 string
+	commandActive                bool
+	composer                     composer.Model
+	paste                        *pendingPaste
+	pasteGeneration              uint64
+	interaction                  interaction.State
+	agentPreviousFocus           interaction.PrimaryFocus
+	responseOffset               int
+	responseFollow               bool
+	responseNewOutput            int
+	assistantHistory             []string
+	assistantTimeline            []string
+	naturalHistory               []assistant.HistoryEntry
+	agentDelta                   string
+	lastAssistantLine            string
+	historyExpanded              bool
+	setupSession                 setupwizard.State
+	registrationPreview          *relaybaseclient.RegistrationSetupResult
+	regRepairPreview             *relaybaseclient.RegistrationRepairPreviewResult
+	regVerifyAppID               string
+	pendingConfirm               *confirmationRequest
+	quitConfirmation             bool
+	agentConfig                  *relaybaseclient.AgentConfig
+	agentStatus                  string
+	agentDiagnostics             []relaybaseclient.AgentDiagnostic
+	agentSession                 *relaybaseclient.AgentSession
+	agentSessions                []relaybaseclient.AgentSession
+	threadDrafts                 map[string]threadDraftState
+	threadResponses              map[string]threadResponseState
+	agentStream                  *relaybaseclient.AgentEventStream
+	agentStreamSessionID         string
+	agentStreamGeneration        uint64
+	agentInitialReplay           bool
+	agentReplayStatus            string
+	agentPendingInput            string
+	agentPendingGeneration       uint64
+	agentMessageGeneration       uint64
+	pendingSubmissionDraft       *submissionDraftState
+	authorizedProjectRoots       []string
+	pendingAgentApproval         *relaybaseclient.AgentApproval
+	lastNaturalAction            string
+	helpVisible                  bool
+	helpSearch                   textinput.Model
+	helpMatches                  []slash.CommandMatch
+	helpSelected                 int
+	helpDetailOffset             int
+	appManagerVisible            bool
+	appManagerMode               appManagerMode
+	appManagerSurface            appManagerSurface
+	appManagerOffset             int
+	appManagerActionOffset       int
+	appManagerSelectedActionID   appManagerActionID
+	appManagerRenameInput        textinput.Model
+	appManagerPackageNameInput   textinput.Model
+	appManagerRenameAppID        string
+	appManagerRenameCurrentName  string
+	appManagerRefreshing         bool
+	appManagerNotice             string
+	appManagerPaneRefreshID      string
+	appManagerPendingAppID       string
+	appManagerPendingAction      appManagerActionID
+	appManagerPackageSelectedID  string
+	appManagerPackageOffset      int
+	appManagerPendingPackageID   string
+	packageManagerVisible        bool
+	packageManagerSurface        packageManagerSurface
+	packageManagerSelectedID     string
+	packageManagerOffset         int
+	packageManagerActionOffset   int
+	packageManagerSelectedAction packageManagerActionID
+	packageManagerNameInput      textinput.Model
+	packageManagerCreating       bool
+	packageManagerMembers        []string
+	packageManagerMemberSelected int
+	packageManagerMemberOffset   int
+	packageManagerRunOffset      int
+	packageManagerNotice         string
+	packageManagerRefreshing     bool
+	packageManagerPendingID      string
+	packageManagerPendingAction  packageManagerActionID
+	packageDeleteAutoConfirm     bool
+	registrationRepairs          []relaybaseclient.RegistrationRepairOption
+	registrationRepairApp        string
+	registrationRepairRow        int
+	paneReopenVisible            bool
+	paneReopenSelected           int
+	paneReopenSelectedID         string
+	paneReopenOffset             int
+	paneReopenAppID              string
+	paneReopenNotice             string
+	usage                        usagecomponent.Model
+	usageRequestGeneration       uint64
+	threadSwitcherVisible        bool
+	threadSwitcherLoading        bool
+	threadSwitcherSelected       int
+	codePickerVisible            bool
+	codePickerSelected           int
+	commandPalette               commandpalette.Model
+	startCompletion              appcompletion.Model
+	clipboardWriteReady          bool
+	appPackages                  []relaybaseclient.AppPackageDefinition
+	appPackagesKnown             bool
+	activePackageRun             *relaybaseclient.AppPackageRun
+	packageListRequested         bool
+	packageRunProgress           string
+	packageRunPolling            map[string]bool
+	packageRunPollFailures       map[string]int
+	packageRunReported           map[string]bool
+	logFetchPending              map[string]string
+	diagnosticsExpanded          bool
+	width                        int
+	height                       int
+	layoutComposerRows           int
+	bodyScrollOffset             int
+	daemonRetryAttempt           int
+	eventRetryAttempt            int
+	lastBootstrapResult          *bootstrap.DaemonResult
+	assistantPrompt              string
+	localThreadGeneration        uint64
+	composerHistoryID            uint64
+	now                          func() time.Time
 }
 
 type confirmationRequest struct {
-	Action          string
-	Target          slash.ResolvedTarget
-	Risk            string
-	Expected        string
-	Command         slash.ParsedCommand
-	LifecycleAction string
-	ExportRequest   *relaybaseclient.LogExportRequest
-	SetupCommand    *slash.ParsedCommand
-	AssistantInput  string
-	DaemonRepair    bool
-	PackageAction   string
-	PackageID       string
-	PackageRunID    string
-	Details         []string
+	Action               string
+	Target               slash.ResolvedTarget
+	Risk                 string
+	Expected             string
+	Command              slash.ParsedCommand
+	LifecycleAction      string
+	ExportRequest        *relaybaseclient.LogExportRequest
+	SetupCommand         *slash.ParsedCommand
+	AssistantInput       string
+	DaemonRepair         bool
+	PackageAction        string
+	PackageID            string
+	PackageRunID         string
+	Details              []string
+	UnregisterPreview    *relaybaseclient.AppUnregisterPreview
+	RenamePreview        *relaybaseclient.AppRenamePreview
+	PackageChangePreview *relaybaseclient.AppPackageChangePreview
+	PackageDeletePreview *relaybaseclient.AppPackageDeletePreview
 }
 
 type threadDraftState struct {
@@ -331,49 +370,70 @@ func NewRoot(cfg config.Config, client *relaybaseclient.Client) RootModel {
 	helpSearch.CharLimit = 80
 	helpSearch.SetWidth(48)
 	applyTextInputTheme(&helpSearch, theme)
+	renameInput := textinput.New()
+	renameInput.Prompt = ""
+	renameInput.Placeholder = "new app name"
+	renameInput.CharLimit = 256
+	renameInput.SetWidth(48)
+	applyTextInputTheme(&renameInput, theme)
+	packageNameInput := textinput.New()
+	packageNameInput.Prompt = ""
+	packageNameInput.Placeholder = "package name"
+	packageNameInput.CharLimit = 128
+	packageNameInput.SetWidth(48)
+	applyTextInputTheme(&packageNameInput, theme)
+	appPackageNameInput := textinput.New()
+	appPackageNameInput.Prompt = ""
+	appPackageNameInput.Placeholder = "package name"
+	appPackageNameInput.CharLimit = 128
+	appPackageNameInput.SetWidth(48)
+	applyTextInputTheme(&appPackageNameInput, theme)
 	composerModel := composer.New(76)
 	composerModel.ApplyTheme(theme, loadedPreferences.Assistant.BarColor)
 	composerModel.SetHistoryScope("local:1")
 
 	return RootModel{
-		cfg:                    cfg,
-		client:                 client,
-		bootstrapClient:        bootstrapClient,
-		ctx:                    ctx,
-		cancel:                 cancel,
-		connectionStatus:       "connecting",
-		eventStatus:            "connecting",
-		agentStatus:            "checking",
-		diagnostics:            diagnostics,
-		theme:                  theme,
-		styles:                 tuiStyles,
-		keymap:                 keymap.WithContextMenu(loadedPreferences.Keymap.ContextMenu),
-		paneManager:            paneManager,
-		preferences:            loadedPreferences,
-		preferenceStore:        preferenceStore,
-		assistantHistory:       []string{},
-		naturalHistory:         []assistant.HistoryEntry{},
-		width:                  80,
-		height:                 24,
-		lastBootstrapResult:    bootstrapReport,
-		assistantPrompt:        assistant.PromptPlaceholder(),
-		helpSearch:             helpSearch,
-		helpMatches:            slash.SearchCatalog(""),
-		commandPalette:         commandpalette.New(commandpalette.DefaultMaxRows),
-		startCompletion:        appcompletion.New(appcompletion.DefaultMaxRows),
-		composer:               composerModel,
-		interaction:            interaction.New(),
-		agentPreviousFocus:     interaction.FocusPanes,
-		responseFollow:         true,
-		localThreadGeneration:  1,
-		threadDrafts:           map[string]threadDraftState{},
-		threadResponses:        map[string]threadResponseState{},
-		clipboardWriteReady:    clipboardWriteAvailable(),
-		packageRunPolling:      map[string]bool{},
-		packageRunPollFailures: map[string]int{},
-		packageRunReported:     map[string]bool{},
-		logFetchPending:        map[string]string{},
-		now:                    time.Now,
+		cfg:                        cfg,
+		client:                     client,
+		bootstrapClient:            bootstrapClient,
+		ctx:                        ctx,
+		cancel:                     cancel,
+		connectionStatus:           "connecting",
+		eventStatus:                "connecting",
+		agentStatus:                "checking",
+		diagnostics:                diagnostics,
+		theme:                      theme,
+		styles:                     tuiStyles,
+		keymap:                     keymap.WithContextMenu(loadedPreferences.Keymap.ContextMenu),
+		paneManager:                paneManager,
+		preferences:                loadedPreferences,
+		preferenceStore:            preferenceStore,
+		assistantHistory:           []string{},
+		naturalHistory:             []assistant.HistoryEntry{},
+		width:                      80,
+		height:                     24,
+		lastBootstrapResult:        bootstrapReport,
+		assistantPrompt:            assistant.PromptPlaceholder(),
+		helpSearch:                 helpSearch,
+		appManagerRenameInput:      renameInput,
+		appManagerPackageNameInput: appPackageNameInput,
+		packageManagerNameInput:    packageNameInput,
+		helpMatches:                slash.SearchCatalog(""),
+		commandPalette:             commandpalette.New(commandpalette.DefaultMaxRows),
+		startCompletion:            appcompletion.New(appcompletion.DefaultMaxRows),
+		composer:                   composerModel,
+		interaction:                interaction.New(),
+		agentPreviousFocus:         interaction.FocusPanes,
+		responseFollow:             true,
+		localThreadGeneration:      1,
+		threadDrafts:               map[string]threadDraftState{},
+		threadResponses:            map[string]threadResponseState{},
+		clipboardWriteReady:        clipboardWriteAvailable(),
+		packageRunPolling:          map[string]bool{},
+		packageRunPollFailures:     map[string]int{},
+		packageRunReported:         map[string]bool{},
+		logFetchPending:            map[string]string{},
+		now:                        time.Now,
 	}
 }
 
@@ -467,8 +527,12 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		persistAgentPreference := m.transitionAgentSurfaceForResize(previousMetrics)
 		m.syncOperatorLayout()
 		m.helpSearch.SetWidth(maxInt(16, minInt(48, msg.Width-12)))
+		m.appManagerRenameInput.SetWidth(maxInt(12, minInt(64, msg.Width-24)))
+		m.appManagerPackageNameInput.SetWidth(maxInt(12, minInt(64, msg.Width-24)))
+		m.packageManagerNameInput.SetWidth(maxInt(12, minInt(64, msg.Width-24)))
 		m.commandPalette.SetMaxRows(commandPaletteRows(msg.Height))
-		m.clampAppListOffset()
+		m.clampAppManagerOffset()
+		m.followPackageManagerSelection()
 		m.followPaneReopenSelection()
 		m.clampBodyScroll()
 		if persistAgentPreference {
@@ -490,6 +554,9 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.quitConfirmation || m.contextMenu.IsOpen() {
+			return m, nil
+		}
+		if len(m.registrationRepairs) > 0 {
 			return m, nil
 		}
 		if m.responseDetailsVisible() {
@@ -516,15 +583,33 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.appListVisible {
-			if region, ok := frame.HitMap.Hit(mouse.X, mouse.Y); ok && (region.Kind == components.HitRegisteredAppRow || region.Kind == components.HitModal) {
+		if m.packageManagerVisible {
+			if m.packageManagerSurface == packageManagerSurfaceName {
+				return m, nil
+			}
+			if region, ok := frame.HitMap.Hit(mouse.X, mouse.Y); ok && (region.Kind == components.HitPackageRow || region.Kind == components.HitPackageAction || region.Kind == components.HitPackageMember || region.Kind == components.HitModal) {
 				switch mouse.Button {
 				case tea.MouseWheelUp:
-					m.appInventory.Move(-3)
+					m.movePackageManagerSelection(-3)
 				case tea.MouseWheelDown:
-					m.appInventory.Move(3)
+					m.movePackageManagerSelection(3)
 				}
-				m.followAppListSelection()
+				m.followPackageManagerSelection()
+			}
+			return m, nil
+		}
+		if m.appManagerVisible {
+			if m.appManagerSurface == appManagerSurfaceRename || m.appManagerSurface == appManagerSurfacePackageCreate {
+				return m, nil
+			}
+			if region, ok := frame.HitMap.Hit(mouse.X, mouse.Y); ok && (region.Kind == components.HitRegisteredAppRow || region.Kind == components.HitAppManagerAction || region.Kind == components.HitPackageRow || region.Kind == components.HitModal) {
+				switch mouse.Button {
+				case tea.MouseWheelUp:
+					m.moveAppManagerSelection(-3)
+				case tea.MouseWheelDown:
+					m.moveAppManagerSelection(3)
+				}
+				m.followAppManagerSelection()
 			}
 			return m, nil
 		}
@@ -627,7 +712,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.MouseClickMsg:
 		mouse := msg.Mouse()
-		if mouse.Button != tea.MouseLeft || m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.contextMenu.IsOpen() || m.usage.IsOpen() {
+		if mouse.Button != tea.MouseLeft || m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.contextMenu.IsOpen() || m.usage.IsOpen() || len(m.registrationRepairs) > 0 {
 			return m, nil
 		}
 		frame := views.BuildShell(m.styles, m.shellData())
@@ -670,11 +755,35 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.appListVisible {
-			if ok && region.Kind == components.HitRegisteredAppRow {
+		if m.packageManagerVisible {
+			if ok && region.Kind == components.HitPackageRow {
+				m.selectPackageManagerIndex(region.Index)
+				m.packageManagerNotice = ""
+				m.followPackageManagerSelection()
+			} else if ok && region.Kind == components.HitPackageAction {
+				m.selectPackageManagerActionIndex(region.Index)
+				m.packageManagerNotice = ""
+				m.followPackageManagerSelection()
+			} else if ok && region.Kind == components.HitPackageMember {
+				m.packageManagerMemberSelected = region.Index
+				m.packageManagerNotice = ""
+				m.followPackageManagerSelection()
+			}
+			return m, nil
+		}
+		if m.appManagerVisible {
+			if ok && region.Kind == components.HitPackageRow && m.appManagerSurface == appManagerSurfacePackagePicker {
+				m.selectAppPackagePickerIndex(region.Index)
+				m.appManagerNotice = ""
+				m.followAppPackagePickerSelection()
+			} else if ok && region.Kind == components.HitRegisteredAppRow {
 				m.appInventory.SelectIndex(region.Index)
-				m.appListNotice = ""
-				m.followAppListSelection()
+				m.appManagerNotice = ""
+				m.followAppManagerSelection()
+			} else if ok && region.Kind == components.HitAppManagerAction {
+				m.selectAppManagerActionIndex(region.Index)
+				m.appManagerNotice = ""
+				m.followAppManagerSelection()
 			}
 			return m, nil
 		}
@@ -752,7 +861,13 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() {
 			return m, nil
 		}
-		if m.threadSwitcherVisible || m.codePickerVisible || m.appListVisible || m.paneReopenVisible {
+		if m.appManagerVisible && m.appManagerSurface == appManagerSurfaceRename {
+			return m.updateAppRenamePaste(msg.Content)
+		}
+		if (m.appManagerVisible && m.appManagerSurface == appManagerSurfacePackageCreate) || (m.packageManagerVisible && m.packageManagerSurface == packageManagerSurfaceName) {
+			return m.updatePackageNamePaste(msg.Content)
+		}
+		if m.threadSwitcherVisible || m.codePickerVisible || m.appManagerVisible || m.packageManagerVisible || m.paneReopenVisible {
 			return m, nil
 		}
 		if m.helpVisible {
@@ -767,12 +882,30 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.beginPaste(msg.Content)
 	case pasteReadyMsg:
-		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() || m.threadSwitcherVisible || m.codePickerVisible || m.appListVisible || m.paneReopenVisible || m.helpVisible {
+		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() || m.threadSwitcherVisible || m.codePickerVisible || m.appManagerVisible || m.packageManagerVisible || m.paneReopenVisible || m.helpVisible {
 			return m.cancelPendingPaste(), nil
 		}
 		return m.completePaste(msg), nil
 	case clipboardPasteLoadedMsg:
-		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() || m.threadSwitcherVisible || m.codePickerVisible || m.appListVisible || m.paneReopenVisible || m.helpVisible {
+		if m.appManagerVisible && m.appManagerSurface == appManagerSurfaceRename && m.pendingConfirm == nil {
+			if msg.Err != nil {
+				m.appManagerNotice = "Could not read the system clipboard."
+				return m, nil
+			}
+			return m.updateAppRenamePaste(msg.Text)
+		}
+		if ((m.appManagerVisible && m.appManagerSurface == appManagerSurfacePackageCreate) || (m.packageManagerVisible && m.packageManagerSurface == packageManagerSurfaceName)) && m.pendingConfirm == nil {
+			if msg.Err != nil {
+				if m.appManagerVisible {
+					m.appManagerNotice = "Could not read the system clipboard."
+				} else {
+					m.packageManagerNotice = "Could not read the system clipboard."
+				}
+				return m, nil
+			}
+			return m.updatePackageNamePaste(msg.Text)
+		}
+		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() || m.threadSwitcherVisible || m.codePickerVisible || m.appManagerVisible || m.packageManagerVisible || m.paneReopenVisible || m.helpVisible {
 			return m, nil
 		}
 		if msg.Err != nil {
@@ -792,12 +925,22 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.addDiagnostic("clipboard_copy_failed", "warning", "Could not write the current input to the system clipboard.")
 			}
+			if m.appManagerVisible && m.appManagerPendingAction == appManagerActionCopyRoute {
+				m.appManagerNotice = "Could not copy the selected route to the system clipboard."
+				m.appManagerPendingAppID = ""
+				m.appManagerPendingAction = ""
+			}
 			return m, nil
 		}
 		if msg.PaneID != "" {
 			m.addAssistantMessage(fmt.Sprintf("Copied %d log lines from %s.", msg.LineCount, msg.PaneTitle))
 		} else if msg.Target != "" {
 			m.addAssistantMessage("Copied " + msg.Target + " to clipboard.")
+			if m.appManagerVisible && m.appManagerPendingAction == appManagerActionCopyRoute {
+				m.appManagerNotice = "Copied the selected app route to the clipboard."
+				m.appManagerPendingAppID = ""
+				m.appManagerPendingAction = ""
+			}
 		} else {
 			m.addAssistantMessage("Copied current input to clipboard.")
 		}
@@ -820,6 +963,15 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.paneReopenVisible {
 			return m.handlePaneReopenKey(msg)
+		}
+		if len(m.registrationRepairs) > 0 {
+			return m.handleRegistrationRepairKey(msg)
+		}
+		if m.packageManagerVisible {
+			return m.handlePackageManagerKey(msg)
+		}
+		if m.appManagerVisible {
+			return m.handleAppManagerKey(msg)
 		}
 		if isThreadSwitcherShortcut(msg) {
 			return m.openThreadSwitcher()
@@ -845,9 +997,6 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.executeContextMenuSelection()
 			}
 			return m, nil
-		}
-		if m.appListVisible {
-			return m.handleAppListKey(msg)
 		}
 		if m.helpVisible {
 			return m.handleHelpKey(msg)
@@ -999,7 +1148,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case commands.StateLoadedMsg:
 		wasOffline := m.connectionStatus != "connected"
-		paneRefreshID := m.appListPaneRefreshID
+		paneRefreshID := m.appManagerPaneRefreshID
 		m.state = msg.State
 		m.connectionStatus = "connected"
 		m.daemonRetryAttempt = 0
@@ -1014,19 +1163,25 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.paneManager.ApplyState(msg.State)
 		m.appInventory.ApplyState(msg.State)
 		m.refreshStartCompletion()
-		m.appListRefreshing = false
-		if m.appListVisible {
+		m.appManagerRefreshing = false
+		if m.appManagerVisible {
 			if paneRefreshID != "" {
-				m.appListPaneRefreshID = ""
+				m.appManagerPaneRefreshID = ""
 				if len(m.paneManager.PaneIDsForApp(paneRefreshID)) == 0 {
-					m.appListNotice = "The app is running, but no monitoring pane is present in current daemon state."
+					m.appManagerNotice = "The app is running, but no monitoring pane is present in current daemon state."
 				} else {
-					m.appListNotice = "The monitoring pane is now available; press Enter to open it."
+					m.appManagerNotice = "The monitoring pane is now available; press Enter to open it."
 				}
 			} else {
-				m.appListNotice = ""
+				m.appManagerNotice = m.appManagerRefreshNotice()
 			}
-			m.followAppListSelection()
+			if m.appManagerPendingAction == appManagerActionRename && m.appManagerSurface == appManagerSurfaceActions {
+				if item, ok := m.appInventory.ItemByID(m.appManagerPendingAppID); ok && item.Name == m.appManagerRenameCurrentName {
+					m.appManagerPendingAppID = ""
+					m.appManagerPendingAction = ""
+				}
+			}
+			m.followAppManagerSelection()
 		}
 		if m.paneReopenVisible {
 			if len(m.paneReopenCandidates()) == 0 {
@@ -1064,10 +1219,10 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, batchCommands(cmds...)
 	case commands.StateFailedMsg:
 		m.connectionStatus = "offline"
-		m.appListRefreshing = false
-		m.appListPaneRefreshID = ""
-		if m.appListVisible {
-			m.appListNotice = "Could not refresh registered apps; showing last known daemon state."
+		m.appManagerRefreshing = false
+		m.appManagerPaneRefreshID = ""
+		if m.appManagerVisible {
+			m.appManagerNotice = "Could not refresh registered apps; showing last known daemon state. Actions that require the daemon are disabled."
 		}
 		m.eventStatus = "waiting"
 		m.agentStatus = "waiting"
@@ -1089,7 +1244,33 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.addDiagnostic("pane_logs_unavailable", "warning", fmt.Sprintf("Could not fetch logs for %s: %s", msg.Target.AppID, safeErr))
 		return m, nil
 	case commands.AppPackagesLoadedMsg:
+		previousPackageID := m.packageManagerSelectedID
 		m.appPackages = append([]relaybaseclient.AppPackageDefinition(nil), msg.Packages...)
+		sort.SliceStable(m.appPackages, func(left, right int) bool {
+			return strings.ToLower(m.appPackages[left].Name) < strings.ToLower(m.appPackages[right].Name)
+		})
+		m.appPackagesKnown = true
+		m.packageManagerRefreshing = false
+		m.appManagerRefreshing = false
+		m.ensurePackageManagerSelection()
+		if m.packageManagerVisible {
+			if previousPackageID != "" && !m.hasAppPackage(previousPackageID) {
+				m.packageManagerSurface = packageManagerSurfaceTable
+				m.packageManagerMembers = nil
+				m.packageManagerCreating = false
+				m.packageManagerPendingID = ""
+				m.packageManagerPendingAction = ""
+				m.packageManagerNameInput.Blur()
+				m.packageManagerNotice = "The selected package no longer exists. The manager returned to the package table without applying the draft."
+			}
+			m.followPackageManagerSelection()
+		}
+		if m.appManagerVisible && m.appManagerSurface == appManagerSurfacePackagePicker {
+			if m.selectedAppPickerPackage() == nil && len(m.appPackages) > 0 {
+				m.appManagerPackageSelectedID = m.appPackages[0].ID
+			}
+			m.followAppPackagePickerSelection()
+		}
 		m.clearDiagnostics("app_packages_unavailable")
 		if m.packageListRequested {
 			m.packageListRequested = false
@@ -1097,6 +1278,8 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case commands.AppPackagesFailedMsg:
+		m.appPackagesKnown = false
+		m.packageManagerRefreshing = false
 		if m.packageListRequested {
 			m.packageListRequested = false
 			m.addAssistantMessage("Could not list app packages: " + safePackageErrorMessage(msg.Err))
@@ -1107,10 +1290,46 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case commands.AppPackageCreatedMsg:
 		if msg.Package != nil {
 			m.upsertAppPackage(*msg.Package)
+			if m.appManagerVisible && m.appManagerPendingPackageID == "create" {
+				m.appManagerPackageSelectedID = msg.Package.ID
+				m.appManagerPendingPackageID = ""
+				m.appManagerPendingAppID = ""
+				m.appManagerPendingAction = ""
+				m.appManagerRefreshing = false
+				m.appManagerSurface = appManagerSurfaceActions
+				m.appManagerSelectedActionID = appManagerActionAddPackage
+				m.appManagerPackageNameInput.Blur()
+				m.appManagerNotice = fmt.Sprintf("Created package %s with the selected app. No app was launched.", msg.Package.Name)
+				return m, nil
+			}
+			if m.packageManagerVisible && m.packageManagerPendingAction == "create" {
+				m.packageManagerSelectedID = msg.Package.ID
+				m.packageManagerPendingAction = ""
+				m.packageManagerPendingID = ""
+				m.packageManagerRefreshing = false
+				m.packageManagerCreating = false
+				m.packageManagerSurface = packageManagerSurfaceActions
+				m.packageManagerNameInput.Blur()
+				m.ensurePackageManagerActionSelection()
+				m.packageManagerNotice = fmt.Sprintf("Created package %s with %d app(s). Nothing was launched.", msg.Package.Name, len(msg.Package.MemberAppIDs))
+				return m, nil
+			}
 			m.addAssistantMessage(fmt.Sprintf("Created package %s with %d app(s).", msg.Package.Name, len(msg.Package.MemberAppIDs)))
 		}
 		return m, nil
 	case commands.AppPackageCreateFailedMsg:
+		if m.appManagerVisible && m.appManagerPendingPackageID == "create" {
+			m.appManagerRefreshing = false
+			m.appManagerPendingPackageID = ""
+			m.appManagerNotice = "Package creation failed: " + safePackageErrorMessage(msg.Err) + " The name draft is preserved."
+			return m, nil
+		}
+		if m.packageManagerVisible && m.packageManagerPendingAction == "create" {
+			m.packageManagerRefreshing = false
+			m.packageManagerPendingAction = ""
+			m.packageManagerNotice = "Package creation failed: " + safePackageErrorMessage(msg.Err) + " The app and order draft is preserved."
+			return m, nil
+		}
 		m.addAssistantMessage("Could not create app package: " + safePackageErrorMessage(msg.Err))
 		return m, nil
 	case commands.AppPackageDeletedMsg:
@@ -1122,11 +1341,179 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case commands.AppPackageDeleteFailedMsg:
 		m.addAssistantMessage("Could not delete app package: " + safePackageErrorMessage(msg.Err))
 		return m, nil
+	case commands.AppPackageChangePreviewedMsg:
+		m.appManagerRefreshing = false
+		m.packageManagerRefreshing = false
+		if msg.Preview == nil {
+			m.setPackageMutationFailure(msg.PackageID, "Package change preview returned no daemon evidence.")
+			return m, nil
+		}
+		if msg.Preview.Noop {
+			m.setPackageMutationFailure(msg.PackageID, "The package already has the requested definition; no mutation is required.")
+			return m, nil
+		}
+		if !msg.Preview.CanApply || msg.Preview.PreviewID == "" {
+			m.setPackageMutationFailure(msg.PackageID, "Package change blocked: "+packagePreviewBlockers(msg.Preview.Blockers))
+			return m, nil
+		}
+		changeKind := msg.Preview.Change.Kind
+		action := "update package"
+		risk := "Changes only the saved package definition. It does not start, stop, restart, or unregister any app."
+		details := []string{
+			"package: " + msg.Preview.Package.CurrentName,
+			fmt.Sprintf("revision: %d -> %d", msg.Preview.Package.CurrentRevision, msg.Preview.Package.ProposedRevision),
+			fmt.Sprintf("members: %d -> %d", len(msg.Preview.Package.CurrentMemberAppIDs), len(msg.Preview.Package.ProposedMemberAppIDs)),
+			"stable package id preserved: " + msg.PackageID,
+			"running processes, routes, and historical runs preserved: yes",
+		}
+		if changeKind == "add-member" {
+			action = "add app to package"
+		} else if changeKind == "rename" {
+			action = "rename package"
+			details[0] = "name: " + msg.Preview.Package.CurrentName + " -> " + msg.Preview.Package.ProposedName
+		} else if changeKind == "replace-members" {
+			action = "edit package apps and launch order"
+		}
+		m.pendingConfirm = &confirmationRequest{
+			Action: action, Target: slash.ResolvedTarget{Description: "package " + msg.Preview.Package.CurrentName},
+			Risk: risk, Expected: "Daemon rechecks package revision, active runs, registered members, and the exact preview before applying one SQLite transaction.",
+			PackageAction: changeKind, PackageID: msg.PackageID, Details: details, PackageChangePreview: msg.Preview,
+		}
+		m.interaction.OpenModal(interaction.ModalConfirmation)
+		m.resetBodyScroll()
+		return m, nil
+	case commands.AppPackageChangePreviewFailedMsg:
+		m.appManagerRefreshing = false
+		m.packageManagerRefreshing = false
+		m.setPackageMutationFailure(msg.PackageID, "Package change preview failed: "+safePackageErrorMessage(msg.Err)+" The draft and selection are preserved.")
+		return m, nil
+	case commands.AppPackageChangedMsg:
+		if msg.Result == nil {
+			m.setPackageMutationFailure(msg.PackageID, "Package update returned no daemon result; refresh before retrying.")
+			return m, nil
+		}
+		m.upsertAppPackage(msg.Result.Package)
+		if m.appManagerVisible && m.appManagerPendingPackageID == msg.PackageID {
+			m.appManagerSurface = appManagerSurfaceActions
+			m.appManagerSelectedActionID = appManagerActionAddPackage
+			m.appManagerNotice = "Added the selected app to " + msg.Result.Package.Name + ". No app was launched."
+			m.appManagerPendingPackageID = ""
+			m.appManagerPendingAppID = ""
+			m.appManagerPendingAction = ""
+			m.appManagerRefreshing = false
+		}
+		if m.packageManagerVisible && m.packageManagerPendingID == msg.PackageID {
+			m.packageManagerSelectedID = msg.PackageID
+			m.packageManagerSurface = packageManagerSurfaceActions
+			m.packageManagerNotice = packageChangeSuccessNotice(msg.Result.ChangeKind, msg.Result.Package.Name)
+			m.packageManagerPendingID = ""
+			m.packageManagerPendingAction = ""
+			m.packageManagerRefreshing = false
+			m.packageManagerCreating = false
+			m.packageManagerNameInput.Blur()
+			m.ensurePackageManagerActionSelection()
+		}
+		return m, nil
+	case commands.AppPackageChangeFailedMsg:
+		m.appManagerRefreshing = false
+		m.packageManagerRefreshing = false
+		m.setPackageMutationFailure(msg.PackageID, "Package update failed after daemon revalidation: "+safePackageErrorMessage(msg.Err)+" Refresh and retry; the draft is preserved.")
+		return m, nil
+	case commands.AppPackageDeletePreviewedMsg:
+		m.packageManagerRefreshing = false
+		if m.packageManagerPendingID != msg.PackageID || m.packageManagerPendingAction != packageManagerActionDelete {
+			return m, nil
+		}
+		if msg.Preview == nil {
+			message := "Package delete preview returned no daemon evidence."
+			if m.packageManagerVisible {
+				m.packageManagerNotice = message
+			} else {
+				m.addAssistantMessage(message)
+			}
+			m.packageManagerPendingID = ""
+			m.packageManagerPendingAction = ""
+			m.packageDeleteAutoConfirm = false
+			return m, nil
+		}
+		if !msg.Preview.CanDelete || msg.Preview.PreviewID == "" {
+			message := "Package deletion blocked: " + packageDeleteBlockers(msg.Preview.Blockers)
+			if m.packageManagerVisible {
+				m.packageManagerNotice = message
+			} else {
+				m.addAssistantMessage(message)
+			}
+			m.packageManagerPendingID = ""
+			m.packageManagerPendingAction = ""
+			m.packageDeleteAutoConfirm = false
+			return m, nil
+		}
+		m.pendingConfirm = &confirmationRequest{
+			Action: "delete package", Target: slash.ResolvedTarget{Description: "package " + msg.Preview.Package.Name},
+			Risk:          "Deletes only the saved package definition. It does not stop or unregister apps, delete project files, or remove historical package runs.",
+			Expected:      "Daemon rechecks package revision and active-run state before deleting the exact stable package id.",
+			PackageAction: "delete-definition", PackageID: msg.PackageID, PackageDeletePreview: msg.Preview,
+			Details: []string{fmt.Sprintf("members preserved as apps: %d", len(msg.Preview.Package.MemberAppIDs)), fmt.Sprintf("historical runs preserved: %d", msg.Preview.HistoricalRunCount), "project files and app manifests preserved: yes"},
+		}
+		if m.packageDeleteAutoConfirm {
+			return m, m.executePendingConfirmation()
+		}
+		m.interaction.OpenModal(interaction.ModalConfirmation)
+		m.resetBodyScroll()
+		return m, nil
+	case commands.AppPackageDeletePreviewFailedMsg:
+		m.packageManagerRefreshing = false
+		if m.packageManagerPendingID == msg.PackageID {
+			message := "Package delete preview failed: " + safePackageErrorMessage(msg.Err)
+			if m.packageManagerVisible {
+				m.packageManagerNotice = message
+			} else {
+				m.addAssistantMessage(message)
+			}
+			m.packageManagerPendingID = ""
+			m.packageManagerPendingAction = ""
+			m.packageDeleteAutoConfirm = false
+		}
+		return m, nil
+	case commands.AppPackageDeleteAppliedMsg:
+		if msg.Result != nil {
+			m.removeAppPackage(msg.Result.Package.ID)
+			m.ensurePackageManagerSelection()
+			message := "Deleted package " + msg.Result.Package.Name + ". Apps and historical runs were preserved."
+			if m.packageManagerVisible {
+				m.packageManagerSurface = packageManagerSurfaceTable
+				m.packageManagerNotice = message
+			} else {
+				m.addAssistantMessage(message)
+			}
+		} else if !m.packageManagerVisible {
+			m.addAssistantMessage("Package deletion returned no daemon result; refresh before retrying.")
+		}
+		m.packageManagerPendingID = ""
+		m.packageManagerPendingAction = ""
+		m.packageDeleteAutoConfirm = false
+		m.packageManagerRefreshing = false
+		return m, nil
+	case commands.AppPackageDeleteApplyFailedMsg:
+		m.packageManagerRefreshing = false
+		if m.packageManagerPendingID == msg.PackageID {
+			message := "Package deletion failed after daemon revalidation: " + safePackageErrorMessage(msg.Err)
+			if m.packageManagerVisible {
+				m.packageManagerNotice = message
+			} else {
+				m.addAssistantMessage(message)
+			}
+			m.packageManagerPendingID = ""
+			m.packageManagerPendingAction = ""
+			m.packageDeleteAutoConfirm = false
+		}
+		return m, nil
 	case commands.AppPackageRunStartedMsg:
 		if msg.Run == nil {
 			return m, nil
 		}
 		m.activePackageRun = msg.Run
+		m.recordPackageRun(*msg.Run)
 		m.packageRunProgress = ""
 		m.addAssistantMessage(packageRunAcceptedMessage(*msg.Run, msg.Action))
 		if msg.Run.Terminal() {
@@ -1134,6 +1521,11 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.beginPackageRunPolling(msg.Run.ID)
 	case commands.AppPackageRunStartFailedMsg:
+		if m.packageManagerVisible {
+			m.packageManagerNotice = fmt.Sprintf("Package %s failed: %s", msg.Action, safePackageErrorMessage(msg.Err))
+			m.packageManagerPendingID = ""
+			m.packageManagerPendingAction = ""
+		}
 		m.addAssistantMessage(fmt.Sprintf("Package %s failed: %s", msg.Action, safePackageErrorMessage(msg.Err)))
 		return m, nil
 	case commands.AppPackageRunLoadedMsg:
@@ -1144,6 +1536,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.activePackageRun = msg.Run
+		m.recordPackageRun(*msg.Run)
 		if msg.Run.Terminal() {
 			return m, m.finishPackageRun(*msg.Run)
 		}
@@ -1185,6 +1578,11 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.addAssistantMessage(message)
 		}
+		if m.appManagerVisible && m.appManagerPendingAppID == msg.AppID && string(m.appManagerPendingAction) == msg.Action {
+			m.appManagerRefreshing = true
+			m.appManagerNotice = fmt.Sprintf("%s requested; operation %s. Refreshing daemon state.", sentenceCase(msg.Action), valueOr(msg.OperationID, "pending"))
+			return m, commands.FetchStateCmd(m.ctx, m.client)
+		}
 		return m, nil
 	case commands.LifecycleRequestFailedMsg:
 		message := fmt.Sprintf("%s failed for %s: %v", msg.Action, msg.AppID, msg.Err)
@@ -1195,6 +1593,157 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshAssistantPrompt()
 		} else {
 			m.addAssistantMessage(message)
+		}
+		if m.appManagerVisible && m.appManagerPendingAppID == msg.AppID && string(m.appManagerPendingAction) == msg.Action {
+			m.appManagerNotice = fmt.Sprintf("%s failed: %v. Review the app state and retry.", sentenceCase(msg.Action), msg.Err)
+			m.appManagerPendingAppID = ""
+			m.appManagerPendingAction = ""
+		}
+		return m, nil
+	case commands.AppUnregisterPreviewedMsg:
+		if !m.appManagerVisible || m.appManagerPendingAppID != msg.AppID || m.appManagerPendingAction != appManagerActionUnregister {
+			return m, nil
+		}
+		m.appManagerRefreshing = false
+		if msg.Preview == nil {
+			m.appManagerNotice = "Unregister preview returned no daemon evidence; refresh and retry."
+			return m, nil
+		}
+		if !msg.Preview.CanUnregister {
+			reasons := make([]string, 0, len(msg.Preview.Blockers))
+			for _, blocker := range msg.Preview.Blockers {
+				reasons = append(reasons, blocker.Message)
+			}
+			m.appManagerNotice = "Unregister blocked: " + strings.Join(reasons, " ")
+			m.appManagerPendingAppID = ""
+			m.appManagerPendingAction = ""
+			return m, nil
+		}
+		details := []string{
+			"runtime status: " + valueOr(msg.Preview.RuntimeStatus, "unknown"),
+			"project preserved: " + msg.Preview.App.ProjectDirectory,
+			"manifest preserved: " + valueOr(msg.Preview.App.ManifestPath, "registered manifest path unavailable"),
+			"logs preserved: yes",
+			"operation history preserved: yes",
+			"saved package references: 0",
+		}
+		m.pendingConfirm = &confirmationRequest{
+			Action:            "unregister",
+			Target:            slash.ResolvedTarget{Description: "app " + valueOr(msg.Preview.App.Name, msg.Preview.App.ID), AppIDs: []string{msg.Preview.App.ID}},
+			Risk:              "Removes only the stopped app's daemon registry entry. It does not stop a process or delete project files, the manifest, logs, or operation history.",
+			Expected:          "Daemon rechecks stopped state, lifecycle activity, and saved package references before removing the exact app id.",
+			UnregisterPreview: msg.Preview,
+			Details:           details,
+		}
+		m.interaction.OpenModal(interaction.ModalConfirmation)
+		m.resetBodyScroll()
+		m.refreshAssistantPrompt()
+		return m, nil
+	case commands.AppRenamePreviewedMsg:
+		if !m.appManagerVisible || m.appManagerPendingAppID != msg.AppID || m.appManagerPendingAction != appManagerActionRename {
+			return m, nil
+		}
+		m.appManagerRefreshing = false
+		if msg.Preview == nil {
+			m.appManagerNotice = "Rename preview returned no daemon evidence; the draft was preserved."
+			return m, nil
+		}
+		if msg.Preview.Noop {
+			m.appManagerNotice = "That name is already current; no mutation is required."
+			m.appManagerPendingAppID = ""
+			m.appManagerPendingAction = ""
+			return m, nil
+		}
+		if !msg.Preview.CanRename || msg.Preview.PreviewID == "" {
+			reasons := make([]string, 0, len(msg.Preview.Blockers))
+			for _, blocker := range msg.Preview.Blockers {
+				reasons = append(reasons, blocker.Message)
+			}
+			m.appManagerNotice = "Rename blocked: " + strings.Join(reasons, " ")
+			m.appManagerPendingAppID = ""
+			m.appManagerPendingAction = ""
+			return m, nil
+		}
+		details := []string{
+			"name: " + msg.Preview.App.CurrentName + " -> " + msg.Preview.App.ProposedName,
+			"stable id preserved: " + msg.Preview.Preserved.StableAppID,
+			"route preserved: " + valueOr(msg.Preview.Preserved.Route, "not applicable"),
+			"running process preserved: " + yesNo(msg.Preview.Preserved.RunningProcess),
+			"packages, logs, history, and automation preserved: yes",
+			"manifest: " + valueOr(msg.Preview.Manifest.Path, "unavailable"),
+			"component display name: " + valueOr(msg.Preview.Manifest.DisplayNameBehavior, "inherited"),
+		}
+		m.pendingConfirm = &confirmationRequest{
+			Action:        "rename app",
+			Target:        slash.ResolvedTarget{Description: "app " + msg.Preview.App.CurrentName, AppIDs: []string{msg.AppID}},
+			Risk:          "Writes the previewed manifest name and synchronizes daemon registry state without changing the stable app id or lifecycle.",
+			Expected:      "Manifest and registry agree on the new display name while the route, process, packages, panes, logs, history, and automation remain attached to the stable id.",
+			RenamePreview: msg.Preview,
+			Details:       details,
+		}
+		m.interaction.OpenModal(interaction.ModalConfirmation)
+		m.resetBodyScroll()
+		m.refreshAssistantPrompt()
+		return m, nil
+	case commands.AppRenamePreviewFailedMsg:
+		if m.appManagerVisible && m.appManagerPendingAppID == msg.AppID && m.appManagerPendingAction == appManagerActionRename {
+			m.appManagerRefreshing = false
+			m.appManagerNotice = fmt.Sprintf("Rename preview failed: %v. The draft is preserved; refresh and retry.", msg.Err)
+			m.appManagerPendingAppID = ""
+			m.appManagerPendingAction = ""
+		}
+		return m, nil
+	case commands.AppRenamedMsg:
+		if m.appManagerVisible && m.appManagerPendingAppID == msg.AppID && m.appManagerPendingAction == appManagerActionRename {
+			if msg.Result != nil {
+				m.appManagerRenameCurrentName = msg.Result.App.NewName
+				m.appManagerRenameInput.SetValue(msg.Result.App.NewName)
+			}
+			m.appManagerSurface = appManagerSurfaceActions
+			m.appManagerRenameInput.Blur()
+			m.appManagerSelectedActionID = appManagerActionRename
+			m.appManagerNotice = "Rename applied; refreshing manifest-backed daemon state."
+			m.appManagerRefreshing = true
+		}
+		m.addAssistantMessage("Renamed app " + msg.AppID + " without changing its stable id or lifecycle.")
+		return m, commands.FetchStateCmd(m.ctx, m.client)
+	case commands.AppRenameFailedMsg:
+		m.addDiagnostic("app_rename_failed", "error", fmt.Sprintf("Could not rename %s: %v", msg.AppID, msg.Err))
+		if m.appManagerVisible && m.appManagerPendingAppID == msg.AppID && m.appManagerPendingAction == appManagerActionRename {
+			m.appManagerSurface = appManagerSurfaceRename
+			_ = m.appManagerRenameInput.Focus()
+			m.appManagerNotice = fmt.Sprintf("Rename failed after daemon revalidation: %v. The draft is preserved.", msg.Err)
+			m.appManagerPendingAppID = ""
+			m.appManagerPendingAction = ""
+			m.appManagerRefreshing = false
+		}
+		return m, nil
+	case commands.AppUnregisterPreviewFailedMsg:
+		if m.appManagerVisible && m.appManagerPendingAppID == msg.AppID && m.appManagerPendingAction == appManagerActionUnregister {
+			m.appManagerRefreshing = false
+			m.appManagerNotice = fmt.Sprintf("Unregister preview failed: %v. Refresh daemon state and retry.", msg.Err)
+			m.appManagerPendingAppID = ""
+			m.appManagerPendingAction = ""
+		}
+		return m, nil
+	case commands.AppUnregisteredMsg:
+		if m.appManagerVisible && m.appManagerPendingAppID == msg.AppID && m.appManagerPendingAction == appManagerActionUnregister {
+			m.appManagerSurface = appManagerSurfaceTable
+			m.appManagerSelectedActionID = ""
+			m.appManagerNotice = "Unregistered " + msg.AppID + "; project files, manifest, logs, and operation history were preserved."
+			m.appManagerPendingAppID = ""
+			m.appManagerPendingAction = ""
+			m.appManagerRefreshing = true
+		}
+		m.addAssistantMessage("Unregistered app " + msg.AppID + " while preserving its project and retained evidence.")
+		return m, commands.FetchStateCmd(m.ctx, m.client)
+	case commands.AppUnregisterFailedMsg:
+		m.addDiagnostic("app_unregister_failed", "error", fmt.Sprintf("Could not unregister %s: %v", msg.AppID, msg.Err))
+		if m.appManagerVisible && m.appManagerPendingAppID == msg.AppID && m.appManagerPendingAction == appManagerActionUnregister {
+			m.appManagerNotice = fmt.Sprintf("Unregister failed after daemon revalidation: %v. Refresh and retry.", msg.Err)
+			m.appManagerPendingAppID = ""
+			m.appManagerPendingAction = ""
+			m.appManagerRefreshing = false
 		}
 		return m, nil
 	case commands.LogsExportedMsg:
@@ -1210,6 +1759,11 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.addAssistantMessage(message)
 		}
+		if m.appManagerVisible && m.appManagerPendingAction == appManagerActionExportLogs && msg.Request.AppID == m.appManagerPendingAppID {
+			m.appManagerNotice = "Redacted app log export completed: " + valueOr(outputPath, "export created")
+			m.appManagerPendingAppID = ""
+			m.appManagerPendingAction = ""
+		}
 		return m, nil
 	case commands.LogsExportFailedMsg:
 		message := fmt.Sprintf("Log export failed: %v", msg.Err)
@@ -1220,6 +1774,11 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshAssistantPrompt()
 		} else {
 			m.addAssistantMessage(message)
+		}
+		if m.appManagerVisible && m.appManagerPendingAction == appManagerActionExportLogs && msg.Request.AppID == m.appManagerPendingAppID {
+			m.appManagerNotice = fmt.Sprintf("Log export failed: %v. Retry remains available.", msg.Err)
+			m.appManagerPendingAppID = ""
+			m.appManagerPendingAction = ""
 		}
 		return m, nil
 	case commands.SetupDetectCompletedMsg:
@@ -1274,7 +1833,28 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.regVerifyAppID = ""
 		m.registrationPreview = msg.Result
 		m.addAssistantMessage(registrationPreviewMessage(msg.Result))
-		return m, commands.FetchStateCmd(m.ctx, m.client)
+		cmds := []tea.Cmd{commands.FetchStateCmd(m.ctx, m.client)}
+		if msg.Result != nil && msg.Result.App != nil {
+			repairs := automaticRegistrationRepairs(msg.Result)
+			switch len(repairs) {
+			case 1:
+				m.addAssistantMessage("Preparing approval-bound repair preview: " + repairs[0].Label + ".")
+				cmds = append(cmds, commands.SetupRegistrationRepairPreviewCmd(
+					m.ctx,
+					m.client,
+					relaybaseclient.RegistrationRepairPreviewRequest{AppID: msg.Result.App.ID, RepairID: repairs[0].ID},
+				))
+			default:
+				if len(repairs) > 1 {
+					m.registrationRepairs = repairs
+					m.registrationRepairApp = msg.Result.App.ID
+					m.registrationRepairRow = 0
+					m.interaction.OpenTransient(interaction.TransientRepairChooser)
+					m.addAssistantMessage("Choose which deterministic registration repair to preview.")
+				}
+			}
+		}
+		return m, tea.Batch(cmds...)
 	case commands.SetupRegistrationCancelCompletedMsg:
 		if msg.Result != nil && msg.Result.Cancelled {
 			m.addAssistantMessage(msg.Result.Message)
@@ -1290,14 +1870,21 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.addAssistantMessage("Registration repair preview ready: " + msg.Result.Repair.Label + ".")
+		details := []string{msg.Result.Repair.Reason, fmt.Sprintf("files: %d", len(msg.Result.FileWritePlan.Writes))}
+		if msg.Result.LaunchCommand != "" {
+			details = append(details, "launch: "+msg.Result.LaunchCommand)
+		}
+		for _, write := range msg.Result.FileWritePlan.Writes {
+			details = append(details, "write: "+write.Path)
+		}
 		m.pendingConfirm = &confirmationRequest{
 			Action:       "apply repair and verify",
 			Target:       slash.ResolvedTarget{Description: "app " + msg.Result.AppID},
-			Risk:         "Daemon writes the exact previewed manifest patch, re-registers the app, and runs one new bounded start/health/stop proof.",
+			Risk:         "Daemon writes the exact previewed file plan, re-registers the app, and runs one new bounded start/health/stop proof.",
 			Expected:     "The app ends stopped; verification passes only when health, stop, and backend-port closure pass.",
 			Command:      slash.ParsedCommand{Kind: slash.KindRepair, Target: msg.Result.AppID},
 			SetupCommand: &slash.ParsedCommand{Kind: slash.KindRepair, Target: msg.Result.AppID},
-			Details:      []string{msg.Result.Repair.Reason, fmt.Sprintf("files: %d", len(msg.Result.FileWritePlan.Writes))},
+			Details:      details,
 		}
 		m.refreshAssistantPrompt()
 		return m, nil
@@ -1663,6 +2250,9 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if shouldRefreshState(msg.Event.Type) {
 			cmds = append(cmds, commands.FetchStateCmd(m.ctx, m.client))
 		}
+		if strings.HasPrefix(msg.Event.Type, "package.") {
+			cmds = append(cmds, commands.ListAppPackagesCmd(m.ctx, m.client))
+		}
 		if logEvent, ok := logEventFromDaemonEvent(msg.Event); ok {
 			if cmd := commands.FetchLogsBatchCmd(m.ctx, m.client, m.paneManager.TargetsForLogEvent(logEvent)); cmd != nil {
 				cmds = append(cmds, cmd)
@@ -1724,18 +2314,31 @@ func (m RootModel) handleBlockingModalKey(msg tea.KeyPressMsg) (RootModel, tea.C
 		return m, nil
 	}
 	if keymap.Matches(msg, m.keymap.Escape) {
+		confirmation := m.pendingConfirm
 		m.pendingConfirm = nil
 		m.interaction.CloseModal()
 		m.resetBodyScroll()
-		if m.appListVisible {
-			m.appListNotice = "Start cancelled; no lifecycle request was sent."
+		if confirmation != nil && confirmation.PackageChangePreview != nil && m.appManagerVisible {
+			m.appManagerPendingPackageID = ""
+			m.appManagerNotice = "Add-to-package confirmation cancelled; the exact app and package selection were preserved."
+		} else if confirmation != nil && (confirmation.PackageChangePreview != nil || confirmation.PackageDeletePreview != nil) && m.packageManagerVisible {
+			m.packageManagerPendingID = ""
+			m.packageManagerPendingAction = ""
+			m.packageDeleteAutoConfirm = false
+			m.packageManagerNotice = "Package change cancelled; the exact package and editor draft were preserved."
+		} else if confirmation != nil && confirmation.PackageDeletePreview != nil {
+			m.packageManagerPendingID = ""
+			m.packageManagerPendingAction = ""
+			m.packageDeleteAutoConfirm = false
+		} else if m.appManagerVisible {
+			m.appManagerNotice = m.appManagerCancellationNotice()
 		}
 		m.addAssistantMessage("Confirmation cancelled.")
 		return m, nil
 	}
 	if keymap.Matches(msg, m.keymap.Enter) {
-		if m.appListVisible {
-			m.closeAppList()
+		if m.appManagerVisible && m.appManagerMode == appManagerModeStartPicker {
+			m.closeAppManager()
 		}
 		m.interaction.CloseModal()
 		m.resetBodyScroll()
@@ -1830,7 +2433,9 @@ func (m RootModel) shellData() views.ShellData {
 		Usage:               m.usage.Snapshot(),
 		ThreadSwitcher:      m.threadSwitcherDataForView(),
 		CodePicker:          m.codePickerDataForView(),
-		RegisteredApps:      m.appListDataForView(),
+		AppManager:          m.appManagerDataForView(),
+		PackageManager:      m.packageManagerDataForView(),
+		RegistrationRepairs: m.registrationRepairDataForView(),
 		PaneReopen:          m.paneReopenDataForView(),
 		KeyMap:              m.keymap,
 		AssistantPrompt:     m.assistantPrompt,
@@ -2509,6 +3114,14 @@ func (m RootModel) submitSlashCommand(input string) (RootModel, tea.Cmd) {
 			m.addAssistantMessage("Requesting cancellation for registration verification of " + appID + ".")
 			return m, commands.SetupRegistrationCancelCmd(m.ctx, m.client, appID)
 		}
+		if m.pendingConfirm != nil && m.pendingConfirm.PackageDeletePreview != nil {
+			m.packageManagerPendingID = ""
+			m.packageManagerPendingAction = ""
+			m.packageDeleteAutoConfirm = false
+			if m.packageManagerVisible {
+				m.packageManagerNotice = "Package deletion cancelled; the exact package selection was preserved."
+			}
+		}
 		m.pendingConfirm = nil
 		m.interaction.CloseModal()
 		m.resetBodyScroll()
@@ -2549,6 +3162,15 @@ func (m RootModel) submitSlashCommand(input string) (RootModel, tea.Cmd) {
 	}
 	if command.Kind == slash.KindStart {
 		return m.submitStartCommand(command)
+	}
+	if command.Kind == slash.KindDeletePackage {
+		definition, err := m.resolveAppPackage(command.PackageName)
+		if err != nil {
+			m.addAssistantMessage(err.Error())
+			m.restorePendingSubmissionDraft()
+			return m, nil
+		}
+		return m, m.beginPackageDeletePreview(*definition, command.Confirm)
 	}
 
 	if command.Kind == slash.KindRegister && !command.Confirm {
@@ -2986,6 +3608,22 @@ func (m *RootModel) executePendingConfirmation() tea.Cmd {
 	if confirmation.ExportRequest != nil {
 		return commands.ExportLogsCmd(m.ctx, m.client, *confirmation.ExportRequest)
 	}
+	if confirmation.UnregisterPreview != nil {
+		return commands.UnregisterAppCmd(m.ctx, m.client, confirmation.UnregisterPreview.App.ID)
+	}
+	if confirmation.RenamePreview != nil {
+		return commands.RenameAppCmd(m.ctx, m.client, confirmation.RenamePreview.App.ID, confirmation.RenamePreview.PreviewID)
+	}
+	if confirmation.PackageChangePreview != nil {
+		m.appManagerRefreshing = m.appManagerVisible
+		m.packageManagerRefreshing = m.packageManagerVisible
+		return commands.ApplyAppPackageChangeCmd(m.ctx, m.client, confirmation.PackageID, confirmation.PackageChangePreview.PreviewID)
+	}
+	if confirmation.PackageDeletePreview != nil {
+		m.packageDeleteAutoConfirm = false
+		m.packageManagerRefreshing = m.packageManagerVisible
+		return commands.ApplyAppPackageDeleteCmd(m.ctx, m.client, confirmation.PackageID, confirmation.PackageDeletePreview.PreviewID)
+	}
 	if confirmation.SetupCommand != nil {
 		if confirmation.SetupCommand.Kind == slash.KindRegister && m.registrationPreview != nil && m.registrationPreview.App != nil && m.registrationPreview.VerificationIntent.WillStart {
 			m.regVerifyAppID = m.registrationPreview.App.ID
@@ -3006,7 +3644,12 @@ func (m *RootModel) executePendingConfirmation() tea.Cmd {
 		case slash.KindLaunchPackage:
 			return commands.LaunchAppPackageCmd(m.ctx, m.client, confirmation.PackageID)
 		case slash.KindDeletePackage:
-			return commands.DeleteAppPackageCmd(m.ctx, m.client, confirmation.PackageID)
+			definition, err := m.resolveAppPackage(confirmation.PackageID)
+			if err != nil {
+				m.addAssistantMessage(err.Error())
+				return nil
+			}
+			return m.beginPackageDeletePreview(*definition, true)
 		case slash.KindPackageRunRetry:
 			return commands.RetryAppPackageRunCmd(m.ctx, m.client, confirmation.PackageRunID)
 		case slash.KindPackageRunAbort:
@@ -3020,7 +3663,7 @@ func (m RootModel) executeSlashCommand(command slash.ParsedCommand) (RootModel, 
 	switch command.Kind {
 	case slash.KindStart:
 		if strings.TrimSpace(command.Target) == "" {
-			return m, m.openAppList()
+			return m, m.openAppManager(appManagerModeStartPicker)
 		}
 		item, err := m.appInventory.ResolveApp(command.Target)
 		if err != nil {
@@ -3034,22 +3677,24 @@ func (m RootModel) executeSlashCommand(command slash.ParsedCommand) (RootModel, 
 		m.addAssistantMessage(fmt.Sprintf("Creating package %s with %d registered app reference(s).", command.PackageName, len(command.Members)))
 		return m, commands.CreateAppPackageCmd(m.ctx, m.client, command.PackageName, command.Members)
 	case slash.KindPackages:
-		m.packageListRequested = true
-		m.addAssistantMessage("Refreshing saved app packages.")
-		return m, commands.ListAppPackagesCmd(m.ctx, m.client)
-	case slash.KindLaunchPackage, slash.KindDeletePackage:
+		return m, m.openPackageManager()
+	case slash.KindLaunchPackage:
 		definition, err := m.resolveAppPackage(command.PackageName)
 		if err != nil {
 			m.addAssistantMessage(err.Error())
 			m.restorePendingSubmissionDraft()
 			return m, nil
 		}
-		if command.Kind == slash.KindLaunchPackage {
-			m.addAssistantMessage("Requesting package launch for " + definition.Name + ".")
-			return m, commands.LaunchAppPackageCmd(m.ctx, m.client, definition.ID)
+		m.addAssistantMessage("Requesting package launch for " + definition.Name + ".")
+		return m, commands.LaunchAppPackageCmd(m.ctx, m.client, definition.ID)
+	case slash.KindDeletePackage:
+		definition, err := m.resolveAppPackage(command.PackageName)
+		if err != nil {
+			m.addAssistantMessage(err.Error())
+			m.restorePendingSubmissionDraft()
+			return m, nil
 		}
-		m.addAssistantMessage("Requesting package deletion for " + definition.Name + ".")
-		return m, commands.DeleteAppPackageCmd(m.ctx, m.client, definition.ID)
+		return m, m.beginPackageDeletePreview(*definition, command.Confirm)
 	case slash.KindPackageRunRetry:
 		m.addAssistantMessage("Requesting retry for package run " + command.RunID + ".")
 		return m, commands.RetryAppPackageRunCmd(m.ctx, m.client, command.RunID)
@@ -3127,9 +3772,9 @@ func (m RootModel) executeSlashCommand(command slash.ParsedCommand) (RootModel, 
 	case slash.KindHelp:
 		m.addAssistantMessage("Showing command help.")
 		return m, m.openHelp()
-	case slash.KindList:
-		m.addAssistantMessage("Showing registered apps.")
-		return m, m.openAppList()
+	case slash.KindManage:
+		m.addAssistantMessage("Showing app management.")
+		return m, m.openAppManager(appManagerModeManage)
 	case slash.KindUsage:
 		m.usage.Open()
 		m.interaction.OpenModal(interaction.ModalUsage)
@@ -3955,6 +4600,7 @@ func (m *RootModel) applyTheme(mode string) {
 	})
 	m.composer.ApplyTheme(theme, m.preferences.Assistant.BarColor)
 	applyTextInputTheme(&m.helpSearch, theme)
+	applyTextInputTheme(&m.appManagerRenameInput, theme)
 	for _, diagnostic := range diagnostics {
 		m.addDiagnostic(diagnostic.Code, diagnostic.Severity, diagnostic.Message)
 	}
@@ -5114,6 +5760,7 @@ func eventDiagnosticCode(err error) string {
 func shouldRefreshState(eventType string) bool {
 	switch eventType {
 	case "app.registered",
+		"app.unregistered",
 		"app.state_changed",
 		"app.lifecycle_operation_completed",
 		"app.lifecycle_operation_failed",
@@ -5507,8 +6154,8 @@ func naturalCommandResultMessage(command slash.ParsedCommand) string {
 		return "Theme command applied."
 	case slash.KindHelp:
 		return "Help command applied."
-	case slash.KindList:
-		return "Registered app list opened."
+	case slash.KindManage:
+		return "App manager opened."
 	default:
 		return "Command applied."
 	}
@@ -6071,6 +6718,74 @@ func registrationPreviewMessage(preview *relaybaseclient.RegistrationSetupResult
 		parts = append(parts, "app ends stopped")
 	}
 	return assistant.SanitizeText(strings.Join(parts, "; ") + ".")
+}
+
+func automaticRegistrationRepairs(preview *relaybaseclient.RegistrationSetupResult) []relaybaseclient.RegistrationRepairOption {
+	if preview == nil || preview.Status != "registered_verification_failed" || preview.Verification == nil {
+		return nil
+	}
+	candidates := make([]relaybaseclient.RegistrationRepairOption, 0, len(preview.Verification.Repairs))
+	for _, repair := range preview.Verification.Repairs {
+		if len(repair.StructuredInputRequired) > 0 {
+			continue
+		}
+		switch repair.Kind {
+		case "health_route", "pinned_port", "setup_plan":
+			candidates = append(candidates, repair)
+		}
+	}
+	sort.SliceStable(candidates, func(left, right int) bool {
+		return candidates[left].Recommended && !candidates[right].Recommended
+	})
+	return candidates
+}
+
+func (m RootModel) registrationRepairDataForView() *views.RegistrationRepairData {
+	if len(m.registrationRepairs) == 0 {
+		return nil
+	}
+	choices := make([]views.RegistrationRepairChoice, 0, len(m.registrationRepairs))
+	for _, repair := range m.registrationRepairs {
+		choices = append(choices, views.RegistrationRepairChoice{
+			ID: repair.ID, Label: repair.Label, Reason: repair.Reason, Recommended: repair.Recommended,
+		})
+	}
+	return &views.RegistrationRepairData{
+		AppID: m.registrationRepairApp, Choices: choices, Selected: m.registrationRepairRow,
+	}
+}
+
+func (m *RootModel) closeRegistrationRepairChooser() {
+	m.registrationRepairs = nil
+	m.registrationRepairApp = ""
+	m.registrationRepairRow = 0
+	m.interaction.CloseTransient()
+}
+
+func (m RootModel) handleRegistrationRepairKey(msg tea.KeyPressMsg) (RootModel, tea.Cmd) {
+	switch {
+	case keymap.Matches(msg, m.keymap.Escape):
+		m.closeRegistrationRepairChooser()
+		return m, nil
+	case keymap.Matches(msg, m.keymap.Up):
+		m.registrationRepairRow--
+	case keymap.Matches(msg, m.keymap.Down):
+		m.registrationRepairRow++
+	case keymap.Matches(msg, m.keymap.Enter):
+		repair := m.registrationRepairs[m.registrationRepairRow]
+		appID := m.registrationRepairApp
+		m.closeRegistrationRepairChooser()
+		m.addAssistantMessage("Preparing approval-bound repair preview: " + repair.Label + ".")
+		return m, commands.SetupRegistrationRepairPreviewCmd(
+			m.ctx, m.client, relaybaseclient.RegistrationRepairPreviewRequest{AppID: appID, RepairID: repair.ID},
+		)
+	default:
+		return m, nil
+	}
+	if len(m.registrationRepairs) > 0 {
+		m.registrationRepairRow = (m.registrationRepairRow%len(m.registrationRepairs) + len(m.registrationRepairs)) % len(m.registrationRepairs)
+	}
+	return m, nil
 }
 
 func setupPreviewSelectedCommand(preview relaybaseclient.SetupPlanPreview) string {

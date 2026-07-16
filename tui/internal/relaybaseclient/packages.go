@@ -45,6 +45,72 @@ type AppPackageRun struct {
 	Members         []AppPackageRunMember `json:"members"`
 }
 
+type AppPackageChange struct {
+	Kind         string   `json:"kind"`
+	AppID        string   `json:"appId,omitempty"`
+	Name         string   `json:"name,omitempty"`
+	MemberAppIDs []string `json:"memberAppIds,omitempty"`
+}
+
+type AppPackageChangePreview struct {
+	PreviewID string `json:"previewId,omitempty"`
+	ExpiresAt string `json:"expiresAt,omitempty"`
+	Noop      bool   `json:"noop"`
+	CanApply  bool   `json:"canApply"`
+	Change    struct {
+		Kind string `json:"kind"`
+	} `json:"change"`
+	Package struct {
+		ID                   string   `json:"id"`
+		CurrentName          string   `json:"currentName"`
+		ProposedName         string   `json:"proposedName"`
+		CurrentRevision      int      `json:"currentRevision"`
+		ProposedRevision     int      `json:"proposedRevision"`
+		CurrentMemberAppIDs  []string `json:"currentMemberAppIds"`
+		ProposedMemberAppIDs []string `json:"proposedMemberAppIds"`
+	} `json:"package"`
+	ActiveRun *struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	} `json:"activeRun,omitempty"`
+	Blockers []struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"blockers"`
+}
+
+type AppPackageChangeResult struct {
+	Updated    bool                 `json:"updated"`
+	ChangeKind string               `json:"changeKind"`
+	Package    AppPackageDefinition `json:"package"`
+}
+
+type AppPackageDeletePreview struct {
+	PreviewID string `json:"previewId,omitempty"`
+	ExpiresAt string `json:"expiresAt,omitempty"`
+	CanDelete bool   `json:"canDelete"`
+	Package   struct {
+		ID           string   `json:"id"`
+		Name         string   `json:"name"`
+		Revision     int      `json:"revision"`
+		MemberAppIDs []string `json:"memberAppIds"`
+	} `json:"package"`
+	ActiveRun *struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	} `json:"activeRun,omitempty"`
+	HistoricalRunCount int `json:"historicalRunCount"`
+	Blockers           []struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"blockers"`
+}
+
+type AppPackageDeleteResult struct {
+	Deleted bool                 `json:"deleted"`
+	Package AppPackageDefinition `json:"package"`
+}
+
 func (r AppPackageRun) Terminal() bool {
 	return r.Status != "" && r.Status != "queued" && r.Status != "running"
 }
@@ -78,6 +144,55 @@ func (c *Client) DeleteAppPackage(ctx context.Context, packageID string) (*AppPa
 		return nil, err
 	}
 	return &response.Package, nil
+}
+
+func (c *Client) PreviewAppPackageChange(
+	ctx context.Context,
+	packageID string,
+	expectedRevision int,
+	change AppPackageChange,
+) (*AppPackageChangePreview, error) {
+	var response struct {
+		Preview AppPackageChangePreview `json:"preview"`
+	}
+	path := fmt.Sprintf("/__hub/api/packages/%s/change/preview", url.PathEscape(packageID))
+	if _, err := c.postJSON(ctx, path, map[string]any{"expectedRevision": expectedRevision, "change": change}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Preview, nil
+}
+
+func (c *Client) ApplyAppPackageChange(ctx context.Context, packageID string, previewID string) (*AppPackageChangeResult, error) {
+	var response struct {
+		Result AppPackageChangeResult `json:"result"`
+	}
+	path := fmt.Sprintf("/__hub/api/packages/%s/change/apply", url.PathEscape(packageID))
+	if _, err := c.postJSON(ctx, path, map[string]any{"previewId": previewID, "confirm": true}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Result, nil
+}
+
+func (c *Client) PreviewAppPackageDelete(ctx context.Context, packageID string, expectedRevision int) (*AppPackageDeletePreview, error) {
+	var response struct {
+		Preview AppPackageDeletePreview `json:"preview"`
+	}
+	path := fmt.Sprintf("/__hub/api/packages/%s/delete/preview", url.PathEscape(packageID))
+	if _, err := c.postJSON(ctx, path, map[string]any{"expectedRevision": expectedRevision}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Preview, nil
+}
+
+func (c *Client) ApplyAppPackageDelete(ctx context.Context, packageID string, previewID string) (*AppPackageDeleteResult, error) {
+	var response struct {
+		Result AppPackageDeleteResult `json:"result"`
+	}
+	path := fmt.Sprintf("/__hub/api/packages/%s/delete/apply", url.PathEscape(packageID))
+	if _, err := c.postJSON(ctx, path, map[string]any{"previewId": previewID, "confirm": true}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Result, nil
 }
 
 func (c *Client) LaunchAppPackage(ctx context.Context, packageID string) (*AppPackageRun, error) {

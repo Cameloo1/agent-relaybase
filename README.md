@@ -44,7 +44,9 @@ relaybase register . --no-verify
 
 Use `/add <folder>` in the operator console for the simplest project-discovery flow. Use `/register <folder>` when you want detection, preview, approval, registration, and the bounded proof as one coordinated flow. Use `/register <folder> --no-verify` to opt out. An exact `/register <path>/relaybase.app.json` remains strict and does not search other folders.
 
-Inside the operator console, use `/start` to open the registered-app table, or type `/start ` and press Tab to complete a saved app id before reviewing its start confirmation.
+If verification fails, the operator console automatically opens the read-only file preview for one deterministic repair that needs no additional input. When several safe repairs are available, it opens an arrow-key chooser first. Every repair still requires confirmation before any file is written or another launch proof begins, and Relaybase will not repeat an unchanged failed launch plan.
+
+Inside the operator console, use `/manage` for daemon-backed app actions and `/packages` for saved launch-bundle management. `/manage` can add its selected app to a package without starting it. Bare `/start` remains the fast launcher; type `/start ` and press Tab to complete a saved app id before reviewing its start confirmation.
 
 The normal loop is intentionally small:
 

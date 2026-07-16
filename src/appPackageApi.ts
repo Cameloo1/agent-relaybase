@@ -52,6 +52,65 @@ export async function handleAppPackageApiRequest(input: {
       return true;
     }
 
+    if (
+      packageRoute &&
+      request.method === "POST" &&
+      parts.length === 6 &&
+      parts[4] === "change" &&
+      parts[5] === "preview"
+    ) {
+      const body = await readJsonBody(request);
+      assertExactKeys(body, ["expectedRevision", "change"]);
+      assertPackageChangeShape(body.change);
+      sendJson(response, 200, { preview: await service.previewDefinitionChange(parts[3] as string, body) });
+      return true;
+    }
+
+    if (
+      packageRoute &&
+      request.method === "POST" &&
+      parts.length === 6 &&
+      parts[4] === "change" &&
+      parts[5] === "apply"
+    ) {
+      const body = await readJsonBody(request);
+      assertExactKeys(body, ["previewId", "confirm"]);
+      const previewId = requiredPreviewConfirmation(body);
+      sendJson(response, 200, {
+        result: await service.applyDefinitionChange(parts[3] as string, previewId, correlationId)
+      });
+      return true;
+    }
+
+    if (
+      packageRoute &&
+      request.method === "POST" &&
+      parts.length === 6 &&
+      parts[4] === "delete" &&
+      parts[5] === "preview"
+    ) {
+      const body = await readJsonBody(request);
+      assertExactKeys(body, ["expectedRevision"]);
+      sendJson(response, 200, { preview: service.previewDeleteDefinition(parts[3] as string, body.expectedRevision) });
+      return true;
+    }
+
+    if (
+      packageRoute &&
+      request.method === "POST" &&
+      parts.length === 6 &&
+      parts[4] === "delete" &&
+      parts[5] === "apply"
+    ) {
+      const body = await readJsonBody(request);
+      assertExactKeys(body, ["previewId", "confirm"]);
+      const previewId = requiredPreviewConfirmation(body);
+      sendJson(response, 200, {
+        result: await service.applyDeleteDefinition(parts[3] as string, previewId, correlationId)
+      });
+      return true;
+    }
+
     if (packageRoute && request.method === "DELETE" && parts.length === 4) {
       sendJson(response, 200, { package: service.deleteDefinition(parts[3] as string), deleted: true });
       return true;
@@ -135,4 +194,52 @@ async function readJsonBody(request: http.IncomingMessage): Promise<Record<strin
       }
     );
   }
+}
+
+function requiredPreviewConfirmation(body: Record<string, unknown>): string {
+  if (body.confirm !== true || typeof body.previewId !== "string" || body.previewId.trim() === "") {
+    throw new AppPackageServiceError(
+      400,
+      "PACKAGE_CONFIRMATION_REQUIRED",
+      "Package mutation requires the exact preview id and confirm true.",
+      { userAction: "Request a fresh preview and explicitly confirm that exact preview." }
+    );
+  }
+  return body.previewId;
+}
+
+function assertPackageChangeShape(value: unknown): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw invalidPackageRequest("Package change must be an object.");
+  }
+  const change = value as Record<string, unknown>;
+  switch (change.kind) {
+    case "add-member":
+      assertExactKeys(change, ["kind", "appId"]);
+      return;
+    case "rename":
+      assertExactKeys(change, ["kind", "name"]);
+      return;
+    case "replace-members":
+      assertExactKeys(change, ["kind", "memberAppIds"]);
+      return;
+    default:
+      throw invalidPackageRequest("Package change kind must be add-member, rename, or replace-members.");
+  }
+}
+
+function assertExactKeys(body: Record<string, unknown>, allowed: string[]): void {
+  const allowedSet = new Set(allowed);
+  const unexpected = Object.keys(body).filter((key) => !allowedSet.has(key));
+  const missing = allowed.filter((key) => !(key in body));
+  if (unexpected.length > 0 || missing.length > 0) {
+    throw invalidPackageRequest("Package request contains missing or unexpected fields.", { missing, unexpected });
+  }
+}
+
+function invalidPackageRequest(message: string, detail?: unknown): AppPackageServiceError {
+  return new AppPackageServiceError(400, "PACKAGE_REQUEST_INVALID", message, {
+    detail,
+    userAction: "Use only the documented package request fields."
+  });
 }

@@ -12,14 +12,15 @@ import (
 // Item is a presentation-only view of a daemon-owned registered app. It never
 // starts or mutates an app; callers must route actions through the daemon.
 type Item struct {
-	ID        string
-	Name      string
-	Directory string
-	Status    string
-	Readiness string
-	Route     string
-	LastError string
-	Selected  bool
+	ID           string
+	Name         string
+	Directory    string
+	Status       string
+	Readiness    string
+	Route        string
+	ManifestPath string
+	LastError    string
+	Selected     bool
 }
 
 func (i Item) CanStart() bool {
@@ -46,13 +47,14 @@ func (m *Manager) ApplyState(state *relaybaseclient.RelaybaseState) {
 				continue
 			}
 			byID[id] = Item{
-				ID:        id,
-				Name:      firstNonEmpty(app.Name, id),
-				Directory: firstNonEmpty(app.CWD, projectDirectory(app.ManifestPath)),
-				Status:    firstNonEmpty(app.RuntimeStatus, "stopped"),
-				Readiness: app.ReadinessState,
-				Route:     app.Route,
-				LastError: app.LastError,
+				ID:           id,
+				Name:         firstNonEmpty(app.Name, id),
+				Directory:    firstNonEmpty(app.CWD, projectDirectory(app.ManifestPath)),
+				Status:       firstNonEmpty(app.RuntimeStatus, "stopped"),
+				Readiness:    app.ReadinessState,
+				Route:        app.Route,
+				ManifestPath: app.ManifestPath,
+				LastError:    app.LastError,
 			}
 		}
 		for _, component := range state.Components {

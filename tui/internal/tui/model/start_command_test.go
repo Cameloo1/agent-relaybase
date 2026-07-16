@@ -13,18 +13,18 @@ import (
 	"github.com/cameloo/relaybase/tui/internal/tui/views"
 )
 
-func TestBareStartOpensTheSameRegisteredAppTableAsList(t *testing.T) {
+func TestBareStartOpensRegisteredAppStartPicker(t *testing.T) {
 	root := applyState(newTestModel(t), notesFrontendBackendState())
 	root, refresh := root.submitSlashCommand("/start")
-	if refresh == nil || !root.appListVisible || root.interaction.Transient != interaction.TransientAppList {
-		t.Fatalf("bare start did not open registered-app transient: visible=%v transient=%s refresh=%v", root.appListVisible, root.interaction.Transient, refresh)
+	if refresh == nil || !root.appManagerVisible || root.interaction.Transient != interaction.TransientAppManager {
+		t.Fatalf("bare start did not open registered-app transient: visible=%v transient=%s refresh=%v", root.appManagerVisible, root.interaction.Transient, refresh)
 	}
-	data := root.appListDataForView()
-	if data == nil || len(data.Items) != root.appInventory.Count() {
+	data := root.appManagerDataForView()
+	if data == nil || data.Mode != string(appManagerModeStartPicker) || len(data.Items) != root.appInventory.Count() {
 		t.Fatalf("bare start did not reuse complete list projection: %#v", data)
 	}
 	rendered := root.Render()
-	for _, required := range []string{"Registered apps", "Name", "Project", "Status"} {
+	for _, required := range []string{"Start app", "Name", "Project", "Status"} {
 		if !strings.Contains(rendered, required) {
 			t.Fatalf("bare start table missing %q:\n%s", required, rendered)
 		}

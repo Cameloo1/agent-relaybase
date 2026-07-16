@@ -70,6 +70,43 @@ func TestAgentPaneRestoresComposerDraftAndFocus(t *testing.T) {
 	}
 }
 
+func TestAgentPaneReopenRestoresArrowAndWheelScrolling(t *testing.T) {
+	root := newTestModelWithPanes(t, 3)
+	updated, _ := root.Update(tea.WindowSizeMsg{Width: 160, Height: 36})
+	root = updated.(RootModel)
+	root.historyExpanded = true
+	for index := 0; index < 60; index++ {
+		root.assistantTimeline = append(root.assistantTimeline, fmt.Sprintf("response line %02d with wrapped output", index+1))
+	}
+	root.responseFollow = true
+	bottom := views.ResponseScrollMax(root.styles, root.shellData())
+	if bottom == 0 {
+		t.Fatal("test response is not scrollable")
+	}
+
+	updated, _ = root.Update(agentPaneKey())
+	root = updated.(RootModel)
+	updated, _ = root.Update(agentPaneKey())
+	root = updated.(RootModel)
+	if root.interaction.Owner() != interaction.OwnerResponse {
+		t.Fatalf("reopened Agent pane owner = %s, want response", root.interaction.Owner())
+	}
+
+	updated, _ = root.Update(keyPress("up"))
+	root = updated.(RootModel)
+	if root.responseFollow || root.responseOffset != bottom-1 {
+		t.Fatalf("arrow scroll after reopen: follow=%v offset=%d want=%d", root.responseFollow, root.responseOffset, bottom-1)
+	}
+
+	region := mustHitRegion(t, root, components.HitResponse)
+	beforeWheel := root.responseOffset
+	updated, _ = root.Update(tea.MouseWheelMsg{X: region.Rect.X + 1, Y: region.Rect.Y + 1, Button: tea.MouseWheelUp})
+	root = updated.(RootModel)
+	if root.responseOffset >= beforeWheel {
+		t.Fatalf("wheel scroll after reopen did not move upward: before=%d after=%d", beforeWheel, root.responseOffset)
+	}
+}
+
 func TestAgentModalFallbackOwnsInputAndDoesNotMovePanePage(t *testing.T) {
 	root := newTestModelWithPanes(t, 9)
 	updated, _ := root.Update(tea.WindowSizeMsg{Width: 100, Height: 30})

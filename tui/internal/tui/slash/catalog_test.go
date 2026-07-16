@@ -9,7 +9,7 @@ import (
 func TestCatalogCoversEveryCurrentCommandKindWithParseableExamples(t *testing.T) {
 	wantKinds := []string{
 		KindLaunch, KindStart, KindStop, KindRestart, KindLogsExport, KindPage, KindPaneColor, KindPin, KindUnpin,
-		KindTheme, KindHelp, KindList, KindUsage, KindConfirm, KindCancel, KindDaemonStatus, KindDaemonRepair,
+		KindTheme, KindHelp, KindManage, KindUsage, KindConfirm, KindCancel, KindDaemonStatus, KindDaemonRepair,
 		KindCreatePackage, KindPackages, KindLaunchPackage, KindDeletePackage, KindPackageRunRetry, KindPackageRunAbort,
 		KindThreadList, KindThreadNew, KindThreadSwitch, KindThreadRename, KindThreadClear, KindThreadExport, KindThreadPreview,
 		KindAddApp, KindRegister, KindConfigure, KindOpen, KindProve, KindHealthProve, KindRepair,
@@ -92,7 +92,7 @@ func TestCatalogReturnsDeepCopy(t *testing.T) {
 }
 
 func TestIsKnownPrefixUsesCanonicalAndAliases(t *testing.T) {
-	for _, input := range []string{"/launch notes", "/thread unknown", "/daemon repair", "/daemon retry", "  /MANIFEST inspect notes  "} {
+	for _, input := range []string{"/launch notes", "/thread unknown", "/daemon repair", "/daemon retry", "/manage", "/list", "  /MANIFEST inspect notes  "} {
 		if !IsKnownPrefix(input) {
 			t.Errorf("expected %q to be a known slash prefix", input)
 		}
@@ -101,6 +101,16 @@ func TestIsKnownPrefixUsesCanonicalAndAliases(t *testing.T) {
 		if IsKnownPrefix(input) {
 			t.Errorf("expected %q to be unknown", input)
 		}
+	}
+}
+
+func TestListCompatibilityAliasSearchesAndCompletesToManage(t *testing.T) {
+	matches := SearchCatalog("/lis")
+	if len(matches) == 0 || matches[0].Descriptor.Kind != KindManage || matches[0].Descriptor.Insertion != "/manage" {
+		t.Fatalf("/lis did not resolve to canonical /manage: %#v", matches)
+	}
+	if len(matches[0].Descriptor.Aliases) != 0 || len(matches[0].Descriptor.CompatibilityAliases) != 1 {
+		t.Fatalf("compatibility alias leaked into displayed aliases: %#v", matches[0].Descriptor)
 	}
 }
 

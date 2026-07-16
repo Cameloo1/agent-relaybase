@@ -13,23 +13,23 @@ import (
 	"github.com/cameloo/relaybase/tui/internal/tui/interaction"
 )
 
-func TestListCommandOpensDedicatedRegisteredAppTransientWithActivePanes(t *testing.T) {
+func TestStartPickerOpensDedicatedRegisteredAppTransientWithActivePanes(t *testing.T) {
 	root := applyState(newTestModel(t), notesFrontendBackendState())
 	updated, _ := root.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	root = updated.(RootModel)
 
-	root, refresh := root.submitSlashCommand("/list")
-	if refresh == nil || !root.appListVisible || root.helpVisible {
-		t.Fatalf("list did not open independently: visible=%v help=%v refresh=%v", root.appListVisible, root.helpVisible, refresh)
+	root, refresh := root.submitSlashCommand("/start")
+	if refresh == nil || !root.appManagerVisible || root.helpVisible {
+		t.Fatalf("start picker did not open independently: visible=%v help=%v refresh=%v", root.appManagerVisible, root.helpVisible, refresh)
 	}
-	if root.interaction.Transient != interaction.TransientAppList || root.interaction.Owner() != interaction.OwnerTransient {
-		t.Fatalf("list did not own its dedicated transient: %#v", root.interaction)
+	if root.interaction.Transient != interaction.TransientAppManager || root.interaction.Owner() != interaction.OwnerTransient {
+		t.Fatalf("start picker did not own its dedicated transient: %#v", root.interaction)
 	}
-	if data := root.appListDataForView(); data == nil || len(data.Items) != root.appInventory.Count() || len(data.Items) != 2 {
+	if data := root.appManagerDataForView(); data == nil || data.Mode != string(appManagerModeStartPicker) || len(data.Items) != root.appInventory.Count() || len(data.Items) != 2 {
 		t.Fatalf("list projection diverged from registered inventory: %#v", data)
 	}
 	rendered := root.Render()
-	for _, required := range []string{"Registered apps", "Notes", "API", "Refreshing registered apps"} {
+	for _, required := range []string{"Start app", "Notes", "API", "Refreshing registered apps"} {
 		if !strings.Contains(rendered, required) {
 			t.Fatalf("registered app modal missing %q:\n%s", required, rendered)
 		}
@@ -40,8 +40,8 @@ func TestListCommandOpensDedicatedRegisteredAppTransientWithActivePanes(t *testi
 	selectedID := root.appInventory.SelectedID()
 	updated, _ = root.Update(commands.StateLoadedMsg{State: notesFrontendBackendState()})
 	root = updated.(RootModel)
-	if root.appListRefreshing || root.appInventory.SelectedID() != selectedID || !strings.Contains(root.Render(), "Current daemon-backed") {
-		t.Fatalf("daemon refresh did not preserve selection/currentness: refreshing=%v before=%q after=%q\n%s", root.appListRefreshing, selectedID, root.appInventory.SelectedID(), root.Render())
+	if root.appManagerRefreshing || root.appInventory.SelectedID() != selectedID || !strings.Contains(root.Render(), "Current daemon-backed") {
+		t.Fatalf("daemon refresh did not preserve selection/currentness: refreshing=%v before=%q after=%q\n%s", root.appManagerRefreshing, selectedID, root.appInventory.SelectedID(), root.Render())
 	}
 }
 
@@ -50,7 +50,7 @@ func TestListStartUsesExistingConfirmationAndCancelRestoresList(t *testing.T) {
 		{ID: "api", Name: "API", RuntimeStatus: "running"},
 		{ID: "worker", Name: "Worker", RuntimeStatus: "stopped"},
 	}})
-	root, _ = root.submitSlashCommand("/list")
+	root, _ = root.submitSlashCommand("/start")
 
 	updated, command := root.Update(keyPress("down"))
 	root = updated.(RootModel)
@@ -59,8 +59,8 @@ func TestListStartUsesExistingConfirmationAndCancelRestoresList(t *testing.T) {
 	}
 	updated, command = root.Update(keyPress("enter"))
 	root = updated.(RootModel)
-	if command != nil || root.pendingConfirm == nil || !root.appListVisible || root.interaction.Owner() != interaction.OwnerModal {
-		t.Fatalf("enter did not open confirmation over list: pending=%#v visible=%v owner=%s command=%v", root.pendingConfirm, root.appListVisible, root.interaction.Owner(), command)
+	if command != nil || root.pendingConfirm == nil || !root.appManagerVisible || root.interaction.Owner() != interaction.OwnerModal {
+		t.Fatalf("enter did not open confirmation over picker: pending=%#v visible=%v owner=%s command=%v", root.pendingConfirm, root.appManagerVisible, root.interaction.Owner(), command)
 	}
 	if root.pendingConfirm.Target.AppIDs[0] != "worker" {
 		t.Fatalf("confirmation targeted wrong app: %#v", root.pendingConfirm.Target)
@@ -68,19 +68,19 @@ func TestListStartUsesExistingConfirmationAndCancelRestoresList(t *testing.T) {
 
 	updated, command = root.Update(keyPress("esc"))
 	root = updated.(RootModel)
-	if command != nil || root.pendingConfirm != nil || !root.appListVisible || root.appInventory.SelectedID() != "worker" || root.interaction.Owner() != interaction.OwnerTransient {
-		t.Fatalf("cancel did not restore list selection: pending=%#v visible=%v selected=%q owner=%s command=%v", root.pendingConfirm, root.appListVisible, root.appInventory.SelectedID(), root.interaction.Owner(), command)
+	if command != nil || root.pendingConfirm != nil || !root.appManagerVisible || root.appInventory.SelectedID() != "worker" || root.interaction.Owner() != interaction.OwnerTransient {
+		t.Fatalf("cancel did not restore picker selection: pending=%#v visible=%v selected=%q owner=%s command=%v", root.pendingConfirm, root.appManagerVisible, root.appInventory.SelectedID(), root.interaction.Owner(), command)
 	}
-	if !strings.Contains(root.appListNotice, "no lifecycle request") {
-		t.Fatalf("cancel did not provide modal-local recovery notice: %q", root.appListNotice)
+	if !strings.Contains(root.appManagerNotice, "no request was sent") {
+		t.Fatalf("cancel did not provide modal-local recovery notice: %q", root.appManagerNotice)
 	}
 
 	updated, _ = root.Update(keyPress("enter"))
 	root = updated.(RootModel)
 	updated, command = root.Update(keyPress("enter"))
 	root = updated.(RootModel)
-	if command == nil || root.pendingConfirm != nil || root.appListVisible || root.interaction.Transient != interaction.TransientNone {
-		t.Fatalf("confirmed start did not close list and issue daemon command: pending=%#v visible=%v transient=%s command=%v", root.pendingConfirm, root.appListVisible, root.interaction.Transient, command)
+	if command == nil || root.pendingConfirm != nil || root.appManagerVisible || root.interaction.Transient != interaction.TransientNone {
+		t.Fatalf("confirmed start did not close picker and issue daemon command: pending=%#v visible=%v transient=%s command=%v", root.pendingConfirm, root.appManagerVisible, root.interaction.Transient, command)
 	}
 }
 
@@ -88,11 +88,11 @@ func TestListRefusesImplicitRestartAndUnsafeLaunchStates(t *testing.T) {
 	for _, status := range []string{"starting", "stopping", "failed", "degraded", "unknown"} {
 		t.Run(status, func(t *testing.T) {
 			root := applyState(newTestModel(t), &relaybaseclient.RelaybaseState{Apps: []relaybaseclient.AppState{{ID: "notes", Name: "Notes", RuntimeStatus: status}}})
-			root, _ = root.submitSlashCommand("/list")
+			root, _ = root.submitSlashCommand("/start")
 			updated, command := root.Update(keyPress("enter"))
 			root = updated.(RootModel)
-			if command != nil || root.pendingConfirm != nil || !root.appListVisible || strings.TrimSpace(root.appListNotice) == "" {
-				t.Fatalf("state %s should fail closed in list: pending=%#v visible=%v notice=%q command=%v", status, root.pendingConfirm, root.appListVisible, root.appListNotice, command)
+			if command != nil || root.pendingConfirm != nil || !root.appManagerVisible || strings.TrimSpace(root.appManagerNotice) == "" {
+				t.Fatalf("state %s should fail closed in picker: pending=%#v visible=%v notice=%q command=%v", status, root.pendingConfirm, root.appManagerVisible, root.appManagerNotice, command)
 			}
 		})
 	}
@@ -106,12 +106,12 @@ func TestListRunningAppOpensItsExistingPaneWithoutLifecycleConfirmation(t *testi
 	root := applyState(newTestModel(t), state)
 	paneID := root.paneManager.SelectedPaneID()
 	root.paneManager.CloseSelected()
-	root, _ = root.submitSlashCommand("/list")
+	root, _ = root.submitSlashCommand("/start")
 
 	updated, command := root.Update(keyPress("enter"))
 	root = updated.(RootModel)
-	if command == nil || root.pendingConfirm != nil || root.appListVisible || !root.paneManager.Focused() || root.paneManager.SelectedPaneID() != paneID {
-		t.Fatalf("running app did not reveal and focus its exact pane: pending=%#v list=%v focused=%v selected=%q command=%v", root.pendingConfirm, root.appListVisible, root.paneManager.Focused(), root.paneManager.SelectedPaneID(), command)
+	if command == nil || root.pendingConfirm != nil || root.appManagerVisible || !root.paneManager.Focused() || root.paneManager.SelectedPaneID() != paneID {
+		t.Fatalf("running app did not reveal and focus its exact pane: pending=%#v picker=%v focused=%v selected=%q command=%v", root.pendingConfirm, root.appManagerVisible, root.paneManager.Focused(), root.paneManager.SelectedPaneID(), command)
 	}
 }
 
@@ -121,17 +121,17 @@ func TestListRunningAppWithoutPaneRefreshesOnceAndStaysOpen(t *testing.T) {
 	root.state = state
 	root.connectionStatus = "connected"
 	root.appInventory.ApplyState(state)
-	root, _ = root.submitSlashCommand("/list")
+	root, _ = root.submitSlashCommand("/start")
 
 	updated, command := root.Update(keyPress("enter"))
 	root = updated.(RootModel)
-	if command == nil || root.pendingConfirm != nil || !root.appListVisible || root.appListPaneRefreshID != "notes" || !strings.Contains(root.appListNotice, "Refreshing") {
-		t.Fatalf("running app without pane did not request a bounded refresh: pending=%#v visible=%v refresh=%q notice=%q command=%v", root.pendingConfirm, root.appListVisible, root.appListPaneRefreshID, root.appListNotice, command)
+	if command == nil || root.pendingConfirm != nil || !root.appManagerVisible || root.appManagerPaneRefreshID != "notes" || !strings.Contains(root.appManagerNotice, "Refreshing") {
+		t.Fatalf("running app without pane did not request a bounded refresh: pending=%#v visible=%v refresh=%q notice=%q command=%v", root.pendingConfirm, root.appManagerVisible, root.appManagerPaneRefreshID, root.appManagerNotice, command)
 	}
 	updated, _ = root.Update(commands.StateLoadedMsg{State: &relaybaseclient.RelaybaseState{}})
 	root = updated.(RootModel)
-	if !root.appListVisible || root.appListPaneRefreshID != "" || !strings.Contains(root.appListNotice, "no monitoring pane") {
-		t.Fatalf("missing pane refresh did not remain safely in the list: visible=%v refresh=%q notice=%q", root.appListVisible, root.appListPaneRefreshID, root.appListNotice)
+	if !root.appManagerVisible || root.appManagerPaneRefreshID != "" || !strings.Contains(root.appManagerNotice, "no monitoring pane") {
+		t.Fatalf("missing pane refresh did not remain safely in the picker: visible=%v refresh=%q notice=%q", root.appManagerVisible, root.appManagerPaneRefreshID, root.appManagerNotice)
 	}
 }
 
@@ -143,12 +143,12 @@ func TestListLongInventoryKeepsSelectionVisibleAndSupportsMouseSelection(t *test
 	root := applyState(newTestModel(t), state)
 	updated, _ := root.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	root = updated.(RootModel)
-	root, _ = root.submitSlashCommand("/list")
+	root, _ = root.submitSlashCommand("/start")
 
 	updated, _ = root.Update(keyPress("end"))
 	root = updated.(RootModel)
-	if root.appInventory.SelectedID() != "app-30" || root.appListOffset == 0 || !strings.Contains(root.Render(), "App 30") {
-		t.Fatalf("end selection was not kept visible: selected=%q offset=%d\n%s", root.appInventory.SelectedID(), root.appListOffset, root.Render())
+	if root.appInventory.SelectedID() != "app-30" || root.appManagerOffset == 0 || !strings.Contains(root.Render(), "App 30") {
+		t.Fatalf("end selection was not kept visible: selected=%q offset=%d\n%s", root.appInventory.SelectedID(), root.appManagerOffset, root.Render())
 	}
 
 	built := mustHitRegion(t, root, components.HitRegisteredAppRow)
@@ -169,20 +169,22 @@ func TestListLongInventoryKeepsSelectionVisibleAndSupportsMouseSelection(t *test
 func TestListShowsOfflineEmptyAndRefreshFailureStates(t *testing.T) {
 	root := newTestModel(t)
 	root.connectionStatus = "offline"
-	root.appListVisible = true
-	root.interaction.OpenTransient(interaction.TransientAppList)
+	root.appManagerVisible = true
+	root.appManagerMode = appManagerModeStartPicker
+	root.appManagerSurface = appManagerSurfaceTable
+	root.interaction.OpenTransient(interaction.TransientAppManager)
 	if rendered := root.Render(); !strings.Contains(rendered, "Daemon offline") || !strings.Contains(rendered, "/daemon repair") {
 		t.Fatalf("offline list guidance missing:\n%s", rendered)
 	}
 	updated, command := root.Update(keyPress("enter"))
 	root = updated.(RootModel)
-	if command != nil || root.pendingConfirm != nil || !strings.Contains(root.appListNotice, "unavailable") {
-		t.Fatalf("offline list must not prepare lifecycle work: pending=%#v notice=%q command=%v", root.pendingConfirm, root.appListNotice, command)
+	if command != nil || root.pendingConfirm != nil || !strings.Contains(root.appManagerNotice, "unavailable") {
+		t.Fatalf("offline picker must not prepare lifecycle work: pending=%#v notice=%q command=%v", root.pendingConfirm, root.appManagerNotice, command)
 	}
 
 	updated, _ = root.Update(commands.StateFailedMsg{Err: fmt.Errorf("connection refused")})
 	root = updated.(RootModel)
-	if root.appListRefreshing || !strings.Contains(root.appListNotice, "Could not refresh") {
-		t.Fatalf("refresh failure was not retained in modal state: refreshing=%v notice=%q", root.appListRefreshing, root.appListNotice)
+	if root.appManagerRefreshing || !strings.Contains(root.appManagerNotice, "Could not refresh") {
+		t.Fatalf("refresh failure was not retained in modal state: refreshing=%v notice=%q", root.appManagerRefreshing, root.appManagerNotice)
 	}
 }

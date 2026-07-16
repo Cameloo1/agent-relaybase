@@ -202,7 +202,7 @@ func startCompletionQuery(input string) (string, bool) {
 func (m RootModel) startCompletionVisible() bool {
 	_, isStart := startCompletionQuery(m.commandInput)
 	return isStart && m.commandActive &&
-		!m.appListVisible && !m.paneReopenVisible && !m.helpVisible && !m.contextMenu.IsOpen() &&
+		!m.appManagerVisible && !m.paneReopenVisible && len(m.registrationRepairs) == 0 && !m.helpVisible && !m.contextMenu.IsOpen() &&
 		m.pendingConfirm == nil && m.pendingAgentApproval == nil && !m.usage.IsOpen() &&
 		!m.threadSwitcherVisible && !m.codePickerVisible
 }
@@ -232,68 +232,154 @@ func (m RootModel) commandPaletteVisible() bool {
 	return m.commandActive && strings.HasPrefix(strings.TrimSpace(m.commandInput), "/") &&
 		!strings.Contains(m.commandInput, "\n") &&
 		!m.startCompletionVisible() &&
-		!m.appListVisible && !m.paneReopenVisible && !m.helpVisible && !m.contextMenu.IsOpen() && m.pendingConfirm == nil && m.pendingAgentApproval == nil
+		!m.appManagerVisible && !m.packageManagerVisible && !m.paneReopenVisible && len(m.registrationRepairs) == 0 && !m.helpVisible && !m.contextMenu.IsOpen() && m.pendingConfirm == nil && m.pendingAgentApproval == nil
 }
 
-func (m *RootModel) openAppList() tea.Cmd {
-	m.interaction.OpenTransient(interaction.TransientAppList)
-	m.appListVisible = true
-	m.appListNotice = ""
-	m.appListRefreshing = m.connectionStatus == "connected"
-	m.followAppListSelection()
+func (m *RootModel) openAppManager(mode appManagerMode) tea.Cmd {
+	m.interaction.OpenTransient(interaction.TransientAppManager)
+	m.appManagerVisible = true
+	m.appManagerMode = mode
+	m.appManagerSurface = appManagerSurfaceTable
+	m.appManagerSelectedActionID = ""
+	m.appManagerActionOffset = 0
+	m.appManagerPackageOffset = 0
+	m.appManagerPendingPackageID = ""
+	m.appManagerNotice = ""
+	m.appManagerRefreshing = m.connectionStatus == "connected"
+	m.followAppManagerSelection()
 	if m.connectionStatus == "connected" {
-		return commands.FetchStateCmd(m.ctx, m.client)
+		return tea.Batch(commands.FetchStateCmd(m.ctx, m.client), commands.ListAppPackagesCmd(m.ctx, m.client))
 	}
 	return nil
 }
 
-func (m *RootModel) closeAppList() {
-	if !m.appListVisible {
+func (m *RootModel) closeAppManager() {
+	if !m.appManagerVisible {
 		return
 	}
-	m.appListVisible = false
-	m.appListRefreshing = false
-	m.appListNotice = ""
-	m.appListOffset = 0
-	m.appListPaneRefreshID = ""
+	m.appManagerVisible = false
+	m.appManagerRefreshing = false
+	m.appManagerNotice = ""
+	m.appManagerOffset = 0
+	m.appManagerActionOffset = 0
+	m.appManagerSelectedActionID = ""
+	m.appManagerPaneRefreshID = ""
+	m.appManagerPendingAppID = ""
+	m.appManagerPendingAction = ""
+	m.appManagerRenameAppID = ""
+	m.appManagerRenameCurrentName = ""
+	m.appManagerRenameInput.SetValue("")
+	m.appManagerRenameInput.Blur()
+	m.appManagerPackageNameInput.SetValue("")
+	m.appManagerPackageNameInput.Blur()
+	m.appManagerPackageSelectedID = ""
+	m.appManagerPackageOffset = 0
+	m.appManagerPendingPackageID = ""
 	m.interaction.CloseTransient()
 }
 
-func (m RootModel) handleAppListKey(msg tea.KeyPressMsg) (RootModel, tea.Cmd) {
+func (m RootModel) handleAppManagerKey(msg tea.KeyPressMsg) (RootModel, tea.Cmd) {
+	if m.appManagerSurface == appManagerSurfacePackagePicker || m.appManagerSurface == appManagerSurfacePackageCreate {
+		return m.handleAppPackagePickerKey(msg)
+	}
+	if m.appManagerSurface == appManagerSurfaceRename {
+		switch {
+		case keymap.Matches(msg, m.keymap.Escape):
+			m.appManagerSurface = appManagerSurfaceActions
+			m.appManagerRenameInput.Blur()
+			m.appManagerNotice = "Rename draft preserved."
+			return m, nil
+		case keymap.Matches(msg, m.keymap.Enter):
+			return m.previewAppRename()
+		case isPasteShortcut(msg):
+			return m, readClipboardCmd()
+		default:
+			before := m.appManagerRenameInput.Value()
+			updated, cmd := m.appManagerRenameInput.Update(msg)
+			m.appManagerRenameInput = updated
+			if before != m.appManagerRenameInput.Value() {
+				m.appManagerNotice = "Enter requests a daemon preview; the stable id remains unchanged."
+			}
+			return m, cmd
+		}
+	}
 	switch {
 	case keymap.Matches(msg, m.keymap.Escape):
-		m.closeAppList()
+		if m.appManagerSurface == appManagerSurfaceActions {
+			m.appManagerSurface = appManagerSurfaceTable
+			m.appManagerActionOffset = 0
+			m.appManagerNotice = ""
+			m.followAppManagerSelection()
+			return m, nil
+		}
+		m.closeAppManager()
 		return m, nil
+	case strings.EqualFold(msg.String(), "r"):
+		if m.connectionStatus != "connected" {
+			m.appManagerNotice = "Refresh is unavailable while the Relaybase daemon is offline; showing last known state."
+			return m, nil
+		}
+		m.appManagerRefreshing = true
+		m.appManagerNotice = "Refreshing daemon-backed app state."
+		return m, commands.FetchStateCmd(m.ctx, m.client)
 	case keymap.Matches(msg, m.keymap.Up):
-		m.appInventory.Move(-1)
+		m.moveAppManagerSelection(-1)
 	case keymap.Matches(msg, m.keymap.Down):
-		m.appInventory.Move(1)
+		m.moveAppManagerSelection(1)
 	case keymap.Matches(msg, m.keymap.PageUp):
-		m.appInventory.Move(-m.appListPageSize())
+		m.moveAppManagerSelection(-m.appManagerPageSize())
 	case keymap.Matches(msg, m.keymap.PageDown):
-		m.appInventory.Move(m.appListPageSize())
+		m.moveAppManagerSelection(m.appManagerPageSize())
 	case keymap.Matches(msg, m.keymap.Home):
-		m.appInventory.SelectIndex(0)
+		m.selectAppManagerIndex(0)
 	case keymap.Matches(msg, m.keymap.End):
-		m.appInventory.SelectIndex(m.appInventory.Count() - 1)
+		m.selectAppManagerIndex(m.appManagerItemCount() - 1)
 	case keymap.Matches(msg, m.keymap.Enter):
-		return m.reviewSelectedAppListStart()
+		if m.appManagerSurface == appManagerSurfaceActions {
+			return m.executeSelectedAppManagerAction()
+		}
+		if m.appManagerMode == appManagerModeStartPicker {
+			return m.reviewSelectedAppManagerStart()
+		}
+		if m.appInventory.Selected() == nil {
+			m.appManagerNotice = "No registered app is selected."
+			return m, nil
+		}
+		m.appManagerSurface = appManagerSurfaceActions
+		m.ensureAppManagerActionSelection()
+		m.followAppManagerSelection()
+		return m, nil
 	default:
 		return m, nil
 	}
-	m.appListNotice = ""
-	m.followAppListSelection()
+	m.appManagerNotice = ""
+	m.followAppManagerSelection()
 	return m, nil
 }
 
-func (m RootModel) reviewSelectedAppListStart() (RootModel, tea.Cmd) {
+func (m RootModel) updateAppRenamePaste(content string) (RootModel, tea.Cmd) {
+	if strings.TrimSpace(content) == "" {
+		m.appManagerNotice = "Clipboard does not contain a visible app name."
+		return m, nil
+	}
+	if _, err := validateAppRenameName(content, nil, m.appManagerRenameAppID); err != nil {
+		m.appManagerNotice = err.Error()
+		return m, nil
+	}
+	updated, cmd := m.appManagerRenameInput.Update(tea.PasteMsg{Content: content})
+	m.appManagerRenameInput = updated
+	m.appManagerNotice = "Pasted app name. Enter requests a daemon preview."
+	return m, cmd
+}
+
+func (m RootModel) reviewSelectedAppManagerStart() (RootModel, tea.Cmd) {
 	if m.connectionStatus != "connected" {
-		m.appListNotice = "Start is unavailable until the Relaybase daemon is connected; use /daemon repair if it remains offline."
+		m.appManagerNotice = "Start is unavailable until the Relaybase daemon is connected; use /daemon repair if it remains offline."
 		return m, nil
 	}
 	item := m.appInventory.Selected()
 	if item == nil {
-		m.appListNotice = "No registered app is selected."
+		m.appManagerNotice = "No registered app is selected."
 		return m, nil
 	}
 	status := strings.ToLower(strings.TrimSpace(item.Status))
@@ -301,14 +387,14 @@ func (m RootModel) reviewSelectedAppListStart() (RootModel, tea.Cmd) {
 	case "running":
 		return m.openRunningAppPane(item.ID)
 	case "starting", "stopping":
-		m.appListNotice = "App " + item.ID + " is " + valueOr(item.Status, status) + "; wait for the daemon transition to finish."
+		m.appManagerNotice = "App " + item.ID + " is " + valueOr(item.Status, status) + "; wait for the daemon transition to finish."
 		return m, nil
 	}
 	if !item.CanStart() {
-		m.appListNotice = registeredAppUnavailableMessage(*item)
+		m.appManagerNotice = registeredAppUnavailableMessage(*item)
 		return m, nil
 	}
-	m.appListNotice = ""
+	m.appManagerNotice = ""
 	cmd := m.requestSelectedInventoryStart()
 	if m.pendingConfirm != nil {
 		m.interaction.OpenModal(interaction.ModalConfirmation)
@@ -334,29 +420,31 @@ func (m RootModel) openRunningAppPane(appID string) (RootModel, tea.Cmd) {
 	paneIDs := m.paneManager.PaneIDsForApp(appID)
 	switch len(paneIDs) {
 	case 0:
-		if !m.appListVisible {
-			m.interaction.OpenTransient(interaction.TransientAppList)
-			m.appListVisible = true
-			m.appListOffset = 0
+		if !m.appManagerVisible {
+			m.interaction.OpenTransient(interaction.TransientAppManager)
+			m.appManagerVisible = true
+			m.appManagerMode = appManagerModeManage
+			m.appManagerSurface = appManagerSurfaceTable
+			m.appManagerOffset = 0
 		}
 		m.appInventory.SelectID(appID)
-		m.followAppListSelection()
-		m.appListPaneRefreshID = appID
-		m.appListRefreshing = true
-		m.appListNotice = "Refreshing daemon state for the running app's monitoring pane."
+		m.followAppManagerSelection()
+		m.appManagerPaneRefreshID = appID
+		m.appManagerRefreshing = true
+		m.appManagerNotice = "Refreshing daemon state for the running app's monitoring pane."
 		return m, commands.FetchStateCmd(m.ctx, m.client)
 	case 1:
 		paneID := paneIDs[0]
 		if !m.paneManager.ReopenPane(paneID) {
-			m.appListNotice = "The monitoring pane is no longer available; refresh the app list and try again."
+			m.appManagerNotice = "The monitoring pane is no longer available; refresh app management and try again."
 			return m, nil
 		}
 		m.paneManager.FocusSelected()
-		m.closeAppList()
+		m.closeAppManager()
 		m.addAssistantMessage("Opened monitoring pane for " + appID + ".")
 		return m, m.persistPreferencesCmd()
 	default:
-		m.closeAppList()
+		m.closeAppManager()
 		if m.openPaneReopen(appID) {
 			return m, nil
 		}
@@ -415,45 +503,100 @@ func (m *RootModel) closePaneReopen() {
 	m.interaction.CloseTransient()
 }
 
-func (m RootModel) appListPageSize() int {
+func (m RootModel) appManagerPageSize() int {
 	metrics := m.operatorMetrics()
 	if metrics.ResizeRequired {
 		return 1
 	}
 	innerHeight := maxInt(1, metrics.Modal.Height-m.styles.Help.GetVerticalFrameSize())
+	if m.appManagerSurface == appManagerSurfaceActions {
+		return maxInt(1, innerHeight-13)
+	}
+	if m.appManagerSurface == appManagerSurfaceRename {
+		return maxInt(1, innerHeight-8)
+	}
 	return maxInt(1, innerHeight-7)
 }
 
-func (m *RootModel) followAppListSelection() {
-	rows := m.appListPageSize()
-	selected := m.appInventory.SelectedIndex()
-	if selected < m.appListOffset {
-		m.appListOffset = selected
-	} else if selected >= m.appListOffset+rows {
-		m.appListOffset = selected - rows + 1
+func (m *RootModel) followAppManagerSelection() {
+	if m.appManagerSurface == appManagerSurfacePackagePicker || m.appManagerSurface == appManagerSurfacePackageCreate {
+		m.followAppPackagePickerSelection()
+		return
 	}
-	m.clampAppListOffset()
+	rows := m.appManagerPageSize()
+	if m.appManagerSurface == appManagerSurfaceActions {
+		selected := m.selectedAppManagerActionIndex()
+		if selected < m.appManagerActionOffset {
+			m.appManagerActionOffset = selected
+		} else if selected >= m.appManagerActionOffset+rows {
+			m.appManagerActionOffset = selected - rows + 1
+		}
+		m.clampAppManagerOffset()
+		return
+	}
+	selected := m.appInventory.SelectedIndex()
+	if selected < m.appManagerOffset {
+		m.appManagerOffset = selected
+	} else if selected >= m.appManagerOffset+rows {
+		m.appManagerOffset = selected - rows + 1
+	}
+	m.clampAppManagerOffset()
 }
 
-func (m *RootModel) clampAppListOffset() {
-	maxOffset := maxInt(0, m.appInventory.Count()-m.appListPageSize())
-	m.appListOffset = minInt(maxInt(0, m.appListOffset), maxOffset)
+func (m *RootModel) clampAppManagerOffset() {
+	if m.appManagerSurface == appManagerSurfacePackagePicker || m.appManagerSurface == appManagerSurfacePackageCreate {
+		m.appManagerPackageOffset = minInt(maxInt(0, m.appManagerPackageOffset), maxInt(0, len(m.appPackages)-m.appManagerPageSize()))
+		return
+	}
+	if m.appManagerSurface == appManagerSurfaceActions {
+		maxOffset := maxInt(0, len(m.appManagerActions())-m.appManagerPageSize())
+		m.appManagerActionOffset = minInt(maxInt(0, m.appManagerActionOffset), maxOffset)
+		return
+	}
+	maxOffset := maxInt(0, m.appInventory.Count()-m.appManagerPageSize())
+	m.appManagerOffset = minInt(maxInt(0, m.appManagerOffset), maxOffset)
 }
 
-func (m RootModel) appListDataForView() *views.RegisteredAppsData {
-	if !m.appListVisible {
+func (m RootModel) appManagerDataForView() *views.AppManagerData {
+	if !m.appManagerVisible {
 		return nil
 	}
 	items := m.appInventory.Items()
-	return &views.RegisteredAppsData{
+	actions := m.appManagerActions()
+	projectedActions := make([]views.AppManagerAction, 0, len(actions))
+	for _, action := range actions {
+		projectedActions = append(projectedActions, views.AppManagerAction{
+			ID: string(action.ID), Label: action.Label, Enabled: action.Enabled, DisabledReason: action.DisabledReason,
+		})
+	}
+	data := &views.AppManagerData{
 		Items:            items,
 		Selected:         m.appInventory.SelectedIndex(),
-		Offset:           minInt(maxInt(0, m.appListOffset), maxInt(0, len(items)-m.appListPageSize())),
+		Offset:           minInt(maxInt(0, m.appManagerOffset), maxInt(0, len(items)-m.appManagerPageSize())),
+		Mode:             string(m.appManagerMode),
+		Surface:          string(m.appManagerSurface),
+		Actions:          projectedActions,
+		SelectedAction:   m.selectedAppManagerActionIndex(),
+		ActionOffset:     minInt(maxInt(0, m.appManagerActionOffset), maxInt(0, len(actions)-m.appManagerPageSize())),
 		ConnectionStatus: m.connectionStatus,
 		StateKnown:       m.state != nil,
-		Refreshing:       m.appListRefreshing,
-		Notice:           m.appListNotice,
+		Refreshing:       m.appManagerRefreshing,
+		Notice:           m.appManagerNotice,
+		Rename: &views.AppManagerRenameData{
+			StableID:    m.appManagerRenameAppID,
+			CurrentName: m.appManagerRenameCurrentName,
+			InputView:   m.appManagerRenameInput.View(),
+			Draft:       m.appManagerRenameInput.Value(),
+		},
 	}
+	if m.appManagerSurface == appManagerSurfacePackagePicker {
+		picker := m.packageTableData(m.appManagerPendingAppID, true)
+		data.PackagePicker = &picker
+	}
+	if m.appManagerSurface == appManagerSurfacePackageCreate {
+		data.PackageNameInput = m.appManagerPackageNameInput.View()
+	}
+	return data
 }
 
 func (m RootModel) handlePaneReopenKey(msg tea.KeyPressMsg) (RootModel, tea.Cmd) {
@@ -502,7 +645,7 @@ func (m RootModel) handlePaneReopenKey(msg tea.KeyPressMsg) (RootModel, tea.Cmd)
 }
 
 func (m RootModel) paneReopenPageSize() int {
-	return m.appListPageSize()
+	return m.appManagerPageSize()
 }
 
 func (m *RootModel) clampPaneReopenSelection() {

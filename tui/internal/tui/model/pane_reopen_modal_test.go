@@ -64,11 +64,11 @@ func TestListRunningAppWithMultiplePanesOpensFilteredChooser(t *testing.T) {
 		},
 	}
 	root := applyState(newTestModel(t), state)
-	root, _ = root.submitSlashCommand("/list")
+	root, _ = root.submitSlashCommand("/start")
 	updated, command := root.Update(keyPress("enter"))
 	root = updated.(RootModel)
-	if command != nil || root.pendingConfirm != nil || root.appListVisible || !root.paneReopenVisible || root.paneReopenAppID != "suite" || root.interaction.Transient != interaction.TransientPaneReopen {
-		t.Fatalf("multi-pane running app did not switch to filtered chooser: pending=%#v list=%v reopen=%v filter=%q transient=%s command=%v", root.pendingConfirm, root.appListVisible, root.paneReopenVisible, root.paneReopenAppID, root.interaction.Transient, command)
+	if command != nil || root.pendingConfirm != nil || root.appManagerVisible || !root.paneReopenVisible || root.paneReopenAppID != "suite" || root.interaction.Transient != interaction.TransientPaneReopen {
+		t.Fatalf("multi-pane running app did not switch to filtered chooser: pending=%#v manager=%v reopen=%v filter=%q transient=%s command=%v", root.pendingConfirm, root.appManagerVisible, root.paneReopenVisible, root.paneReopenAppID, root.interaction.Transient, command)
 	}
 	if candidates := root.paneReopenCandidates(); len(candidates) != 2 {
 		t.Fatalf("filtered chooser candidates=%#v, want both running app panes", candidates)

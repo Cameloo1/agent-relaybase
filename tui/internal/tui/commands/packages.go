@@ -32,6 +32,46 @@ type AppPackageDeletedMsg struct {
 
 type AppPackageDeleteFailedMsg struct{ Err error }
 
+type AppPackageChangePreviewedMsg struct {
+	PackageID string
+	Preview   *relaybaseclient.AppPackageChangePreview
+}
+
+type AppPackageChangePreviewFailedMsg struct {
+	PackageID string
+	Err       error
+}
+
+type AppPackageChangedMsg struct {
+	PackageID string
+	Result    *relaybaseclient.AppPackageChangeResult
+}
+
+type AppPackageChangeFailedMsg struct {
+	PackageID string
+	Err       error
+}
+
+type AppPackageDeletePreviewedMsg struct {
+	PackageID string
+	Preview   *relaybaseclient.AppPackageDeletePreview
+}
+
+type AppPackageDeletePreviewFailedMsg struct {
+	PackageID string
+	Err       error
+}
+
+type AppPackageDeleteAppliedMsg struct {
+	PackageID string
+	Result    *relaybaseclient.AppPackageDeleteResult
+}
+
+type AppPackageDeleteApplyFailedMsg struct {
+	PackageID string
+	Err       error
+}
+
 type AppPackageRunStartedMsg struct {
 	Run    *relaybaseclient.AppPackageRun
 	Action string
@@ -80,6 +120,52 @@ func DeleteAppPackageCmd(ctx context.Context, client *relaybaseclient.Client, pa
 			return AppPackageDeleteFailedMsg{Err: err}
 		}
 		return AppPackageDeletedMsg{Package: definition}
+	}
+}
+
+func PreviewAppPackageChangeCmd(
+	ctx context.Context,
+	client *relaybaseclient.Client,
+	packageID string,
+	expectedRevision int,
+	change relaybaseclient.AppPackageChange,
+) tea.Cmd {
+	return func() tea.Msg {
+		preview, err := client.PreviewAppPackageChange(ctx, packageID, expectedRevision, change)
+		if err != nil {
+			return AppPackageChangePreviewFailedMsg{PackageID: packageID, Err: err}
+		}
+		return AppPackageChangePreviewedMsg{PackageID: packageID, Preview: preview}
+	}
+}
+
+func ApplyAppPackageChangeCmd(ctx context.Context, client *relaybaseclient.Client, packageID string, previewID string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := client.ApplyAppPackageChange(ctx, packageID, previewID)
+		if err != nil {
+			return AppPackageChangeFailedMsg{PackageID: packageID, Err: err}
+		}
+		return AppPackageChangedMsg{PackageID: packageID, Result: result}
+	}
+}
+
+func PreviewAppPackageDeleteCmd(ctx context.Context, client *relaybaseclient.Client, packageID string, expectedRevision int) tea.Cmd {
+	return func() tea.Msg {
+		preview, err := client.PreviewAppPackageDelete(ctx, packageID, expectedRevision)
+		if err != nil {
+			return AppPackageDeletePreviewFailedMsg{PackageID: packageID, Err: err}
+		}
+		return AppPackageDeletePreviewedMsg{PackageID: packageID, Preview: preview}
+	}
+}
+
+func ApplyAppPackageDeleteCmd(ctx context.Context, client *relaybaseclient.Client, packageID string, previewID string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := client.ApplyAppPackageDelete(ctx, packageID, previewID)
+		if err != nil {
+			return AppPackageDeleteApplyFailedMsg{PackageID: packageID, Err: err}
+		}
+		return AppPackageDeleteAppliedMsg{PackageID: packageID, Result: result}
 	}
 }
 

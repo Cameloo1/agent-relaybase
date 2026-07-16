@@ -26,7 +26,15 @@ POST /__hub/api/apps/register
 POST /__hub/api/apps/<id>/start
 POST /__hub/api/apps/<id>/stop
 POST /__hub/api/apps/<id>/restart
+POST /__hub/api/apps/<id>/rename/preview
+POST /__hub/api/apps/<id>/rename/apply
+GET /__hub/api/apps/<id>/unregister
+POST /__hub/api/apps/<id>/unregister
 ```
+
+Rename preview accepts only `{ "name": "New display name" }`. Apply accepts only `{ "previewId": "...", "confirm": true }` and fails closed after expiry, manifest or registry drift, a name collision, uncertain runtime state, or active lifecycle work. Rename changes the top-level manifest name and synchronized registry name while preserving the stable app ID, route, running process, packages, panes, logs, operation history, and automation. A component `relaybase.displayName` that mirrored the old app name is updated; a deliberately distinct component label is preserved.
+
+Unregister preview and apply require the local daemon token. Apply also requires `{ "confirm": true }` and fails closed unless the app is daemon-proven stopped, has no active lifecycle operation, and is not referenced by a saved package. It removes only the registry record and preserves the project, manifest, logs, and operation history.
 
 Tokened log reads and mutations require the local token through `Authorization: Bearer <token>` or `x-relaybase-token: <token>`.
 

@@ -52,7 +52,8 @@ import {
   runAgentFolderStartLive
 } from "./agent/liveFolderStart.ts";
 import { formatRelaybaseEnvFileDiagnostics, loadRelaybaseEnvFile } from "./envFile.ts";
-import { runRelaybaseTui } from "./tuiBridge.ts";
+import { formatRegistrationPlan } from "./registrationPlanFormat.ts";
+import { formatMissingTuiBinaryDiagnostic, resolveTuiBinary, runRelaybaseTui } from "./tuiBridge.ts";
 import { removeRecognizedRelaybasePowerShellShim } from "./prefixShim.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -231,9 +232,11 @@ async function startRelaybase(options: CliOptions, passthroughArgs: string[]): P
 }
 
 async function checkRelaybase(options: CliOptions): Promise<number> {
-  const steps: WorkflowStep[] = [
-    { name: "TUI/toolchain doctor", command: process.execPath, args: [scriptPath("tui-go.mjs"), "doctor"] }
-  ];
+  const sourceDoctor = scriptPath("tui-go.mjs");
+  const sourceCheckout = existsSync(sourceDoctor);
+  const steps: WorkflowStep[] = sourceCheckout
+    ? [{ name: "TUI/toolchain doctor", command: process.execPath, args: [sourceDoctor, "doctor"] }]
+    : [{ name: "Resolve installed TUI binary", command: "relaybase", args: ["start"] }];
   if (options.plan) {
     printWorkflowPlan("relaybase check", [
       ...steps,
@@ -245,10 +248,22 @@ async function checkRelaybase(options: CliOptions): Promise<number> {
 
   console.log("Relaybase check");
   let exitCode = 0;
-  for (const step of steps) {
-    const status = runWorkflowStep(step, { allowLiveEnv: false });
-    if (status !== 0) {
-      exitCode = status;
+  if (sourceCheckout) {
+    for (const step of steps) {
+      const status = runWorkflowStep(step, { allowLiveEnv: false });
+      if (status !== 0) {
+        exitCode = status;
+      }
+    }
+  } else {
+    console.log("");
+    console.log("==> Installed TUI");
+    const resolution = await resolveTuiBinary();
+    if (resolution.ok && resolution.path) {
+      console.log(`Installed TUI: ready (${resolution.source ?? "packaged binary"}).`);
+    } else {
+      process.stderr.write(formatMissingTuiBinaryDiagnostic(resolution));
+      exitCode = 1;
     }
   }
 
@@ -849,8 +864,10 @@ async function register(manifestPath: string | undefined, options: CliOptions): 
   }
   const previewEnvelope = JSON.parse(previewResponse.body) as { setup: Record<string, unknown> };
   const preview = previewEnvelope.setup;
-  if (options.json || options.plan) {
+  if (options.json) {
     console.log(JSON.stringify(preview, null, 2));
+  } else if (options.plan) {
+    console.log(formatRegistrationPlan(preview));
   } else {
     printRegistrationPreview(preview);
   }

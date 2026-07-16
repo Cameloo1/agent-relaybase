@@ -42,6 +42,32 @@ export function runPackageInstallSmoke(options = {}) {
       console.error("Installed CLI help did not expose the expected Relaybase start contract.");
       return 1;
     }
+    const check = runExecutable(
+      relaybase,
+      [
+        "check",
+        "--no-daemon-start",
+        "--port",
+        String(40_000 + (process.pid % 20_000)),
+        "--state-dir",
+        path.join(workspace, "check-state"),
+        "--cwd",
+        workspace
+      ],
+      workspace,
+      { timeout: 30_000 }
+    );
+    const checkOutput = `${check.stdout ?? ""}\n${check.stderr ?? ""}`;
+    if (check.error || !checkOutput.includes("Installed TUI: ready")) {
+      report(check);
+      console.error("Installed relaybase check did not resolve its packaged TUI binary.");
+      return 1;
+    }
+    if (/MODULE_NOT_FOUND|scripts[\\/]tui-go\.mjs|Cannot find module/i.test(checkOutput)) {
+      report(check);
+      console.error("Installed relaybase check attempted to use source-only tooling.");
+      return 1;
+    }
     const daemonProbe = runCompiledDaemonProbe(workspace);
     if (daemonProbe.status !== 0) return report(daemonProbe);
     console.log(`Disposable install smoke passed for ${target.goos}/${target.goarch} at version ${expected}.`);
@@ -99,15 +125,16 @@ function runNpm(args, options) {
   });
 }
 
-function runExecutable(command, args, cwd) {
+function runExecutable(command, args, cwd, options = {}) {
   if (process.platform === "win32" && command.toLowerCase().endsWith(".cmd")) {
     return spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", command, ...args], {
       cwd,
       encoding: "utf8",
-      shell: false
+      shell: false,
+      timeout: options.timeout
     });
   }
-  return spawnSync(command, args, { cwd, encoding: "utf8", shell: false });
+  return spawnSync(command, args, { cwd, encoding: "utf8", shell: false, timeout: options.timeout });
 }
 
 function report(result) {

@@ -330,7 +330,9 @@ export interface RegistrationRepairPreviewResult {
   appId: string;
   repairId: string;
   repair: import("./registrationVerificationTypes.ts").RegistrationRepairOption;
+  selectedPlan?: SetupPlan;
   fileWritePlan: FileWritePlan;
+  launchCommand: string;
   approval: { required: true; previewId: string };
   verificationIntent: RegistrationSetupResult["verificationIntent"];
   actions: string[];

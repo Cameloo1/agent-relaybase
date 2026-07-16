@@ -6,9 +6,6 @@ Bias toward shipped fixes over report volume: minimal local audit notes, more co
 
 ## Hard Rules
 
-- Use CodeGraph before editing.
-- Fail closed when CodeGraph is unavailable.
-- A non-claimable CodeGraph status, including stale indexes, repo head mismatches, unsafe states, or candidate-only graph data, blocks product-code tasks. A task may continue only when it explicitly limits work to governance, planning, or documentation and records the CodeGraph state as diagnostic evidence.
 - No placeholders in shipped source, docs, tests, or reports. Fillable templates may have empty fields only when the task explicitly asks for a template.
 - No fake tests, fake logs, fake benchmark results, or invented acceptance evidence.
 - No lifecycle logic in the TUI.

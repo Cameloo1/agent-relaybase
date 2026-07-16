@@ -2462,13 +2462,43 @@ func TestNoAppsStateRendersSetupOnboardingActions(t *testing.T) {
 
 	for _, expected := range []string{
 		"No Apps Registered",
-		"Configure current project",
-		"Register manifest",
-		"Choose project path",
-		"Open setup docs",
+		"Start with /add . or use /add <folder> for another project.",
+		"Add current folder",
+		"Add another project",
+		"Register existing app",
+		"Browse commands",
 	} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("expected %q in no-apps render:\n%s", expected, rendered)
+		}
+	}
+	if strings.Count(rendered, "No Apps Registered") != 1 {
+		t.Fatalf("expected one no-apps surface:\n%s", rendered)
+	}
+	for _, internal := range []string{"No monitoring panes are open", "ready_no_thread", "Attention 2I", "Start daemon", "docs/tui-setup-onboarding.md"} {
+		if strings.Contains(rendered, internal) {
+			t.Fatalf("fresh onboarding leaked %q:\n%s", internal, rendered)
+		}
+	}
+}
+
+func TestNoAppsStateRemainsReadableAtMinimumTerminalHeight(t *testing.T) {
+	root := newTestModel(t)
+	root.cfg.CurrentDirectory = "C:/project"
+	root.agentStatus = "ready_no_thread"
+	root.addDiagnostic("first_run_info", "info", "Fresh state initialized.")
+	updated, _ := root.Update(commands.StateLoadedMsg{State: &relaybaseclient.RelaybaseState{}})
+	model := updated.(RootModel)
+	updated, _ = model.Update(tea.WindowSizeMsg{Width: 88, Height: 18})
+	model = updated.(RootModel)
+	rendered := model.Render()
+
+	if strings.Count(rendered, "No Apps Registered") != 1 || !strings.Contains(rendered, "/add <folder>") {
+		t.Fatalf("minimum-height onboarding is incomplete:\n%s", rendered)
+	}
+	for _, leaked := range []string{"ready_no_thread", "Attention 1I", "No monitoring panes are open", "╰─│"} {
+		if strings.Contains(rendered, leaked) {
+			t.Fatalf("minimum-height onboarding leaked %q:\n%s", leaked, rendered)
 		}
 	}
 }

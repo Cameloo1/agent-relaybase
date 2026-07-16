@@ -43,12 +43,134 @@ test("app package names reject invisible and command-flag values", async () => {
     () => service.createDefinition({ name: "\u200b", members: ["App A"] }),
     (error: unknown) => hasCode(error, "PACKAGE_NAME_INVALID")
   );
-  for (const name of ["--confirm", "confirm=true", "--dry-run", "--dryrun", "dryrun=true", "dry-run=true"]) {
+  for (const name of [
+    "manage",
+    "list",
+    "--confirm",
+    "confirm=true",
+    "--dry-run",
+    "--dryrun",
+    "dryrun=true",
+    "dry-run=true"
+  ]) {
     await assert.rejects(
       () => service.createDefinition({ name, members: ["App A"] }),
       (error: unknown) => hasCode(error, "PACKAGE_NAME_RESERVED")
     );
   }
+  await service.shutdown();
+});
+
+test("package definition changes are preview-bound, revision-checked, and preserve stable identity", async () => {
+  const stateDir = await tempStateDir();
+  const registry = await registryWithApps(stateDir, [
+    { id: "a", name: "App A" },
+    { id: "b", name: "App B" },
+    { id: "c", name: "App C" }
+  ]);
+  const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+  let lifecycleCalls = 0;
+  const service = serviceFor(stateDir, registry, {
+    enqueueLifecycle: () => {
+      lifecycleCalls += 1;
+      return succeededHandle(`op-${lifecycleCalls}`);
+    },
+    publishEvent: (event) => events.push({ type: event.type, data: event.data })
+  });
+  const created = await service.createDefinition({ name: "stack", members: ["App A"] });
+
+  const addPreview = await service.previewDefinitionChange(created.id, {
+    expectedRevision: created.revision,
+    change: { kind: "add-member", appId: "b" }
+  });
+  assert.equal(addPreview.canApply, true);
+  assert.deepEqual(addPreview.package.proposedMemberAppIds, ["a", "b"]);
+  const added = await service.applyDefinitionChange(created.id, String(addPreview.previewId), "add-correlation");
+  assert.equal(added.package.id, created.id);
+  assert.equal(added.package.revision, 2);
+  assert.deepEqual(added.package.memberAppIds, ["a", "b"]);
+  assert.equal(lifecycleCalls, 0);
+
+  await assert.rejects(
+    () => service.applyDefinitionChange(created.id, String(addPreview.previewId)),
+    (error: unknown) => hasCode(error, "PACKAGE_PREVIEW_STALE")
+  );
+  const renamePreview = await service.previewDefinitionChange(created.id, {
+    expectedRevision: 2,
+    change: { kind: "rename", name: "Renamed Stack" }
+  });
+  const renamed = await service.applyDefinitionChange(created.id, String(renamePreview.previewId));
+  assert.equal(renamed.package.id, created.id);
+  assert.equal(renamed.package.name, "Renamed Stack");
+  assert.equal(renamed.package.revision, 3);
+  assert.deepEqual(renamed.package.memberAppIds, ["a", "b"]);
+
+  const replacePreview = await service.previewDefinitionChange(created.id, {
+    expectedRevision: 3,
+    change: { kind: "replace-members", memberAppIds: ["c", "a"] }
+  });
+  const replaced = await service.applyDefinitionChange(created.id, String(replacePreview.previewId));
+  assert.deepEqual(replaced.package.memberAppIds, ["c", "a"]);
+  assert.equal(replaced.package.revision, 4);
+  assert.deepEqual(
+    events.map((event) => event.type),
+    ["package.created", "package.updated", "package.updated", "package.updated"]
+  );
+  assert.deepEqual(
+    events.slice(1).map((event) => event.data.changeKind),
+    ["add-member", "rename", "replace-members"]
+  );
+  await service.shutdown();
+});
+
+test("package definition changes fail closed for active runs, drift, and invalid members", async () => {
+  const stateDir = await tempStateDir();
+  const registry = await registryWithApps(stateDir, [
+    { id: "a", name: "App A" },
+    { id: "b", name: "App B" }
+  ]);
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const service = serviceFor(stateDir, registry, {
+    enqueueLifecycle: () => ({
+      operationId: "op-active",
+      operation: queuedOperation("op-active"),
+      done: blocked.then(() => succeededOperation("op-active")),
+      deduplicated: false
+    })
+  });
+  const definition = await service.createDefinition({ name: "stack", members: ["App A"] });
+  const run = service.launch(definition.id, "active-change-test");
+  await waitFor(() => service.getRun(run.id).status === "running");
+  const blockedPreview = await service.previewDefinitionChange(definition.id, {
+    expectedRevision: 1,
+    change: { kind: "add-member", appId: "b" }
+  });
+  assert.equal(blockedPreview.canApply, false);
+  assert.equal(blockedPreview.blockers[0]?.code, "PACKAGE_RUN_ACTIVE");
+  const blockedDelete = service.previewDeleteDefinition(definition.id, 1);
+  assert.equal(blockedDelete.canDelete, false);
+  release();
+  await service.waitForRun(run.id);
+
+  await assert.rejects(
+    () =>
+      service.previewDefinitionChange(definition.id, {
+        expectedRevision: 2,
+        change: { kind: "rename", name: "other" }
+      }),
+    (error: unknown) => hasCode(error, "PACKAGE_PREVIEW_STALE")
+  );
+  await assert.rejects(
+    () =>
+      service.previewDefinitionChange(definition.id, {
+        expectedRevision: 1,
+        change: { kind: "replace-members", memberAppIds: ["a", "missing"] }
+      }),
+    (error: unknown) => hasCode(error, "PACKAGE_MEMBER_NOT_FOUND")
+  );
   await service.shutdown();
 });
 
@@ -286,8 +408,32 @@ test("app package API handler is token gated and exposes create, list, launch, r
     await service.waitForRun(runId);
     const run = await jsonRequest(baseUrl, token, "GET", `/__hub/api/package-runs/${runId}`);
     assert.equal(run.json.run.status, "succeeded");
-    const deleted = await jsonRequest(baseUrl, token, "DELETE", `/__hub/api/packages/${packageId}`);
-    assert.equal(deleted.json.deleted, true);
+    const changePreview = await jsonRequest(baseUrl, token, "POST", `/__hub/api/packages/${packageId}/change/preview`, {
+      expectedRevision: 1,
+      change: { kind: "rename", name: "renamed" }
+    });
+    assert.equal(changePreview.status, 200);
+    const unconfirmed = await jsonRequest(baseUrl, token, "POST", `/__hub/api/packages/${packageId}/change/apply`, {
+      previewId: changePreview.json.preview.previewId,
+      confirm: false
+    });
+    assert.equal(unconfirmed.status, 400);
+    const changed = await jsonRequest(baseUrl, token, "POST", `/__hub/api/packages/${packageId}/change/apply`, {
+      previewId: changePreview.json.preview.previewId,
+      confirm: true
+    });
+    assert.equal(changed.json.result.package.name, "renamed");
+    assert.equal(changed.json.result.package.revision, 2);
+    const deletePreview = await jsonRequest(baseUrl, token, "POST", `/__hub/api/packages/${packageId}/delete/preview`, {
+      expectedRevision: 2
+    });
+    assert.equal(deletePreview.json.preview.historicalRunCount, 1);
+    const deleted = await jsonRequest(baseUrl, token, "POST", `/__hub/api/packages/${packageId}/delete/apply`, {
+      previewId: deletePreview.json.preview.previewId,
+      confirm: true
+    });
+    assert.equal(deleted.json.result.deleted, true);
+    assert.equal(service.store.listRunsForPackage(packageId).length, 1);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     await service.shutdown();
@@ -301,12 +447,14 @@ function serviceFor(
     enqueueLifecycle?: EnqueuePackageMemberLifecycle;
     statuses?: (apps: AppRecord[]) => AppStatusView[];
     concurrency?: number;
+    publishEvent?: (event: { type: any; correlationId?: string; data: Record<string, unknown> }) => void;
   } = {}
 ): AppPackageService {
   return new AppPackageService({
     stateDir,
     registry,
     concurrency: options.concurrency,
+    publishEvent: options.publishEvent,
     enqueueLifecycle: options.enqueueLifecycle ?? (() => succeededHandle("op-success")),
     listAppStatuses: async () => {
       const apps = await registry.list();

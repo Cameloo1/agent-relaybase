@@ -12,12 +12,15 @@ import type {
   RecordedOperationType
 } from "./apiTypes.ts";
 import { getAppState, getRelaybaseState } from "./appState.ts";
+import { applyAppUnregister, previewAppUnregister } from "./appUnregister.ts";
+import { AppRenameError, applyAppRename, previewAppRename } from "./appRename.ts";
 import { appRecordEventData } from "./daemonEvents.ts";
 import { dashboardInventory } from "./dashboard.ts";
 import { LogExportRequestError } from "./logExport.ts";
 import {
   OperationConflictError,
   OperationStoreClosedError,
+  OperationTargetGateError,
   type OperationListOptions,
   type OperationOutcome
 } from "./operationStore.ts";
@@ -250,10 +253,146 @@ export async function handleApiRequest(
       const id = parts[3];
       const action = parts[4];
 
+      if (action === "unregister" && request.method === "GET") {
+        requireToken(runtime, request, {
+          code: "UNAUTHORIZED_APP_UNREGISTER_PREVIEW",
+          message: "Unauthorized Relaybase app unregister preview.",
+          userAction: "Use the session token from this daemon state directory before inspecting unregister gates."
+        });
+        const preview = await previewAppUnregister(runtime, id);
+        if (!preview) {
+          throw appUnregisterNotFound(id);
+        }
+        sendJson(response, 200, { preview });
+        return;
+      }
+
+      if (action === "unregister" && request.method === "POST") {
+        requireToken(runtime, request, {
+          code: "UNAUTHORIZED_APP_UNREGISTER",
+          message: "Unauthorized Relaybase app unregister request.",
+          userAction: "Use the session token from this daemon state directory before unregistering an app."
+        });
+        const body = await readJsonBody(request);
+        if (body.confirm !== true) {
+          throw new ApiError(
+            400,
+            "APP_UNREGISTER_CONFIRMATION_REQUIRED",
+            "App unregister requires explicit confirmation.",
+            {
+              retryable: false,
+              detail: { appId: id, required: { confirm: true } },
+              userAction: "Preview unregister first, then submit the exact app id with confirm=true."
+            }
+          );
+        }
+        try {
+          const applied = await applyAppUnregister(runtime, id);
+          if (!applied.preview) {
+            throw appUnregisterNotFound(id);
+          }
+          if (!applied.result) {
+            throw new ApiError(409, "APP_UNREGISTER_BLOCKED", "App unregister failed its authoritative daemon gates.", {
+              retryable: true,
+              detail: { preview: applied.preview },
+              userAction: "Resolve every unregister blocker, refresh the preview, and confirm again."
+            });
+          }
+          runtime.events.publish({
+            type: "app.unregistered",
+            appId: id,
+            correlationId,
+            data: { app: applied.result.app, preserved: applied.result.preserved }
+          });
+          sendJson(response, 200, { result: applied.result });
+          return;
+        } catch (error) {
+          if (error instanceof OperationConflictError) {
+            throw new ApiError(409, "APP_UNREGISTER_OPERATION_ACTIVE", error.message, {
+              retryable: true,
+              detail: { activeOperation: error.activeOperation },
+              userAction: "Wait for the active lifecycle operation to finish, then preview unregister again."
+            });
+          }
+          if (error instanceof OperationTargetGateError) {
+            throw new ApiError(409, "APP_UNREGISTER_ALREADY_ACTIVE", error.message, {
+              retryable: true,
+              detail: { appId: error.targetId, gate: error.gate },
+              userAction: "Wait for the existing app management operation to finish, then refresh."
+            });
+          }
+          throw error;
+        }
+      }
+
       if (request.method === "POST" && isLifecycleOperationType(action)) {
         requireToken(runtime, request);
         await handleLifecycleMutation(runtime, request, response, url, id, action, correlationId);
         return;
+      }
+    }
+
+    if (
+      request.method === "POST" &&
+      parts.length === 6 &&
+      parts[0] === "__hub" &&
+      parts[1] === "api" &&
+      parts[2] === "apps" &&
+      parts[4] === "rename"
+    ) {
+      const appId = parts[3];
+      const action = parts[5];
+      requireToken(runtime, request, {
+        code: action === "preview" ? "UNAUTHORIZED_APP_RENAME_PREVIEW" : "UNAUTHORIZED_APP_RENAME",
+        message:
+          action === "preview"
+            ? "Unauthorized Relaybase app rename preview."
+            : "Unauthorized Relaybase app rename request.",
+        userAction: "Use the session token from this daemon state directory before renaming an app."
+      });
+      const body = await readJsonBody(request);
+      if (action === "preview") {
+        assertExactBodyFields(body, ["name"], "APP_RENAME_PREVIEW_BODY_INVALID");
+        const preview = await previewAppRename(runtime, appId, body.name);
+        sendJson(response, 200, { preview });
+        return;
+      }
+      if (action === "apply") {
+        assertExactBodyFields(body, ["previewId", "confirm"], "APP_RENAME_APPLY_BODY_INVALID");
+        if (body.confirm !== true) {
+          throw new ApiError(400, "APP_RENAME_CONFIRMATION_REQUIRED", "App rename requires explicit confirmation.", {
+            retryable: false,
+            detail: { appId, required: { previewId: "<preview id>", confirm: true } },
+            userAction: "Preview rename first, then confirm that exact preview id."
+          });
+        }
+        try {
+          const result = await applyAppRename(runtime, appId, body.previewId);
+          runtime.events.publish({
+            type: "app.renamed",
+            appId,
+            correlationId,
+            data: { appId, oldName: result.app.oldName, newName: result.app.newName }
+          });
+          sendJson(response, 200, { result });
+          return;
+        } catch (error) {
+          if (error instanceof OperationConflictError) {
+            throw new ApiError(409, "APP_RENAME_OPERATION_ACTIVE", error.message, {
+              retryable: true,
+              detail: { activeOperation: error.activeOperation },
+              userAction: "Wait for the active lifecycle operation to finish, then request a new rename preview."
+            });
+          }
+          if (error instanceof OperationTargetGateError) {
+            throw new ApiError(409, "APP_RENAME_ALREADY_ACTIVE", error.message, {
+              retryable: true,
+              detail: { appId: error.targetId, gate: error.gate },
+              userAction: "Wait for the existing app management operation to finish, then refresh /manage."
+            });
+          }
+          throw error;
+        }
       }
     }
 
@@ -324,6 +463,26 @@ export async function handleApiRequest(
     });
   } catch (error) {
     sendApiError(runtime, response, error, correlationId);
+  }
+}
+
+function appUnregisterNotFound(id: string): ApiError {
+  return new ApiError(404, "APP_NOT_REGISTERED", `Registered app ${id} was not found.`, {
+    retryable: false,
+    detail: { appId: id },
+    userAction: "Refresh registered app state and choose an existing stable app id."
+  });
+}
+
+function assertExactBodyFields(body: Record<string, unknown>, expected: string[], code: string): void {
+  const actual = Object.keys(body).sort();
+  const wanted = [...expected].sort();
+  if (actual.length !== wanted.length || actual.some((field, index) => field !== wanted[index])) {
+    throw new ApiError(400, code, "Request body does not match the documented app rename contract.", {
+      retryable: false,
+      detail: { expected: wanted, received: actual },
+      userAction: "Send only the documented rename fields."
+    });
   }
 }
 
@@ -411,6 +570,13 @@ export function enqueueLifecycleOperation(
       throw new ApiError(503, "LIFECYCLE_STORE_SHUTTING_DOWN", error.message, {
         retryable: true,
         userAction: "Wait for the daemon to restart before submitting another lifecycle action."
+      });
+    }
+    if (error instanceof OperationTargetGateError) {
+      throw new ApiError(409, "APP_TARGET_LOCKED", error.message, {
+        retryable: true,
+        detail: { appId: error.targetId, gate: error.gate },
+        userAction: "Wait for the current app management operation to finish before retrying."
       });
     }
     throw error;
@@ -775,6 +941,22 @@ function sendApiError(
   }
 
   if (error instanceof LogExportRequestError) {
+    sendJson(
+      response,
+      error.statusCode,
+      relaybaseErrorResponse({
+        code: error.code,
+        message: error.message,
+        detail: error.detail,
+        retryable: error.retryable,
+        userAction: error.userAction,
+        correlationId
+      })
+    );
+    return;
+  }
+
+  if (error instanceof AppRenameError) {
     sendJson(
       response,
       error.statusCode,

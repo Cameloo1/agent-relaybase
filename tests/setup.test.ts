@@ -56,6 +56,24 @@ test("detects package-manager, framework, env, and generates multiple setup arch
   assert.equal(plans[0]?.id, "framework-port-flag");
 });
 
+test("static projects without runnable package scripts select the complete static preview plan", async () => {
+  const project = await tempProject("relaybase-static-plan-");
+  await fs.writeFile(path.join(project, "index.html"), "<!doctype html><title>Static fixture</title>\n", "utf8");
+
+  const detection = await detectProject(project);
+  const plans = await proposeSetupPlans(detection);
+  const selected = plans[0];
+
+  assert.equal(detection.appKind, "static");
+  assert.equal(selected?.id, "static-preview");
+  assert.equal(selected?.manifest.command, "node .relaybase/static-preview.cjs");
+  assert.ok(selected?.writes.some((write) => write.path.endsWith(path.join(".relaybase", "static-preview.cjs"))));
+  assert.equal(
+    plans.some((plan) => plan.id === "framework-port-flag"),
+    false
+  );
+});
+
 test("configure writes inspectable setup artifacts and registers without starting when requested", async () => {
   const project = await tempProject("relaybase-configure-");
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-configure-state-"));

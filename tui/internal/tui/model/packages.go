@@ -15,6 +15,9 @@ func (m *RootModel) upsertAppPackage(definition relaybaseclient.AppPackageDefini
 	for index := range m.appPackages {
 		if m.appPackages[index].ID == definition.ID {
 			m.appPackages[index] = definition
+			sort.SliceStable(m.appPackages, func(left, right int) bool {
+				return strings.ToLower(m.appPackages[left].Name) < strings.ToLower(m.appPackages[right].Name)
+			})
 			return
 		}
 	}

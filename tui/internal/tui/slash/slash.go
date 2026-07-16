@@ -22,7 +22,7 @@ const (
 	KindUnpin           = "unpin"
 	KindTheme           = "theme"
 	KindHelp            = "help"
-	KindList            = "list"
+	KindManage          = "manage"
 	KindUsage           = "usage"
 	KindConfirm         = "confirm"
 	KindCancel          = "cancel"
@@ -295,14 +295,14 @@ func Parse(input string) (ParsedCommand, error) {
 			return ParsedCommand{}, ParseError{Message: "Use /help."}
 		}
 		parsed.Kind = KindHelp
-	case "list":
-		if err := rejectUnexpectedFlags(args, "/list"); err != nil {
+	case "manage", "list":
+		if err := rejectUnexpectedFlags(args, "/manage"); err != nil {
 			return ParsedCommand{}, err
 		}
 		if len(args) != 0 || confirm || dryRun || noVerify {
-			return ParsedCommand{}, ParseError{Message: "Use /list."}
+			return ParsedCommand{}, ParseError{Message: "Use /manage."}
 		}
-		parsed.Kind = KindList
+		parsed.Kind = KindManage
 	case "usage":
 		if err := rejectUnexpectedFlags(args, "/usage"); err != nil {
 			return ParsedCommand{}, err

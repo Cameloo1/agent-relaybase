@@ -196,6 +196,36 @@ export class AppPackageStore {
     return snapshotDefinition(definition);
   }
 
+  updateDefinition(
+    id: string,
+    expectedRevision: number,
+    input: { name: string; normalizedName: string; memberAppIds: string[] }
+  ): AppPackageDefinition | undefined {
+    this.#assertOpen();
+    const now = new Date().toISOString();
+    const result = this.#db
+      .prepare(
+        `UPDATE app_packages
+           SET name = ?, normalized_name = ?, member_ids_json = ?, revision = revision + 1, updated_at = ?
+         WHERE package_id = ? AND revision = ?`
+      )
+      .run(input.name, input.normalizedName, JSON.stringify(input.memberAppIds), now, id, expectedRevision);
+    if (Number(result.changes) === 0) {
+      return undefined;
+    }
+    return this.getDefinition(id);
+  }
+
+  deleteDefinitionAtRevision(id: string, expectedRevision: number): boolean {
+    this.#assertOpen();
+    return (
+      Number(
+        this.#db.prepare("DELETE FROM app_packages WHERE package_id = ? AND revision = ?").run(id, expectedRevision)
+          .changes
+      ) > 0
+    );
+  }
+
   deleteDefinition(id: string): boolean {
     this.#assertOpen();
     return Number(this.#db.prepare("DELETE FROM app_packages WHERE package_id = ?").run(id).changes) > 0;

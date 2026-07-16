@@ -532,7 +532,8 @@ export async function proposeSetupPlans(
     })
   );
 
-  if (detection.framework !== "unknown" || detection.scripts.dev) {
+  const wrapperScript = commandSelection.scriptName ?? preferredPackageScript(detection);
+  if (wrapperScript) {
     const wrapperManifest = {
       ...selectedBaseManifest,
       command: nodeCommand(".relaybase/launch.cjs"),
@@ -561,7 +562,7 @@ export async function proposeSetupPlans(
             path: path.join(detection.root, SETUP_DIR, "launch.cjs"),
             action: "create",
             reason: "Launch wrapper adapts package-manager scripts to Relaybase-assigned ports.",
-            preview: launchWrapper(detection, commandSelection.scriptName)
+            preview: launchWrapper(detection, wrapperScript)
           }
         ]
       })
@@ -688,7 +689,7 @@ export async function proposeSetupPlans(
         id: "static-preview",
         label: "Static build preview",
         architecture: "static-build-preview",
-        score: 50,
+        score: 90,
         manifest: staticManifest,
         detection,
         envStrategy,
@@ -2238,6 +2239,16 @@ function mergeRelaybaseEnvBlock(current: string, block: string): string {
 
 function launchWrapper(detection: ProjectDetection, scriptHint?: string): string {
   const script = scriptHint ?? (detection.scripts.dev ? "dev" : detection.scripts.start ? "start" : "");
+  if (!script) {
+    throw new SetupSelectionError(
+      "SETUP_FRAMEWORK_SCRIPT_REQUIRED",
+      "A framework launch wrapper requires a detected package-manager script.",
+      {
+        detail: { framework: detection.framework, packageScripts: Object.keys(detection.scripts) },
+        userAction: "Choose a detected package script or another setup plan."
+      }
+    );
+  }
   const wrapper = wrapperCommand(detection.packageManager);
   const baseArgs = [...wrapper.args, ...packageManagerArgs(detection.packageManager, script)];
   const frameworkArgs = frameworkPortArgs(detection.framework);
@@ -2246,8 +2257,11 @@ const { spawn } = require("node:child_process");
 
 const port = process.env.PORT || "3000";
 const host = process.env.HOST || "127.0.0.1";
-const command = ${JSON.stringify(wrapper.command)};
-const args = ${JSON.stringify(baseArgs)}.concat(${JSON.stringify(frameworkArgs)}.map((arg) => arg.replace("$PORT", port).replace("$HOST", host)));
+const executable = ${JSON.stringify(wrapper.command)};
+const launchArgs = ${JSON.stringify(baseArgs)}.concat(${JSON.stringify(frameworkArgs)}.map((arg) => arg.replace("$PORT", port).replace("$HOST", host)));
+const windowsCommandShim = process.platform === "win32" && /\\.(?:cmd|bat)$/i.test(executable);
+const command = windowsCommandShim ? (process.env.ComSpec || "cmd.exe") : executable;
+const args = windowsCommandShim ? ["/d", "/s", "/c", executable, ...launchArgs] : launchArgs;
 
 const child = spawn(command, args, {
   cwd: process.cwd(),
@@ -2615,6 +2629,12 @@ function scoreFrameworkWrapper(detection: ProjectDetection): number {
     score += 5;
   }
   return score;
+}
+
+function preferredPackageScript(detection: ProjectDetection): string | undefined {
+  if (detection.scripts.dev) return "dev";
+  if (detection.scripts.start) return "start";
+  return undefined;
 }
 
 function startCommandFor(detection: ProjectDetection): string {

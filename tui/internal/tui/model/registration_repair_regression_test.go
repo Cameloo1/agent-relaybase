@@ -66,3 +66,31 @@ func TestRegistrationFailureMessagesKeepRepairAndCleanupStateTruthful(t *testing
 		t.Fatalf("cleanup failure overclaimed stopped state: %s", cleanupFailed)
 	}
 }
+
+func TestAutomaticRegistrationRepairsOrderSafeChoicesAndExcludeManualInput(t *testing.T) {
+	preview := &relaybaseclient.RegistrationSetupResult{
+		Status: "registered_verification_failed",
+		Verification: &relaybaseclient.RegistrationVerificationResult{Repairs: []relaybaseclient.RegistrationRepairOption{
+			{ID: "setup-plan:static-preview", Kind: "setup_plan", Label: "Use Static build preview", Recommended: true},
+			{ID: "pinned-upstream", Kind: "pinned_port", Label: "Use pinned port"},
+		}},
+	}
+	repairs := automaticRegistrationRepairs(preview)
+	if len(repairs) != 2 || repairs[0].ID != "setup-plan:static-preview" || repairs[1].ID != "pinned-upstream" {
+		t.Fatalf("expected recommended repair first and alternate second, got %#v", repairs)
+	}
+
+	preview.Verification.Repairs[0].StructuredInputRequired = []string{"executable"}
+	repairs = automaticRegistrationRepairs(preview)
+	if len(repairs) != 1 || repairs[0].ID != "pinned-upstream" {
+		t.Fatalf("structured-input repair must be excluded, got %#v", repairs)
+	}
+
+	preview.Verification.Repairs = []relaybaseclient.RegistrationRepairOption{
+		{ID: "manual", Kind: "manual_launch", Recommended: true},
+		{ID: "dynamic", Kind: "dynamic_binding", Recommended: true, StructuredInputRequired: []string{"arguments"}},
+	}
+	if repairs := automaticRegistrationRepairs(preview); len(repairs) != 0 {
+		t.Fatalf("manual repairs must not be prepared automatically, got %#v", repairs)
+	}
+}

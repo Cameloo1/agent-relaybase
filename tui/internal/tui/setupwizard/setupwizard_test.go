@@ -13,14 +13,18 @@ func TestNoAppsRendersCurrentDirectoryActions(t *testing.T) {
 	for _, expected := range []string{
 		"No Apps Registered",
 		"cwd: C:/project",
-		"/configure current folder --dry-run",
-		"/register <manifest-path>",
-		"/configure <path> --dry-run",
-		"relaybase serve",
+		"Start with /add . or use /add <folder> for another project.",
+		"/add .",
+		"/add <folder>",
+		"/register <folder-or-manifest>",
+		"/help",
 	} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("expected %q in no-apps render:\n%s", expected, rendered)
 		}
+	}
+	if strings.Contains(rendered, "relaybase serve") || strings.Contains(rendered, "docs/") {
+		t.Fatalf("connected no-apps onboarding leaked daemon or internal-doc instructions:\n%s", rendered)
 	}
 }
 

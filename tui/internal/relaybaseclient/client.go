@@ -122,6 +122,46 @@ func (c *Client) RequestLifecycle(ctx context.Context, appID string, action stri
 	return &result, nil
 }
 
+func (c *Client) PreviewAppUnregister(ctx context.Context, appID string) (*AppUnregisterPreview, error) {
+	var response AppUnregisterPreviewResponse
+	path := fmt.Sprintf("/__hub/api/apps/%s/unregister", url.PathEscape(appID))
+	if _, err := c.getJSON(ctx, path, &response); err != nil {
+		return nil, err
+	}
+	return &response.Preview, nil
+}
+
+func (c *Client) UnregisterApp(ctx context.Context, appID string) (*AppUnregisterResult, error) {
+	var response AppUnregisterResultResponse
+	path := fmt.Sprintf("/__hub/api/apps/%s/unregister", url.PathEscape(appID))
+	if _, err := c.postJSON(ctx, path, map[string]bool{"confirm": true}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Result, nil
+}
+
+func (c *Client) PreviewAppRename(ctx context.Context, appID string, name string) (*AppRenamePreview, error) {
+	var response AppRenamePreviewResponse
+	path := fmt.Sprintf("/__hub/api/apps/%s/rename/preview", url.PathEscape(appID))
+	if _, err := c.postJSON(ctx, path, map[string]string{"name": name}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Preview, nil
+}
+
+func (c *Client) RenameApp(ctx context.Context, appID string, previewID string) (*AppRenameResult, error) {
+	var response AppRenameResultResponse
+	path := fmt.Sprintf("/__hub/api/apps/%s/rename/apply", url.PathEscape(appID))
+	payload := struct {
+		PreviewID string `json:"previewId"`
+		Confirm   bool   `json:"confirm"`
+	}{PreviewID: previewID, Confirm: true}
+	if _, err := c.postJSON(ctx, path, payload, &response); err != nil {
+		return nil, err
+	}
+	return &response.Result, nil
+}
+
 func (c *Client) QueryLogs(ctx context.Context, appID string, query LogQuery) (*LogSnapshot, error) {
 	values := url.Values{}
 	if query.Limit > 0 {

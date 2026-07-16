@@ -86,6 +86,17 @@ export class OperationStoreClosedError extends Error {
   }
 }
 
+export class OperationTargetGateError extends Error {
+  readonly targetId: string;
+  readonly gate: string;
+
+  constructor(targetId: string, gate: string) {
+    super(`App ${targetId} is temporarily locked by ${gate}.`);
+    this.targetId = targetId;
+    this.gate = gate;
+  }
+}
+
 export class OperationStoreShutdownTimeoutError extends Error {
   readonly operationIds: string[];
 
@@ -99,6 +110,7 @@ export class OperationStore {
   readonly retentionLimit: number;
   #operations = new Map<string, LifecycleOperation>();
   #activeByTarget = new Map<string, ActiveOperation>();
+  #targetGates = new Map<string, string>();
   #subscribers = new Set<(operation: LifecycleOperation) => void>();
   #db?: DatabaseSync;
   #accepting = true;
@@ -136,6 +148,10 @@ export class OperationStore {
   enqueueLifecycle<Result>(input: EnqueueLifecycleOperationInput<Result>): OperationHandle {
     if (!this.#accepting || this.#closed) {
       throw new OperationStoreClosedError();
+    }
+    const gate = this.#targetGates.get(input.targetId);
+    if (gate) {
+      throw new OperationTargetGateError(input.targetId, gate);
     }
     const active = this.#activeByTarget.get(input.targetId);
     if (active) {
@@ -252,6 +268,33 @@ export class OperationStore {
   get(operationId: string): LifecycleOperation | undefined {
     const operation = this.#operations.get(operationId);
     return operation ? snapshotOperation(operation) : undefined;
+  }
+
+  activeForTarget(targetId: string): LifecycleOperation | undefined {
+    const active = this.#activeByTarget.get(targetId);
+    if (!active) {
+      return undefined;
+    }
+    return this.get(active.operationId);
+  }
+
+  async withTargetGate<Result>(targetId: string, gate: string, run: () => Promise<Result>): Promise<Result> {
+    const active = this.activeForTarget(targetId);
+    if (active) {
+      throw new OperationConflictError(active);
+    }
+    const existingGate = this.#targetGates.get(targetId);
+    if (existingGate) {
+      throw new OperationTargetGateError(targetId, existingGate);
+    }
+    this.#targetGates.set(targetId, gate);
+    try {
+      return await run();
+    } finally {
+      if (this.#targetGates.get(targetId) === gate) {
+        this.#targetGates.delete(targetId);
+      }
+    }
   }
 
   list(options: OperationListOptions = {}): LifecycleOperation[] {

@@ -60,15 +60,14 @@ func NoApps(currentDirectory string) State {
 		Message:          noAppsMessage(currentDirectory),
 		Actions: []Action{
 			{
-				Label:   "Configure current project",
-				Command: "/configure current folder --dry-run",
+				Label:   "Add current folder",
+				Command: "/add .",
 				Enabled: strings.TrimSpace(currentDirectory) != "",
 				Reason:  disabledReason(strings.TrimSpace(currentDirectory) != "", "trusted current-directory context is unavailable"),
 			},
-			{Label: "Register manifest", Command: "/register <manifest-path>", Enabled: true},
-			{Label: "Choose project path", Command: "/configure <path> --dry-run", Enabled: true},
-			{Label: "Open setup docs", Command: "docs/tui-setup-onboarding.md", Enabled: true},
-			{Label: "Start daemon", Command: "relaybase serve", Enabled: true},
+			{Label: "Add another project", Command: "/add <folder>", Enabled: true},
+			{Label: "Register existing app", Command: "/register <folder-or-manifest>", Enabled: true},
+			{Label: "Browse commands", Command: "/help", Enabled: true},
 		},
 	}
 }
@@ -472,9 +471,9 @@ func CWDFromManifestPath(manifestPath string) string {
 
 func noAppsMessage(currentDirectory string) string {
 	if strings.TrimSpace(currentDirectory) == "" {
-		return "No apps are registered. Choose a project path or register an existing manifest."
+		return "No apps are registered yet.\nStart with /add <folder>; Relaybase previews changes before confirmation."
 	}
-	return "No apps are registered. You can preview setup for the current directory or choose another project path."
+	return "No apps are registered yet.\nStart with /add . or use /add <folder> for another project."
 }
 
 func primaryRuntimeLabel(result *relaybaseclient.SetupDetectResult) string {

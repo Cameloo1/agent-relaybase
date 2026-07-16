@@ -27,6 +27,7 @@
     "dist-runtime/",
     "docs/**/*.md",
     "!docs/relaybase-release-roadmap.md",
+    "!docs/register-verification-repair-plan.md",
     "!docs/tui-setup-gap-map.md",
     "docs/relaybase-title.png",
     "examples/",

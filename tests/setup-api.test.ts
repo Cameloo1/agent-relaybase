@@ -392,6 +392,132 @@ test("wrong health route returns a preview-only repair after bounded localhost d
   }
 });
 
+test("failed static registration preserves repair context and applies an approval-bound setup-plan fallback", async () => {
+  const project = await tempProject("relaybase-register-static-repair-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-register-static-repair-state-"));
+  await fs.writeFile(path.join(project, "index.html"), "<!doctype html><title>Static repair</title>\n", "utf8");
+  await fs.mkdir(path.join(project, ".relaybase"), { recursive: true });
+  await fs.writeFile(path.join(project, ".relaybase", "fail.cjs"), "process.exit(1);\n", "utf8");
+  const manifestPath = path.join(project, "relaybase.app.json");
+  await fs.writeFile(
+    manifestPath,
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "static-repair",
+        name: "Static Repair",
+        command: "node .relaybase/fail.cjs",
+        cwd: ".",
+        protocol: "http",
+        healthUrl: "/"
+      },
+      null,
+      2
+    ) + "\n",
+    "utf8"
+  );
+  const originalManifest = await fs.readFile(manifestPath, "utf8");
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18500, portRangeEnd: 18530 });
+  try {
+    await hub.listen();
+    const port = hub.address().port;
+    const registrationPreview = async () =>
+      apiRequest(port, "POST", "/__hub/api/setup/register/preview", {
+        path: manifestPath,
+        mode: "manifest",
+        verificationMode: "quick",
+        verificationPolicy: { startupBudgetMs: 1000, probeTimeoutMs: 200 }
+      });
+    const applyPreview = async (previewId: string) =>
+      apiRequest(
+        port,
+        "POST",
+        "/__hub/api/setup/register/apply",
+        { previewId, confirm: true },
+        { "x-relaybase-token": hub.runtime.token }
+      );
+
+    const firstPreview = await registrationPreview();
+    const first = await applyPreview(firstPreview.json.setup.previewId);
+    assert.equal(first.statusCode, 202, first.body);
+    assert.equal(first.json.setup.status, "registered_verification_failed");
+    assert.equal(first.json.setup.verification.failure.code, "REGISTER_VERIFY_EARLY_EXIT");
+    assert.equal(first.json.setup.verification.repairs[0].kind, "setup_plan");
+    assert.equal(first.json.setup.verification.repairs[0].setupPlanId, "static-preview");
+    assert.equal(first.json.setup.verification.repairs[0].recommended, true);
+    assert.equal(hub.runtime.registrationVerification.attempts("static-repair").length, 1);
+    assert.equal(await fs.readFile(manifestPath, "utf8"), originalManifest);
+
+    const duplicatePreview = await registrationPreview();
+    const duplicate = await applyPreview(duplicatePreview.json.setup.previewId);
+    assert.equal(duplicate.statusCode, 202, duplicate.body);
+    assert.equal(duplicate.json.setup.verification.status, "preflight_failed");
+    assert.equal(duplicate.json.setup.verification.attempted, false);
+    assert.equal(duplicate.json.setup.verification.reused, true);
+    assert.equal(duplicate.json.setup.verification.repairs[0].setupPlanId, "static-preview");
+    assert.equal(hub.runtime.registrationVerification.attempts("static-repair").length, 1);
+
+    const repairPreview = await apiRequest(port, "POST", "/__hub/api/setup/register/repair/preview", {
+      appId: "static-repair",
+      repairId: duplicate.json.setup.verification.repairs[0].id
+    });
+    assert.equal(repairPreview.statusCode, 200, repairPreview.body);
+    assert.equal(repairPreview.json.setup.approval.required, true);
+    assert.equal(repairPreview.json.setup.selectedPlan.id, "static-preview");
+    assert.equal(repairPreview.json.setup.launchCommand, "node .relaybase/static-preview.cjs");
+    assert.ok(
+      repairPreview.json.setup.fileWritePlan.writes.some((write: { path: string }) =>
+        write.path.endsWith(path.join(".relaybase", "static-preview.cjs"))
+      )
+    );
+    assert.equal(await fs.readFile(manifestPath, "utf8"), originalManifest);
+
+    const staticPreviewPath = path.join(project, ".relaybase", "static-preview.cjs");
+    await fs.writeFile(staticPreviewPath, "// changed after repair preview\n", "utf8");
+    const staleRepair = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/setup/register/repair/apply",
+      { previewId: repairPreview.json.setup.previewId, confirm: true },
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(staleRepair.statusCode, 409, staleRepair.body);
+    assert.equal(staleRepair.json.code, "REGISTER_REPAIR_PREVIEW_STALE");
+    assert.equal(await fs.readFile(manifestPath, "utf8"), originalManifest);
+    assert.equal(await fs.readFile(staticPreviewPath, "utf8"), "// changed after repair preview\n");
+    assert.equal(hub.runtime.registrationVerification.attempts("static-repair").length, 1);
+
+    const currentRepairPreview = await apiRequest(port, "POST", "/__hub/api/setup/register/repair/preview", {
+      appId: "static-repair",
+      repairId: duplicate.json.setup.verification.repairs[0].id
+    });
+    assert.equal(currentRepairPreview.statusCode, 200, currentRepairPreview.body);
+
+    const repaired = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/setup/register/repair/apply",
+      { previewId: currentRepairPreview.json.setup.previewId, confirm: true },
+      { "x-relaybase-token": hub.runtime.token }
+    );
+    assert.equal(repaired.statusCode, 202, repaired.body);
+    assert.equal(repaired.json.setup.status, "registered_verified");
+    assert.equal(repaired.json.setup.verification.status, "verified");
+    assert.equal(repaired.json.setup.verification.stop.portClosureVerified, true);
+    assert.equal(repaired.json.setup.verification.stop.backendPortOpen, false);
+    assert.equal(JSON.parse(await fs.readFile(manifestPath, "utf8")).command, "node .relaybase/static-preview.cjs");
+    assert.equal(await exists(path.join(project, ".relaybase", "static-preview.cjs")), true);
+    assert.equal(hub.runtime.registrationVerification.attempts("static-repair").length, 2);
+    assert.equal(
+      (await hub.runtime.processes.listStatuses()).find((item) => item.id === "static-repair")?.runtime.status,
+      "stopped"
+    );
+  } finally {
+    await hub.runtime.processes.stop("static-repair").catch(() => undefined);
+    await hub.close();
+  }
+});
+
 test("verification cleanup failure blocks retries and reports the remaining port risk", async () => {
   const project = await tempProject("relaybase-register-cleanup-failure-");
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-register-cleanup-failure-state-"));
@@ -770,7 +896,7 @@ test("setup plans expose Next/Vite framework wrappers and pinned upstream ports"
     });
     assert.equal(nextPreview.statusCode, 200);
     const nextWrapper = launchWrapperPreview(nextPreview.json.setup.fileWritePlan.writes);
-    assert.match(nextWrapper, /const args = \["run","dev"\]\.concat\(\["--","-H","\$HOST","-p","\$PORT"\]/);
+    assert.match(nextWrapper, /const launchArgs = \["run","dev"\]\.concat\(\["--","-H","\$HOST","-p","\$PORT"\]/);
     assert.match(nextWrapper, /"-H"/);
     assert.match(nextWrapper, /"-p"/);
     assert.ok(nextPreview.json.setup.selectedPlan.choice.portStrategies.includes("framework_port_flags"));
@@ -788,9 +914,14 @@ test("setup plans expose Next/Vite framework wrappers and pinned upstream ports"
       selectedPlanId: "framework-port-flag"
     });
     const viteWrapper = launchWrapperPreview(vitePreview.json.setup.fileWritePlan.writes);
-    assert.match(viteWrapper, /const args = \["run","dev"\]\.concat\(\["--","--host","\$HOST","--port","\$PORT"\]/);
+    assert.match(
+      viteWrapper,
+      /const launchArgs = \["run","dev"\]\.concat\(\["--","--host","\$HOST","--port","\$PORT"\]/
+    );
     assert.match(viteWrapper, /"--host"/);
     assert.match(viteWrapper, /"--port"/);
+    assert.match(viteWrapper, /windowsCommandShim/);
+    assert.match(viteWrapper, /process\.env\.ComSpec/);
     assert.doesNotMatch(JSON.stringify(vitePlans.json), /super-secret-value/);
     assert.doesNotMatch(JSON.stringify(vitePreview.json), /super-secret-value/);
 
@@ -800,7 +931,10 @@ test("setup plans expose Next/Vite framework wrappers and pinned upstream ports"
     });
     assert.equal(astroPreview.statusCode, 200);
     const astroWrapper = launchWrapperPreview(astroPreview.json.setup.fileWritePlan.writes);
-    assert.match(astroWrapper, /const args = \["run","dev"\]\.concat\(\["--","--host","\$HOST","--port","\$PORT"\]/);
+    assert.match(
+      astroWrapper,
+      /const launchArgs = \["run","dev"\]\.concat\(\["--","--host","\$HOST","--port","\$PORT"\]/
+    );
     assert.match(astroWrapper, /"--host"/);
     assert.match(astroWrapper, /"--port"/);
   } finally {
@@ -1000,7 +1134,7 @@ test("setup preview and apply preserve approved command, plan, port strategy, an
     assert.equal(answers.portStrategyHint, "generated_launch_wrapper");
     assert.equal(answers.componentMetadata.componentRole, "frontend");
     const wrapper = await fs.readFile(path.join(project, ".relaybase", "launch.cjs"), "utf8");
-    assert.match(wrapper, /const args = \["run","dev"\]\.concat/);
+    assert.match(wrapper, /const launchArgs = \["run","dev"\]\.concat/);
   } finally {
     await hub.close();
   }

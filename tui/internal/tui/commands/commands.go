@@ -60,6 +60,46 @@ type LifecycleRequestFailedMsg struct {
 	Err    error
 }
 
+type AppUnregisterPreviewedMsg struct {
+	AppID   string
+	Preview *relaybaseclient.AppUnregisterPreview
+}
+
+type AppUnregisterPreviewFailedMsg struct {
+	AppID string
+	Err   error
+}
+
+type AppUnregisteredMsg struct {
+	AppID  string
+	Result *relaybaseclient.AppUnregisterResult
+}
+
+type AppUnregisterFailedMsg struct {
+	AppID string
+	Err   error
+}
+
+type AppRenamePreviewedMsg struct {
+	AppID   string
+	Preview *relaybaseclient.AppRenamePreview
+}
+
+type AppRenamePreviewFailedMsg struct {
+	AppID string
+	Err   error
+}
+
+type AppRenamedMsg struct {
+	AppID  string
+	Result *relaybaseclient.AppRenameResult
+}
+
+type AppRenameFailedMsg struct {
+	AppID string
+	Err   error
+}
+
 type LogsExportedMsg struct {
 	Request relaybaseclient.LogExportRequest
 	Result  *relaybaseclient.LogExportResult
@@ -544,6 +584,46 @@ func LifecycleRequestBatchCmd(ctx context.Context, client *relaybaseclient.Clien
 		cmds = append(cmds, LifecycleRequestCmd(ctx, client, appID, action))
 	}
 	return tea.Batch(cmds...)
+}
+
+func PreviewAppUnregisterCmd(ctx context.Context, client *relaybaseclient.Client, appID string) tea.Cmd {
+	return func() tea.Msg {
+		preview, err := client.PreviewAppUnregister(ctx, appID)
+		if err != nil {
+			return AppUnregisterPreviewFailedMsg{AppID: appID, Err: err}
+		}
+		return AppUnregisterPreviewedMsg{AppID: appID, Preview: preview}
+	}
+}
+
+func UnregisterAppCmd(ctx context.Context, client *relaybaseclient.Client, appID string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := client.UnregisterApp(ctx, appID)
+		if err != nil {
+			return AppUnregisterFailedMsg{AppID: appID, Err: err}
+		}
+		return AppUnregisteredMsg{AppID: appID, Result: result}
+	}
+}
+
+func PreviewAppRenameCmd(ctx context.Context, client *relaybaseclient.Client, appID string, name string) tea.Cmd {
+	return func() tea.Msg {
+		preview, err := client.PreviewAppRename(ctx, appID, name)
+		if err != nil {
+			return AppRenamePreviewFailedMsg{AppID: appID, Err: err}
+		}
+		return AppRenamePreviewedMsg{AppID: appID, Preview: preview}
+	}
+}
+
+func RenameAppCmd(ctx context.Context, client *relaybaseclient.Client, appID string, previewID string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := client.RenameApp(ctx, appID, previewID)
+		if err != nil {
+			return AppRenameFailedMsg{AppID: appID, Err: err}
+		}
+		return AppRenamedMsg{AppID: appID, Result: result}
+	}
 }
 
 func ExportLogsCmd(ctx context.Context, client *relaybaseclient.Client, request relaybaseclient.LogExportRequest) tea.Cmd {

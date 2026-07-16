@@ -108,6 +108,120 @@ type LifecycleOperationResponse struct {
 	OperationID string `json:"operationId"`
 }
 
+type AppUnregisterBlocker struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type AppUnregisterPackageReference struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type AppUnregisterIdentity struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	ProjectDirectory string `json:"projectDirectory"`
+	ManifestPath     string `json:"manifestPath,omitempty"`
+}
+
+type AppUnregisterPreserved struct {
+	ProjectFiles     bool `json:"projectFiles"`
+	Manifest         bool `json:"manifest"`
+	Logs             bool `json:"logs"`
+	OperationHistory bool `json:"operationHistory"`
+}
+
+type AppUnregisterPreview struct {
+	App               AppUnregisterIdentity           `json:"app"`
+	RuntimeStatus     string                          `json:"runtimeStatus"`
+	CanUnregister     bool                            `json:"canUnregister"`
+	Blockers          []AppUnregisterBlocker          `json:"blockers"`
+	PackageReferences []AppUnregisterPackageReference `json:"packageReferences"`
+	Preserved         AppUnregisterPreserved          `json:"preserved"`
+}
+
+type AppUnregisterPreviewResponse struct {
+	Preview AppUnregisterPreview `json:"preview"`
+}
+
+type AppUnregisterResult struct {
+	Unregistered  bool                   `json:"unregistered"`
+	App           AppUnregisterIdentity  `json:"app"`
+	RuntimeStatus string                 `json:"runtimeStatus"`
+	Preserved     AppUnregisterPreserved `json:"preserved"`
+}
+
+type AppUnregisterResultResponse struct {
+	Result AppUnregisterResult `json:"result"`
+}
+
+type AppRenameBlocker struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type AppRenameChange struct {
+	Field  string `json:"field"`
+	Before string `json:"before"`
+	After  string `json:"after"`
+}
+
+type AppRenameManifest struct {
+	Path                string            `json:"path,omitempty"`
+	SourceRevision      string            `json:"sourceRevision,omitempty"`
+	Changes             []AppRenameChange `json:"changes"`
+	DisplayNameBehavior string            `json:"displayNameBehavior"`
+	DisplayName         string            `json:"displayName,omitempty"`
+}
+
+type AppRenamePreserved struct {
+	StableAppID      string `json:"stableAppId"`
+	Route            string `json:"route"`
+	RunningProcess   bool   `json:"runningProcess"`
+	Packages         bool   `json:"packages"`
+	Logs             bool   `json:"logs"`
+	OperationHistory bool   `json:"operationHistory"`
+	Automation       bool   `json:"automation"`
+}
+
+type AppRenamePreview struct {
+	PreviewID string `json:"previewId,omitempty"`
+	ExpiresAt string `json:"expiresAt,omitempty"`
+	Noop      bool   `json:"noop"`
+	CanRename bool   `json:"canRename"`
+	App       struct {
+		ID           string `json:"id"`
+		CurrentName  string `json:"currentName"`
+		ProposedName string `json:"proposedName"`
+	} `json:"app"`
+	RuntimeStatus    string             `json:"runtimeStatus"`
+	Manifest         AppRenameManifest  `json:"manifest"`
+	Blockers         []AppRenameBlocker `json:"blockers"`
+	Preserved        AppRenamePreserved `json:"preserved"`
+	RecoveryGuidance string             `json:"recoveryGuidance"`
+}
+
+type AppRenamePreviewResponse struct {
+	Preview AppRenamePreview `json:"preview"`
+}
+
+type AppRenameResult struct {
+	Renamed bool `json:"renamed"`
+	App     struct {
+		ID      string `json:"id"`
+		OldName string `json:"oldName"`
+		NewName string `json:"newName"`
+	} `json:"app"`
+	ManifestPath  string             `json:"manifestPath"`
+	RuntimeStatus string             `json:"runtimeStatus"`
+	Preserved     AppRenamePreserved `json:"preserved"`
+}
+
+type AppRenameResultResponse struct {
+	Result AppRenameResult `json:"result"`
+}
+
 type LogQuery struct {
 	Limit  int
 	Before string
@@ -568,11 +682,13 @@ type RegistrationVerificationFailure struct {
 }
 
 type RegistrationRepairOption struct {
-	ID          string `json:"id"`
-	Kind        string `json:"kind"`
-	Label       string `json:"label"`
-	Recommended bool   `json:"recommended"`
-	Reason      string `json:"reason"`
+	ID                      string   `json:"id"`
+	Kind                    string   `json:"kind"`
+	Label                   string   `json:"label"`
+	Recommended             bool     `json:"recommended"`
+	Reason                  string   `json:"reason"`
+	SetupPlanID             string   `json:"setupPlanId,omitempty"`
+	StructuredInputRequired []string `json:"structuredInputRequired,omitempty"`
 }
 
 type RegistrationRepairPreviewRequest struct {
@@ -585,7 +701,9 @@ type RegistrationRepairPreviewResult struct {
 	AppID              string                         `json:"appId"`
 	RepairID           string                         `json:"repairId"`
 	Repair             RegistrationRepairOption       `json:"repair"`
+	SelectedPlan       *SetupPlan                     `json:"selectedPlan,omitempty"`
 	FileWritePlan      FileWritePlan                  `json:"fileWritePlan"`
+	LaunchCommand      string                         `json:"launchCommand,omitempty"`
 	Approval           RegistrationApproval           `json:"approval"`
 	VerificationIntent RegistrationVerificationIntent `json:"verificationIntent"`
 	Actions            []string                       `json:"actions,omitempty"`

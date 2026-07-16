@@ -57,6 +57,7 @@ type ShellData struct {
 	AssistantPrompt     string
 	AssistantHistory    []string
 	SetupPanel          string
+	SuppressEmptyState  bool
 	ContextMenu         *contextmenu.Snapshot
 	Confirmation        *ConfirmationData
 	Panes               []panes.PaneSnapshot
@@ -70,7 +71,9 @@ type ShellData struct {
 	StartCompletion     *StartCompletionData
 	ThreadSwitcher      *ThreadSwitcherData
 	CodePicker          *CodePickerData
-	RegisteredApps      *RegisteredAppsData
+	AppManager          *AppManagerData
+	PackageManager      *PackageManagerData
+	RegistrationRepairs *RegistrationRepairData
 	PaneReopen          *PaneReopenData
 	Help                *HelpData
 	Usage               *usagecomponent.Snapshot
@@ -132,16 +135,110 @@ type HelpData struct {
 	DetailOffset int
 }
 
-// RegisteredAppsData is a presentation-only projection of daemon-owned app
-// state. Starting an app remains an approval-gated root-model action.
-type RegisteredAppsData struct {
+// AppManagerData is a presentation-only projection of daemon-owned app state
+// and root-model action eligibility. It never performs lifecycle work.
+type AppManagerData struct {
 	Items            []inventory.Item
 	Selected         int
 	Offset           int
+	Mode             string
+	Surface          string
+	Actions          []AppManagerAction
+	SelectedAction   int
+	ActionOffset     int
 	ConnectionStatus string
 	StateKnown       bool
 	Refreshing       bool
 	Notice           string
+	Rename           *AppManagerRenameData
+	PackagePicker    *PackageTableData
+	PackageNameInput string
+}
+
+type AppManagerRenameData struct {
+	StableID    string
+	CurrentName string
+	InputView   string
+	Draft       string
+}
+
+type AppManagerAction struct {
+	ID             string
+	Label          string
+	Enabled        bool
+	DisabledReason string
+}
+
+// PackageTableData is the shared read-only package inventory projection used
+// by both the full package manager and the app-scoped add picker.
+type PackageTableData struct {
+	Rows       []PackageTableRow
+	Selected   int
+	Offset     int
+	PickerMode bool
+}
+
+type PackageTableRow struct {
+	ID             string
+	Name           string
+	MemberCount    int
+	Revision       int
+	LastRun        string
+	Membership     string
+	Enabled        bool
+	DisabledReason string
+}
+
+type PackageManagerData struct {
+	Surface          string
+	Table            PackageTableData
+	ConnectionStatus string
+	Refreshing       bool
+	Notice           string
+	Actions          []AppManagerAction
+	SelectedAction   int
+	ActionOffset     int
+	SelectedPackage  *PackageTableRow
+	NameInput        string
+	NameCurrent      string
+	Creating         bool
+	Members          []PackageMemberRow
+	SelectedMember   int
+	MemberOffset     int
+	Run              *PackageRunData
+	RunOffset        int
+}
+
+type PackageMemberRow struct {
+	AppID    string
+	Name     string
+	Included bool
+	Ordinal  int
+	Missing  bool
+}
+
+type PackageRunData struct {
+	ID      string
+	Status  string
+	Members []PackageRunMemberData
+}
+
+type PackageRunMemberData struct {
+	AppID string
+	State string
+}
+
+type RegistrationRepairData struct {
+	AppID    string
+	Choices  []RegistrationRepairChoice
+	Selected int
+}
+
+type RegistrationRepairChoice struct {
+	ID          string
+	Label       string
+	Reason      string
+	Recommended bool
 }
 
 // PaneReopenData is a presentation-only chooser. Selecting a row only reveals
@@ -336,16 +433,20 @@ func buildOperatorShell(style styles.Styles, data ShellData) ShellFrame {
 }
 
 func operatorPaneProjection(data ShellData) ShellData {
+	setupPanelOpen := strings.TrimSpace(data.SetupPanel) != ""
 	data.AssistantHistory = nil
 	data.Confirmation = nil
 	data.ContextMenu = nil
 	data.StartCompletion = nil
-	data.RegisteredApps = nil
+	data.AppManager = nil
+	data.PackageManager = nil
+	data.RegistrationRepairs = nil
 	data.PaneReopen = nil
 	data.Help = nil
 	data.ShowHelp = false
 	data.DiagnosticsOpen = false
 	data.SetupPanel = ""
+	data.SuppressEmptyState = setupPanelOpen
 	return data
 }
 
@@ -369,7 +470,7 @@ func renderAgentDock(style styles.Styles, data ShellData, bounds components.Rect
 func renderAgentResponseContent(style styles.Styles, data ShellData, width int, height int) string {
 	width = maxInt(1, width)
 	height = maxInt(1, height)
-	header := "Agent " + valueOr(data.ResponseState, valueOr(data.AgentStatus, "unknown"))
+	header := "Agent " + displayAgentStatus(valueOr(data.ResponseState, valueOr(data.AgentStatus, "unknown")))
 	if data.AgentThreadLabel != "" {
 		header += " • " + data.AgentThreadLabel
 	}
@@ -428,12 +529,13 @@ func InventorySelectionLine(style styles.Styles, data ShellData) int {
 const operatorRailDivider = "│"
 
 func renderOperatorRail(style styles.Styles, data ShellData, width int) string {
-	attention := diagnosticsSummary(data.Diagnostics)
+	attention := actionableDiagnosticsSummary(data.Diagnostics)
 	if attention == "" {
-		attention = "—"
+		attention = "none"
 	}
 	connection := operatorRailField(style, "Relaybase", valueOr(data.ConnectionStatus, "unknown"))
-	agent := operatorRailField(style, "Agent", valueOr(data.AgentStatus, "unknown"))
+	agentStatus := valueOr(data.AgentStatus, "unknown")
+	agent := style.Muted.Render("Agent ") + operatorRailTone(style, agentStatus).Render(displayAgentStatus(agentStatus))
 	events := operatorRailField(style, "Events", valueOr(data.EventStatus, "unknown"))
 	if data.EventCount > 0 {
 		events += style.Muted.Render(fmt.Sprintf(" (%d)", data.EventCount))
@@ -478,6 +580,11 @@ func renderOperatorRail(style styles.Styles, data ShellData, width int) string {
 	}
 
 	columnWidths := operatorRailColumnWidths(width, 5)
+	connectionSlot := firstOperatorRailCandidate(
+		maxInt(1, columnWidths[0]-1),
+		connection,
+		style.Muted.Render("Relaybase ")+operatorRailTone(style, data.ConnectionStatus).Render("online"),
+	)
 	agentSlot := firstOperatorRailCandidate(maxInt(1, columnWidths[1]-1), withOperatorRailDetail(style, agent, thread), agent)
 	appsSlot := operatorAppRailSlot(style, maxInt(1, columnWidths[2]-1), group, apps, compactApps, tightApps, minimumApps)
 	attentionSlot := firstOperatorRailCandidate(maxInt(1, columnWidths[4]-1),
@@ -487,7 +594,7 @@ func renderOperatorRail(style styles.Styles, data ShellData, width int) string {
 		compactPage,
 		attentionField,
 	)
-	return renderOperatorRailColumns(style, width, connection, agentSlot, appsSlot, events, attentionSlot)
+	return renderOperatorRailColumns(style, width, connectionSlot, agentSlot, appsSlot, events, attentionSlot)
 }
 
 func operatorAttentionTone(style styles.Styles, diagnostics []DiagnosticLine) lipgloss.Style {
@@ -522,6 +629,17 @@ func operatorRailTone(style styles.Styles, state string) lipgloss.Style {
 		return style.Muted
 	default:
 		return style.Muted
+	}
+}
+
+func displayAgentStatus(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "ready_no_thread":
+		return "ready"
+	case "needs_config":
+		return "setup needed"
+	default:
+		return valueOr(strings.TrimSpace(state), "unknown")
 	}
 }
 
@@ -732,7 +850,9 @@ func operatorOverlay(style styles.Styles, data ShellData, metrics layout.Metrics
 	case data.Confirmation != nil:
 	case data.Usage != nil:
 	case data.ContextMenu != nil:
-	case data.RegisteredApps != nil:
+	case data.AppManager != nil:
+	case data.PackageManager != nil:
+	case data.RegistrationRepairs != nil:
 	case data.PaneReopen != nil:
 	case data.Help != nil || data.ShowHelp:
 	case data.DiagnosticsOpen:
@@ -801,8 +921,10 @@ func operatorOverlay(style styles.Styles, data ShellData, metrics layout.Metrics
 			Rect: components.Rect{Width: innerWidth, Height: innerHeight},
 			Kind: components.HitResponse,
 		})
-	case data.RegisteredApps != nil:
+	case data.AppManager != nil:
 		localRegions = registeredAppHitRegions(helpProjection)
+	case data.PackageManager != nil:
+		localRegions = packageManagerHitRegions(helpProjection)
 	case data.PaneReopen != nil:
 		localRegions = paneReopenHitRegions(helpProjection)
 	case data.Help != nil:
@@ -873,8 +995,12 @@ func operatorOverlayContent(style styles.Styles, data ShellData) string {
 		return usagecomponent.Render(*data.Usage, 52, time.Now())
 	case data.ContextMenu != nil:
 		return renderContextMenu(*data.ContextMenu)
-	case data.RegisteredApps != nil:
-		return renderRegisteredAppsModal(style, data, *data.RegisteredApps)
+	case data.AppManager != nil:
+		return renderAppManagerModal(style, data, *data.AppManager)
+	case data.PackageManager != nil:
+		return renderPackageManagerModal(style, data, *data.PackageManager)
+	case data.RegistrationRepairs != nil:
+		return renderRegistrationRepairModal(style, data, *data.RegistrationRepairs)
 	case data.PaneReopen != nil:
 		return renderPaneReopenModal(style, data, *data.PaneReopen)
 	case data.Help != nil:
@@ -1113,6 +1239,9 @@ func renderPaneGrid(style styles.Styles, data ShellData) string {
 			inventoryWidth := maxInt(1, contentWidth(data.Width)-style.Body.GetHorizontalFrameSize())
 			lines = append(lines, renderInventory(style, data.Inventory, inventoryWidth)...)
 			return style.Body.Width(inventoryWidth).Render(strings.Join(lines, "\n"))
+		}
+		if data.SuppressEmptyState {
+			return ""
 		}
 		lines = append(lines, "No monitoring panes are open")
 		lines = append(lines, "")
@@ -1555,19 +1684,35 @@ func paneReopenViewportRows(shell ShellData) int {
 	return maxInt(1, maxInt(8, shell.Height-8)-7)
 }
 
-func renderRegisteredAppsModal(style styles.Styles, shell ShellData, data RegisteredAppsData) string {
+func renderAppManagerModal(style styles.Styles, shell ShellData, data AppManagerData) string {
+	if data.Surface == "rename-editor" {
+		return renderAppManagerRename(style, shell, data)
+	}
+	if data.Surface == "package-picker" {
+		return renderAppPackagePicker(style, shell, data)
+	}
+	if data.Surface == "package-create" {
+		return renderAppPackageCreate(style, shell, data)
+	}
+	if data.Surface == "actions" {
+		return renderAppManagerActions(style, shell, data)
+	}
 	width := contentWidth(shell.Width)
 	height := maxInt(8, shell.Height-8)
-	viewportHeight := registeredAppsViewportRows(shell)
+	viewportHeight := appManagerTableViewportRows(shell)
+	title := fmt.Sprintf("Manage apps — %d registered", len(data.Items))
+	if data.Mode == "start-picker" {
+		title = fmt.Sprintf("Start app — %d registered", len(data.Items))
+	}
 	lines := []string{
-		fmt.Sprintf("Registered apps — %d saved", len(data.Items)),
-		registeredAppsConnectionLine(data),
-		registeredAppsActionLine(data),
+		title,
+		appManagerConnectionLine(data),
+		appManagerActionLine(data),
 		"",
 	}
 	tableRows := registeredAppTableRows(data.Items)
 	if len(tableRows) == 0 {
-		lines[2] = registeredAppsEmptyLine(data)
+		lines[2] = appManagerEmptyLine(data)
 	}
 	lines = append(lines, renderAppTable(style, width, viewportHeight, tableRows, data.Selected, data.Offset), "")
 
@@ -1576,18 +1721,149 @@ func renderRegisteredAppsModal(style styles.Styles, shell ShellData, data Regist
 	bindings := []bubbleskey.Binding{
 		bubbleskey.NewBinding(bubbleskey.WithKeys("up", "down"), bubbleskey.WithHelp("↑↓", "select")),
 		bubbleskey.NewBinding(bubbleskey.WithKeys("pgup", "pgdown"), bubbleskey.WithHelp("pgup/pgdn", "page")),
-		bubbleskey.NewBinding(bubbleskey.WithKeys("enter"), bubbleskey.WithHelp("enter", registeredAppsEnterHelp(data))),
+		bubbleskey.NewBinding(bubbleskey.WithKeys("enter"), bubbleskey.WithHelp("enter", appManagerEnterHelp(data))),
+		bubbleskey.NewBinding(bubbleskey.WithKeys("r"), bubbleskey.WithHelp("r", "refresh")),
 		bubbleskey.NewBinding(bubbleskey.WithKeys("esc"), bubbleskey.WithHelp("esc", "close")),
 	}
 	lines = append(lines, helpModel.ShortHelpView(bindings))
 	return fixedRegion(lipgloss.NewStyle(), strings.Join(lines, "\n"), width, height)
 }
 
-func registeredAppsViewportRows(shell ShellData) int {
+func renderAppManagerRename(style styles.Styles, shell ShellData, data AppManagerData) string {
+	width := contentWidth(shell.Width)
+	height := maxInt(8, shell.Height-8)
+	rename := data.Rename
+	if rename == nil {
+		return fixedRegion(lipgloss.NewStyle(), "Rename app\nRename editor state is unavailable.\n\nEsc back", width, height)
+	}
+	name := cleanInlineText(valueOr(rename.CurrentName, rename.StableID))
+	notice := cleanInlineText(data.Notice)
+	lines := []string{
+		"Rename " + name,
+		appManagerConnectionLine(data),
+		"",
+		"Stable ID    " + cleanInlineText(rename.StableID) + " — unchanged",
+		"Current name " + name,
+		"New name     " + rename.InputView,
+		"",
+		truncateText(valueOr(notice, "Enter requests a daemon-bound preview; no mutation occurs yet."), width),
+		"",
+	}
+	helpModel := bubbleshelp.New()
+	helpModel.SetWidth(width)
+	bindings := []bubbleskey.Binding{
+		bubbleskey.NewBinding(bubbleskey.WithKeys("enter"), bubbleskey.WithHelp("enter", "preview")),
+		bubbleskey.NewBinding(bubbleskey.WithKeys("ctrl+v"), bubbleskey.WithHelp("ctrl+v", "paste")),
+		bubbleskey.NewBinding(bubbleskey.WithKeys("esc"), bubbleskey.WithHelp("esc", "back")),
+	}
+	lines = append(lines, helpModel.ShortHelpView(bindings))
+	return fixedRegion(lipgloss.NewStyle(), strings.Join(lines, "\n"), width, height)
+}
+
+func renderAppManagerActions(style styles.Styles, shell ShellData, data AppManagerData) string {
+	width := contentWidth(shell.Width)
+	height := maxInt(8, shell.Height-8)
+	item := inventory.Item{}
+	if data.Selected >= 0 && data.Selected < len(data.Items) {
+		item = data.Items[data.Selected]
+	}
+	name := cleanInlineText(valueOr(item.Name, item.ID))
+	notice := "Enter reviews or runs the selected action through its existing safety boundary."
+	if strings.TrimSpace(data.Notice) != "" {
+		notice = cleanInlineText(data.Notice)
+	}
+	lines := []string{"Manage " + name, appManagerConnectionLine(data)}
+	if height < 14 {
+		lines = append(lines,
+			truncateText("Status "+cleanInlineText(valueOr(item.Status, "unknown"))+"  |  Readiness "+cleanInlineText(valueOr(item.Readiness, "unknown")), width),
+			"Project "+shortProjectPath(item.Directory, maxInt(8, width-8)),
+		)
+	} else {
+		lines = append(lines,
+			"",
+			"Status      "+cleanInlineText(valueOr(item.Status, "unknown")),
+			"Project     "+shortProjectPath(item.Directory, maxInt(8, width-13)),
+			"Route       "+truncateText(cleanInlineText(valueOr(item.Route, "unavailable")), maxInt(8, width-13)),
+			"Readiness   "+cleanInlineText(valueOr(item.Readiness, "unknown")),
+			"",
+			truncateText(notice, width),
+			"",
+		)
+	}
+	rows := appManagerActionViewportRows(shell)
+	start := clampInt(data.ActionOffset, 0, maxInt(0, len(data.Actions)-rows))
+	end := minInt(len(data.Actions), start+rows)
+	rangeLine := fmt.Sprintf("Actions %d–%d of %d", minInt(start+1, len(data.Actions)), end, len(data.Actions))
+	if start > 0 {
+		rangeLine += fmt.Sprintf("  ↑ %d above", start)
+	}
+	if end < len(data.Actions) {
+		rangeLine += fmt.Sprintf("  ↓ %d more", len(data.Actions)-end)
+	}
+	lines = append(lines, style.Muted.Render(truncateText(rangeLine, width)))
+	for index := start; index < end; index++ {
+		action := data.Actions[index]
+		label := cleanInlineText(action.Label)
+		if !action.Enabled {
+			label += " — unavailable: " + cleanInlineText(action.DisabledReason)
+		}
+		label = truncateText(label, maxInt(1, width-2))
+		prefix := "  "
+		if index == data.SelectedAction {
+			prefix = "> "
+			label = style.PaletteSelected.Render(label)
+		} else if !action.Enabled {
+			label = style.Muted.Render(label)
+		}
+		lines = append(lines, prefix+label)
+	}
+	lines = append(lines, "", style.Muted.Render(truncateText("↑/↓ or wheel move • PgUp/PgDn page • Home/End jump • Enter select • R refresh • Esc back", width)))
+	return fixedRegion(lipgloss.NewStyle(), strings.Join(lines, "\n"), width, height)
+}
+
+func renderRegistrationRepairModal(style styles.Styles, shell ShellData, data RegistrationRepairData) string {
+	width := contentWidth(shell.Width)
+	height := maxInt(8, shell.Height-8)
+	lines := []string{
+		"Registration repairs — " + cleanInlineText(data.AppID),
+		"Choose the read-only repair preview to inspect.",
+		"",
+	}
+	for index, choice := range data.Choices {
+		label := cleanInlineText(choice.Label)
+		if choice.Recommended {
+			label += " [recommended]"
+		}
+		prefix := "  "
+		if index == data.Selected {
+			prefix = "> "
+			label = style.PaletteSelected.Render(label)
+		}
+		lines = append(lines, prefix+label)
+		if reason := cleanInlineText(choice.Reason); reason != "" {
+			lines = append(lines, "    "+truncateText(reason, maxInt(1, width-4)))
+		}
+	}
+	lines = append(lines, "", style.Muted.Render("↑↓ select • Enter preview • Esc close"))
+	return fixedRegion(lipgloss.NewStyle(), strings.Join(lines, "\n"), width, height)
+}
+
+func appManagerTableViewportRows(shell ShellData) int {
 	return maxInt(1, maxInt(8, shell.Height-8)-7)
 }
 
-func registeredAppsConnectionLine(data RegisteredAppsData) string {
+func appManagerActionViewportRows(shell ShellData) int {
+	return maxInt(1, maxInt(8, shell.Height-8)-14)
+}
+
+func appManagerActionStartY(shell ShellData) int {
+	if maxInt(8, shell.Height-8) < 14 {
+		return 5
+	}
+	return 11
+}
+
+func appManagerConnectionLine(data AppManagerData) string {
 	switch data.ConnectionStatus {
 	case "offline":
 		if len(data.Items) > 0 {
@@ -1607,15 +1883,21 @@ func registeredAppsConnectionLine(data RegisteredAppsData) string {
 	return "Loading registered apps from the Relaybase daemon…"
 }
 
-func registeredAppsActionLine(data RegisteredAppsData) string {
+func appManagerActionLine(data AppManagerData) string {
 	if strings.TrimSpace(data.Notice) != "" {
 		return cleanInlineText(data.Notice)
 	}
 	if data.ConnectionStatus != "connected" {
+		if data.Mode == "manage" {
+			return "Daemon-backed actions are unavailable; routes remain copyable when last-known data exists."
+		}
 		return "Start is unavailable until the Relaybase daemon is connected."
 	}
 	if len(data.Items) == 0 || data.Selected < 0 || data.Selected >= len(data.Items) {
 		return "Use /register <path> or /add <path> to register an app."
+	}
+	if data.Mode == "manage" {
+		return "Enter opens management actions for the selected app."
 	}
 	item := data.Items[data.Selected]
 	status := strings.ToLower(strings.TrimSpace(item.Status))
@@ -1633,9 +1915,12 @@ func registeredAppsActionLine(data RegisteredAppsData) string {
 	}
 }
 
-func registeredAppsEnterHelp(data RegisteredAppsData) string {
+func appManagerEnterHelp(data AppManagerData) string {
 	if data.Selected < 0 || data.Selected >= len(data.Items) {
 		return "unavailable"
+	}
+	if data.Mode == "manage" {
+		return "actions"
 	}
 	switch strings.ToLower(strings.TrimSpace(data.Items[data.Selected].Status)) {
 	case "running":
@@ -1647,7 +1932,7 @@ func registeredAppsEnterHelp(data RegisteredAppsData) string {
 	}
 }
 
-func registeredAppsEmptyLine(data RegisteredAppsData) string {
+func appManagerEmptyLine(data AppManagerData) string {
 	if data.ConnectionStatus == "connected" && data.StateKnown {
 		return "No registered apps. Use /register <path> or /add <path>."
 	}
@@ -1763,6 +2048,17 @@ func diagnosticsSummary(diagnostics []DiagnosticLine) string {
 		parts = append(parts, fmt.Sprintf("%dI", info))
 	}
 	return strings.Join(parts, "/")
+}
+
+func actionableDiagnosticsSummary(diagnostics []DiagnosticLine) string {
+	actionable := make([]DiagnosticLine, 0, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		severity := strings.ToLower(strings.TrimSpace(diagnostic.Severity))
+		if severity == "error" || severity == "warning" || severity == "warn" {
+			actionable = append(actionable, diagnostic)
+		}
+	}
+	return diagnosticsSummary(actionable)
 }
 
 // BodyScrollMax returns the maximum safe body offset for keyboard navigation.
@@ -1937,7 +2233,7 @@ func renderHelp(data ShellData) string {
 	lines = append(lines, "- /unpin <pane>")
 	lines = append(lines, "- /theme <light|dark|auto>")
 	lines = append(lines, "- /help")
-	lines = append(lines, "- /list")
+	lines = append(lines, "- /manage")
 	lines = append(lines, "- /daemon status")
 	lines = append(lines, "- /daemon repair")
 	lines = append(lines, "- /thread list")

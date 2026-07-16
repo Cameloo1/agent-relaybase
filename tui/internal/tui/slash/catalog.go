@@ -17,8 +17,11 @@ type CommandDescriptor struct {
 	Examples    []string
 	Keywords    []string
 	Aliases     []string
-	Category    string
-	Approval    bool
+	// CompatibilityAliases participate in parsing, prefix recognition, and
+	// completion without being presented as normal user-facing commands.
+	CompatibilityAliases []string
+	Category             string
+	Approval             bool
 	// ConfirmationPolicy makes conditional commands honest in help while
 	// Approval remains the representative-example compatibility flag.
 	ConfirmationPolicy ConfirmationPolicy
@@ -52,13 +55,13 @@ var commandCatalog = []CommandDescriptor{
 	descriptor(KindUnpin, "/unpin", "/unpin ", "layout", false, "Unpin a pane from the dashboard layout.", []string{"/unpin <pane>"}, []string{"/unpin current"}, []string{"release", "layout"}),
 	descriptor(KindTheme, "/theme", "/theme ", "layout", false, "Choose the light, dark, or automatic TUI theme.", []string{"/theme <light|dark|auto>"}, []string{"/theme dark"}, []string{"appearance", "color"}),
 	descriptor(KindHelp, "/help", "/help", "help", false, "Open searchable command help.", []string{"/help"}, []string{"/help"}, []string{"commands", "documentation"}),
-	descriptor(KindList, "/list", "/list", "inventory", false, "Open the registered app launcher.", []string{"/list"}, []string{"/list"}, []string{"apps", "registered", "saved", "start", "launcher"}),
+	withCompatibilityAliases(descriptor(KindManage, "/manage", "/manage", "inventory", false, "Manage registered apps through daemon-backed actions.", []string{"/manage"}, []string{"/manage"}, []string{"apps", "registered", "saved", "start", "stop", "restart", "unregister"}), "/list"),
 	descriptor(KindConfirm, "/confirm", "/confirm", "safety", false, "Confirm the currently pending Relaybase action.", []string{"/confirm"}, []string{"/confirm"}, []string{"approve", "continue"}),
 	descriptor(KindCancel, "/cancel", "/cancel", "safety", false, "Cancel the currently pending Relaybase action.", []string{"/cancel"}, []string{"/cancel"}, []string{"reject", "abort"}),
 	descriptor(KindDaemonStatus, "/daemon status", "/daemon status", "daemon", false, "Show the current Relaybase daemon connection status.", []string{"/daemon status"}, []string{"/daemon status"}, []string{"offline", "connection"}),
 	withAliases(descriptor(KindDaemonRepair, "/daemon repair", "/daemon repair", "daemon", true, "Request a safe daemon repair or reconnect through the launch bridge.", []string{"/daemon repair", "/daemon retry"}, []string{"/daemon repair"}, []string{"reconnect", "fix"}), "/daemon retry"),
 	descriptor(KindCreatePackage, "/create-package", "/create-package ", "packages", false, "Create a durable named package from an ordered list of registered apps.", []string{"/create-package {'Registered App','Other App'} 'package-name'"}, []string{"/create-package {'Notes','Notes API'} 'notes-stack'"}, []string{"bundle", "group", "apps"}),
-	descriptor(KindPackages, "/packages", "/packages", "packages", false, "List saved app packages and their most recent run.", []string{"/packages"}, []string{"/packages"}, []string{"bundle", "saved apps"}),
+	descriptor(KindPackages, "/packages", "/packages", "packages", false, "Manage saved app packages, ordered members, and recent runs.", []string{"/packages"}, []string{"/packages"}, []string{"bundle", "saved apps"}),
 	descriptor(KindLaunchPackage, "/launch-package", "/launch-package ", "packages", true, "Start every eligible app in a saved package through daemon lifecycle operations.", []string{"/launch-package <package-name>"}, []string{"/launch-package 'notes-stack'"}, []string{"bundle", "start apps"}),
 	descriptor(KindDeletePackage, "/delete-package", "/delete-package ", "packages", true, "Delete a saved package definition without stopping its apps.", []string{"/delete-package <package-name>"}, []string{"/delete-package 'notes-stack'"}, []string{"bundle", "remove"}),
 	descriptor(KindPackageRunRetry, "/package-run retry", "/package-run retry ", "packages", true, "Retry only failed or interrupted members from a package run.", []string{"/package-run retry <run-id>"}, []string{"/package-run retry pkg_run_123"}, []string{"resume", "failed apps"}),
@@ -104,6 +107,11 @@ func withAliases(value CommandDescriptor, aliases ...string) CommandDescriptor {
 	return value
 }
 
+func withCompatibilityAliases(value CommandDescriptor, aliases ...string) CommandDescriptor {
+	value.CompatibilityAliases = aliases
+	return value
+}
+
 // Catalog returns a deep copy so callers cannot mutate the shared catalog.
 func Catalog() []CommandDescriptor {
 	result := make([]CommandDescriptor, len(commandCatalog))
@@ -130,7 +138,9 @@ func IsKnownPrefix(raw string) bool {
 		return false
 	}
 	for _, value := range commandCatalog {
-		for _, candidate := range append([]string{value.Canonical}, value.Aliases...) {
+		candidates := append([]string{value.Canonical}, value.Aliases...)
+		candidates = append(candidates, value.CompatibilityAliases...)
+		for _, candidate := range candidates {
 			candidate = normalizeCatalogText(candidate)
 			if query == candidate || strings.HasPrefix(query, candidate+" ") {
 				return true
@@ -183,7 +193,8 @@ func SearchCatalog(query string) []CommandMatch {
 
 func descriptorScore(value CommandDescriptor, normalized string, tokens []string) (int, bool) {
 	primary := append([]string{value.Canonical}, value.Usages...)
-	secondary := append(append([]string{}, value.Aliases...), value.Keywords...)
+	secondary := append(append([]string{}, value.Aliases...), value.CompatibilityAliases...)
+	secondary = append(secondary, value.Keywords...)
 	score := 0
 	for _, token := range tokens {
 		best := bestFieldScore(token, primary, 300)
@@ -199,6 +210,14 @@ func descriptorScore(value CommandDescriptor, normalized string, tokens []string
 		score += 1000
 	} else if strings.HasPrefix(canonical, normalized) {
 		score += 500
+	}
+	for _, alias := range value.CompatibilityAliases {
+		alias = normalizeCatalogText(alias)
+		if alias == normalized {
+			score += 1000
+		} else if strings.HasPrefix(alias, normalized) {
+			score += 700
+		}
 	}
 	return score, true
 }
@@ -263,6 +282,7 @@ func cloneDescriptor(value CommandDescriptor) CommandDescriptor {
 	value.Examples = append([]string(nil), value.Examples...)
 	value.Keywords = append([]string(nil), value.Keywords...)
 	value.Aliases = append([]string(nil), value.Aliases...)
+	value.CompatibilityAliases = append([]string(nil), value.CompatibilityAliases...)
 	return value
 }
 

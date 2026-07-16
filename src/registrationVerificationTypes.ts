@@ -54,7 +54,12 @@ export interface RegistrationVerificationFailure {
   logExcerpt: string[];
 }
 
-export type RegistrationRepairKind = "health_route" | "dynamic_binding" | "pinned_port" | "manual_launch";
+export type RegistrationRepairKind =
+  | "health_route"
+  | "dynamic_binding"
+  | "pinned_port"
+  | "setup_plan"
+  | "manual_launch";
 
 export interface RegistrationRepairOption {
   id: string;
@@ -64,6 +69,7 @@ export interface RegistrationRepairOption {
   previewOnly: true;
   approvalRequired: true;
   patch?: Record<string, unknown>;
+  setupPlanId?: string;
   structuredInputRequired?: Array<"executable" | "arguments" | "portBinding" | "healthRoute">;
   reason: string;
 }

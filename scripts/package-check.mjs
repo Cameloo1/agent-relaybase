@@ -48,6 +48,7 @@ export function runPackageCheck(args = process.argv.slice(2), options = {}) {
       file.startsWith("dist/") ||
       file.includes(".tmp-go-cache") ||
       file === "docs/relaybase-release-roadmap.md" ||
+      file === "docs/register-verification-repair-plan.md" ||
       file === "docs/tui-setup-gap-map.md" ||
       file.startsWith("bin/relaybase-tui/relaybase-tui-")
   );

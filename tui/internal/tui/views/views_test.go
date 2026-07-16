@@ -414,7 +414,7 @@ func TestNoPaneInventoryAndListModalShareRegisteredAppTableProjection(t *testing
 	noPane := base
 	noPane.Inventory = items
 	modal := base
-	modal.RegisteredApps = &RegisteredAppsData{Items: items, Selected: 0, ConnectionStatus: "connected", StateKnown: true}
+	modal.AppManager = &AppManagerData{Items: items, Selected: 0, Mode: "manage", Surface: "table", ConnectionStatus: "connected", StateKnown: true}
 
 	noPaneSnapshot := compactSnapshot(RenderShell(style, noPane))
 	modalSnapshot := compactSnapshot(RenderShell(style, modal))
@@ -423,7 +423,7 @@ func TestNoPaneInventoryAndListModalShareRegisteredAppTableProjection(t *testing
 			t.Fatalf("no-pane inventory missing shared table projection %q:\n%s", expected, noPaneSnapshot)
 		}
 		if !strings.Contains(modalSnapshot, expected) {
-			t.Fatalf("/list modal missing shared table projection %q:\n%s", expected, modalSnapshot)
+			t.Fatalf("/manage modal missing shared table projection %q:\n%s", expected, modalSnapshot)
 		}
 	}
 }
@@ -442,19 +442,21 @@ func TestRegisteredAppsModalIsDedicatedAndInteractive(t *testing.T) {
 		StateKnown:       true,
 		KeyMap:           keymap.Default(),
 		AssistantPrompt:  "> _",
-		RegisteredApps: &RegisteredAppsData{
+		AppManager: &AppManagerData{
 			Items: []inventory.Item{
 				{ID: "api", Name: "API", Directory: `C:\work\api`, Status: "running", Route: "http://api.localhost:7777"},
 				{ID: "worker", Name: "Worker", Directory: `C:\work\worker`, Status: "stopped", Readiness: "ready", LastError: "previous exit", Selected: true},
 			},
 			Selected:         1,
+			Mode:             "manage",
+			Surface:          "table",
 			ConnectionStatus: "connected",
 			StateKnown:       true,
 		},
 		PageCount: 1,
 	}
 	snapshot := compactSnapshot(RenderShell(style, data))
-	for _, required := range []string{"Registered apps 2 saved", "Name Project Status", "API C:/work/api running", "Worker C:/work/worker stopped", "Enter reviews", "review start"} {
+	for _, required := range []string{"Manage apps 2 registered", "Name Project Status", "API C:/work/api running", "Worker C:/work/worker stopped", "Enter opens management actions", "actions"} {
 		if !strings.Contains(snapshot, required) {
 			t.Fatalf("registered app modal missing %q:\n%s", required, snapshot)
 		}
@@ -476,6 +478,193 @@ func TestRegisteredAppsModalIsDedicatedAndInteractive(t *testing.T) {
 	}
 	if rowRegions != 2 {
 		t.Fatalf("registered app modal has %d row hit regions, want 2: %#v", rowRegions, frame.HitMap.Regions())
+	}
+}
+
+func TestAppManagerActionViewIsReadableSanitizedAndTextExplicit(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	style := styles.New(theme)
+	data := ShellData{
+		OperatorConsole: true, Width: 110, Height: 32, ComposerRows: 1,
+		ConnectionStatus: "connected", EventStatus: "connected", AgentStatus: "idle", StateKnown: true,
+		KeyMap: keymap.Default(), AssistantPrompt: "> _", PageCount: 1,
+		AppManager: &AppManagerData{
+			Mode: "manage", Surface: "actions", Selected: 0, SelectedAction: 1,
+			ConnectionStatus: "connected", StateKnown: true,
+			Items: []inventory.Item{{
+				ID: "worker", Name: "Worker\nInjected", Directory: "C:\\work\\worker\x1b[31m", Status: "stopped",
+				Readiness: "ready\rspoof", Route: "http://worker.localhost:7777\nsecret",
+			}},
+			Actions: []AppManagerAction{
+				{ID: "open", Label: "Open monitoring pane", DisabledReason: "No monitoring pane is available."},
+				{ID: "start", Label: "Start app", Enabled: true},
+				{ID: "unregister", Label: "Unregister app", Enabled: true},
+			},
+		},
+	}
+	snapshot := compactSnapshot(RenderShell(style, data))
+	for _, required := range []string{
+		"Manage Worker Injected", "Status stopped", "Project C:/work/worker", "Route http://worker.localhost:7777 secret",
+		"Readiness ready spoof", "Open monitoring pane unavailable: No monitoring pane is available.", "Start app", "Unregister app", "Enter select", "back",
+	} {
+		if !strings.Contains(snapshot, required) {
+			t.Fatalf("manager action view missing %q:\n%s", required, snapshot)
+		}
+	}
+	if strings.Contains(snapshot, "\x1b") || strings.Contains(snapshot, "\nsecret") {
+		t.Fatalf("manager action view retained unsafe control text:\n%s", snapshot)
+	}
+	frame := BuildShell(style, data)
+	actionRegions := 0
+	for _, region := range frame.HitMap.Regions() {
+		if region.Kind == components.HitAppManagerAction {
+			actionRegions++
+		}
+	}
+	if actionRegions != 3 {
+		t.Fatalf("manager action view has %d action hit regions, want 3: %#v", actionRegions, frame.HitMap.Regions())
+	}
+}
+
+func TestPackageTableAndEveryManagerSurfaceRenderAtNarrowHeights(t *testing.T) {
+	theme, _ := styles.ResolveTheme("dark", func(string) string { return "" })
+	style := styles.New(theme)
+	base := ShellData{
+		OperatorConsole: true, Width: 88, Height: 18, ComposerRows: 1,
+		ConnectionStatus: "connected", EventStatus: "connected", AgentStatus: "idle", StateKnown: true,
+		KeyMap: keymap.Default(), AssistantPrompt: "> _", PageCount: 1,
+	}
+	rows := []PackageTableRow{
+		{ID: "pkg_web", Name: "Web\nstack", MemberCount: 3, Revision: 2, LastRun: "succeeded", Enabled: true},
+		{ID: "pkg_api", Name: "API services\x1b[31m", MemberCount: 4, Revision: 5, LastRun: "running", Enabled: true},
+	}
+
+	t.Run("manager table", func(t *testing.T) {
+		data := base
+		data.PackageManager = &PackageManagerData{Surface: "table", ConnectionStatus: "connected", Table: PackageTableData{Rows: rows}}
+		snapshot := compactSnapshot(RenderShell(style, data))
+		for _, required := range []string{"Packages 2 saved", "Name Apps Last run", "Web stack", "succeeded", "N new"} {
+			if !strings.Contains(snapshot, required) {
+				t.Fatalf("package table missing %q:\n%s", required, snapshot)
+			}
+		}
+		if strings.Contains(snapshot, "\x1b[31m") {
+			t.Fatalf("package table retained daemon-provided terminal control text")
+		}
+	})
+
+	t.Run("short actions", func(t *testing.T) {
+		data := base
+		data.PackageManager = &PackageManagerData{
+			Surface: "actions", ConnectionStatus: "connected", Table: PackageTableData{Rows: rows}, SelectedPackage: &rows[0],
+			Actions: []AppManagerAction{{ID: "launch", Label: "Launch package", Enabled: true}, {ID: "delete", Label: "Delete package", Enabled: true}},
+		}
+		snapshot := compactSnapshot(RenderShell(style, data))
+		for _, required := range []string{"Manage Web stack", "Revision 2", "Actions 1", "Launch package", "more"} {
+			if !strings.Contains(snapshot, required) {
+				t.Fatalf("short package actions missing %q:\n%s", required, snapshot)
+			}
+		}
+		frame := BuildShell(style, data)
+		count := 0
+		for _, region := range frame.HitMap.Regions() {
+			if region.Kind == components.HitPackageAction {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("short package actions exposed %d hit rows, want visible slice of 1: %#v", count, frame.HitMap.Regions())
+		}
+	})
+
+	t.Run("name editor", func(t *testing.T) {
+		data := base
+		data.PackageManager = &PackageManagerData{Surface: "name", ConnectionStatus: "connected", NameCurrent: "Web stack", NameInput: "Web workspace", Notice: "Stable id preserved."}
+		snapshot := compactSnapshot(RenderShell(style, data))
+		for _, required := range []string{"Rename package", "Current name Web stack", "New name Web workspace", "Enter preview"} {
+			if !strings.Contains(snapshot, required) {
+				t.Fatalf("package name editor missing %q:\n%s", required, snapshot)
+			}
+		}
+	})
+
+	t.Run("membership editor", func(t *testing.T) {
+		data := base
+		data.PackageManager = &PackageManagerData{
+			Surface: "members", ConnectionStatus: "connected", SelectedMember: 1,
+			Members: []PackageMemberRow{{AppID: "notes", Name: "Notes", Included: true, Ordinal: 1}, {AppID: "missing", Name: "missing", Included: true, Ordinal: 2, Missing: true}, {AppID: "worker", Name: "Worker"}},
+		}
+		snapshot := compactSnapshot(RenderShell(style, data))
+		for _, required := range []string{"Edit package apps and launch order", "Notes [notes]", "more", "Space add/remove"} {
+			if !strings.Contains(snapshot, required) {
+				t.Fatalf("package membership editor missing %q:\n%s", required, snapshot)
+			}
+		}
+		data.PackageManager.MemberOffset = 1
+		scrolled := compactSnapshot(RenderShell(style, data))
+		if !strings.Contains(scrolled, "missing registration") || !strings.Contains(scrolled, "above") {
+			t.Fatalf("scrolled membership editor lost missing stored member or range state:\n%s", scrolled)
+		}
+	})
+
+	t.Run("scrollable run", func(t *testing.T) {
+		data := base
+		members := make([]PackageRunMemberData, 0, 8)
+		for index := 0; index < 8; index++ {
+			members = append(members, PackageRunMemberData{AppID: fmt.Sprintf("app-%d", index+1), State: "started"})
+		}
+		data.PackageManager = &PackageManagerData{Surface: "run", ConnectionStatus: "connected", Run: &PackageRunData{ID: "run-1", Status: "partial", Members: members}}
+		snapshot := compactSnapshot(RenderShell(style, data))
+		for _, required := range []string{"Latest package run", "Run ID run-1", "Members 1", "more", "wheel scroll"} {
+			if !strings.Contains(snapshot, required) {
+				t.Fatalf("package run surface missing %q:\n%s", required, snapshot)
+			}
+		}
+	})
+
+	t.Run("app add picker", func(t *testing.T) {
+		data := base
+		pickerRows := append([]PackageTableRow(nil), rows...)
+		pickerRows[0].Enabled = false
+		pickerRows[0].DisabledReason = "already included"
+		data.AppManager = &AppManagerData{
+			Mode: "manage", Surface: "package-picker", Selected: 0, Items: []inventory.Item{{ID: "notes", Name: "Notes"}},
+			PackagePicker: &PackageTableData{Rows: pickerRows, PickerMode: true}, ConnectionStatus: "connected", StateKnown: true,
+		}
+		snapshot := compactSnapshot(RenderShell(style, data))
+		for _, required := range []string{"Add Notes to a package", "Membership", "already included", "N new package"} {
+			if !strings.Contains(snapshot, required) {
+				t.Fatalf("app package picker missing %q:\n%s", required, snapshot)
+			}
+		}
+	})
+}
+
+func TestRegistrationRepairModalShowsReadableOrderedChoices(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	style := styles.New(theme)
+	data := ShellData{
+		OperatorConsole: true, Width: 100, Height: 30, ComposerRows: 1,
+		ConnectionStatus: "connected", EventStatus: "connected", AgentStatus: "idle", StateKnown: true,
+		KeyMap: keymap.Default(), AssistantPrompt: "> _", PageCount: 1,
+		RegistrationRepairs: &RegistrationRepairData{
+			AppID: "static-repair", Selected: 1,
+			Choices: []RegistrationRepairChoice{
+				{ID: "setup", Label: "Use Static build preview", Reason: "Serve the detected static assets.", Recommended: true},
+				{ID: "pinned", Label: "Use pinned upstream port", Reason: "Keep the explicitly configured port."},
+			},
+		},
+	}
+	snapshot := compactSnapshot(RenderShell(style, data))
+	for _, required := range []string{
+		"Registration repairs static-repair",
+		"Use Static build preview [recommended]",
+		"Use pinned upstream port",
+		"Enter preview",
+	} {
+		if !strings.Contains(snapshot, required) {
+			t.Fatalf("registration repair modal missing %q:\n%s", required, snapshot)
+		}
 	}
 }
 
@@ -561,7 +750,7 @@ func TestRegisteredAppTableDisambiguatesDuplicateNames(t *testing.T) {
 		OperatorConsole: true, Width: 100, Height: 30, ComposerRows: 1,
 		ConnectionStatus: "connected", EventStatus: "connected", AgentStatus: "idle", StateKnown: true,
 		KeyMap: keymap.Default(), AssistantPrompt: "> _", PageCount: 1,
-		RegisteredApps: &RegisteredAppsData{ConnectionStatus: "connected", StateKnown: true, Items: []inventory.Item{
+		AppManager: &AppManagerData{Mode: "manage", Surface: "table", ConnectionStatus: "connected", StateKnown: true, Items: []inventory.Item{
 			{ID: "service-api", Name: "Service", Status: "running"},
 			{ID: "service-worker", Name: "Service", Status: "stopped"},
 		}},
@@ -586,13 +775,15 @@ func TestRegisteredAppsModalHasExplicitEmptyAndOfflineState(t *testing.T) {
 		AgentStatus:      "waiting",
 		KeyMap:           keymap.Default(),
 		AssistantPrompt:  "> _",
-		RegisteredApps: &RegisteredAppsData{
+		AppManager: &AppManagerData{
+			Mode:             "manage",
+			Surface:          "table",
 			ConnectionStatus: "offline",
 		},
 		PageCount: 1,
 	}
 	snapshot := compactSnapshot(RenderShell(styles.New(theme), data))
-	for _, required := range []string{"Registered apps 0 saved", "Daemon offline", "/daemon repair", "cannot be loaded"} {
+	for _, required := range []string{"Manage apps 0 registered", "Daemon offline", "/daemon repair", "cannot be loaded"} {
 		if !strings.Contains(snapshot, required) {
 			t.Fatalf("offline empty registered-app modal missing %q:\n%s", required, snapshot)
 		}

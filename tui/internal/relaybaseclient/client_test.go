@@ -2,10 +2,12 @@ package relaybaseclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,6 +67,91 @@ func TestQueryLogsSuccess(t *testing.T) {
 	}
 	if string(snapshot.Page.NextBefore) != "1" {
 		t.Fatalf("numeric nextBefore did not decode as cursor string: %#v", snapshot.Page)
+	}
+}
+
+func TestAppUnregisterClientUsesPreviewAndConfirmedApplyRoutes(t *testing.T) {
+	requests := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.EscapedPath())
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Fatalf("missing authorization header")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = w.Write([]byte(`{"preview":{"app":{"id":"notes worker","name":"Notes Worker","projectDirectory":"C:/work/notes"},"runtimeStatus":"stopped","canUnregister":true,"blockers":[],"packageReferences":[],"preserved":{"projectFiles":true,"manifest":true,"logs":true,"operationHistory":true}}}`))
+		case http.MethodPost:
+			var body map[string]bool
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["confirm"] != true {
+				t.Fatalf("unregister apply body=%#v", body)
+			}
+			_, _ = w.Write([]byte(`{"result":{"unregistered":true,"app":{"id":"notes worker","name":"Notes Worker","projectDirectory":"C:/work/notes"},"runtimeStatus":"stopped","preserved":{"projectFiles":true,"manifest":true,"logs":true,"operationHistory":true}}}`))
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "test-token", server.Client())
+	preview, err := client.PreviewAppUnregister(context.Background(), "notes worker")
+	if err != nil || !preview.CanUnregister || preview.App.ID != "notes worker" || !preview.Preserved.OperationHistory {
+		t.Fatalf("preview=%#v err=%v", preview, err)
+	}
+	result, err := client.UnregisterApp(context.Background(), "notes worker")
+	if err != nil || !result.Unregistered || result.App.ID != "notes worker" || !result.Preserved.Logs {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	want := []string{"GET /__hub/api/apps/notes%20worker/unregister", "POST /__hub/api/apps/notes%20worker/unregister"}
+	if !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests=%#v want=%#v", requests, want)
+	}
+}
+
+func TestAppRenameClientUsesPreviewBoundApplyRoutes(t *testing.T) {
+	requests := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.EscapedPath())
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Fatalf("missing authorization header")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		switch r.URL.Path {
+		case "/__hub/api/apps/notes worker/rename/preview":
+			if body["name"] != "Notes API" || len(body) != 1 {
+				t.Fatalf("rename preview body=%#v", body)
+			}
+			_, _ = w.Write([]byte(`{"preview":{"previewId":"rename-1","canRename":true,"noop":false,"app":{"id":"notes worker","currentName":"Notes","proposedName":"Notes API"},"runtimeStatus":"running","manifest":{"changes":[{"field":"name","before":"Notes","after":"Notes API"}],"displayNameBehavior":"inherited"},"blockers":[],"preserved":{"stableAppId":"notes worker","route":"http://notes-worker.localhost:7777","runningProcess":true,"packages":true,"logs":true,"operationHistory":true,"automation":true},"recoveryGuidance":"confirm"}}`))
+		case "/__hub/api/apps/notes worker/rename/apply":
+			if body["previewId"] != "rename-1" || body["confirm"] != true || len(body) != 2 {
+				t.Fatalf("rename apply body=%#v", body)
+			}
+			_, _ = w.Write([]byte(`{"result":{"renamed":true,"app":{"id":"notes worker","oldName":"Notes","newName":"Notes API"},"manifestPath":"C:/work/notes/relaybase.app.json","runtimeStatus":"running","preserved":{"stableAppId":"notes worker","route":"http://notes-worker.localhost:7777","runningProcess":true,"packages":true,"logs":true,"operationHistory":true,"automation":true}}}`))
+		default:
+			t.Fatalf("unexpected rename route %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "test-token", server.Client())
+	preview, err := client.PreviewAppRename(context.Background(), "notes worker", "Notes API")
+	if err != nil || preview.PreviewID != "rename-1" || preview.App.ProposedName != "Notes API" || !preview.Preserved.RunningProcess {
+		t.Fatalf("preview=%#v err=%v", preview, err)
+	}
+	result, err := client.RenameApp(context.Background(), "notes worker", preview.PreviewID)
+	if err != nil || !result.Renamed || result.App.NewName != "Notes API" || result.App.ID != "notes worker" {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	want := []string{"POST /__hub/api/apps/notes%20worker/rename/preview", "POST /__hub/api/apps/notes%20worker/rename/apply"}
+	if !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests=%#v want=%#v", requests, want)
 	}
 }
 

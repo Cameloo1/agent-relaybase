@@ -100,8 +100,9 @@ const registrationBindings = new Map<string, RegistrationBinding>();
 interface RegistrationRepairBinding {
   preview: RegistrationRepairPreviewResult;
   manifestPath: string;
-  patch: Record<string, unknown>;
+  writePaths: string[];
   revision: string;
+  healthCandidates: string[];
   createdAt: number;
 }
 const registrationRepairBindings = new Map<string, RegistrationRepairBinding>();
@@ -862,7 +863,7 @@ export async function previewRegistrationRepair(
       }
     );
   }
-  if (!repair.patch) {
+  if (!repair.patch && !(repair.kind === "setup_plan" && repair.setupPlanId)) {
     throw new SetupApiRequestError(
       409,
       "REGISTER_REPAIR_INPUT_REQUIRED",
@@ -874,20 +875,51 @@ export async function previewRegistrationRepair(
       }
     );
   }
-  const patchPlan = await buildManifestPatchPlan({ cwd: app.cwd, manifestPath: app.manifestPath, patch: repair.patch });
-  const revision = await registrationRevision(app.manifestPath, [app.manifestPath]);
+  let fileWritePlan: RegistrationRepairPreviewResult["fileWritePlan"];
+  let resultingApp: AppRecord;
+  let selectedPlan: SetupPlan | undefined;
+  if (repair.kind === "setup_plan" && repair.setupPlanId) {
+    const setup = await previewSetup({ cwd: app.cwd, selectedPlanId: repair.setupPlanId });
+    const plannedManifestPath = path.join(setup.cwd, MANIFEST_FILE);
+    if (path.resolve(plannedManifestPath) !== path.resolve(app.manifestPath)) {
+      throw new SetupApiRequestError(
+        409,
+        "REGISTER_REPAIR_MANIFEST_MISMATCH",
+        "The detected setup repair does not target the registered manifest.",
+        { retryable: true, userAction: "Generate a new registration preview for the project root." }
+      );
+    }
+    resultingApp = normalizeManifest(setup.selectedPlan.manifest, { manifestPath: app.manifestPath });
+    fileWritePlan = setup.fileWritePlan;
+    selectedPlan = setup.selectedPlan;
+  } else {
+    const patchPlan = await buildManifestPatchPlan({
+      cwd: app.cwd,
+      manifestPath: app.manifestPath,
+      patch: repair.patch ?? {}
+    });
+    resultingApp = normalizeManifest(patchPlan.patchedManifest, { manifestPath: app.manifestPath });
+    fileWritePlan = patchPlan.fileWritePlan;
+  }
+  const writePaths = fileWritePlan.writes.map((write) => write.path);
+  const revision = await registrationRevision(app.manifestPath, writePaths);
   const previewId = `repair_${createHash("sha256")
-    .update(JSON.stringify({ appId, repairId, repair, revision, patchPlan: patchPlan.fileWritePlan }))
+    .update(JSON.stringify({ appId, repairId, repair, revision, fileWritePlan }))
     .digest("hex")
     .slice(0, 24)}`;
   const policy = { ...DEFAULT_REGISTRATION_VERIFICATION_POLICY };
-  const healthCandidates = registrationHealthCandidates(app, [String(repair.patch.healthUrl ?? "")]);
+  const healthCandidates = registrationHealthCandidates(resultingApp, [
+    String(repair.patch?.healthUrl ?? ""),
+    ...(selectedPlan?.choice.runtimeHealthCandidates?.map((candidate) => candidate.path) ?? [])
+  ]);
   const preview: RegistrationRepairPreviewResult = {
     previewId,
     appId,
     repairId,
     repair,
-    fileWritePlan: patchPlan.fileWritePlan,
+    ...(selectedPlan ? { selectedPlan } : {}),
+    fileWritePlan,
+    launchCommand: registrationLaunchCommand(resultingApp),
     approval: { required: true, previewId },
     verificationIntent: verificationIntent(policy, healthCandidates),
     actions: ["Confirm repair and verify", "Review manifest diff", "View logs", "Cancel"]
@@ -895,8 +927,9 @@ export async function previewRegistrationRepair(
   registrationRepairBindings.set(previewId, {
     preview,
     manifestPath: app.manifestPath,
-    patch: repair.patch,
+    writePaths,
     revision,
+    healthCandidates,
     createdAt: Date.now()
   });
   return preview;
@@ -921,7 +954,7 @@ export async function applyRegistrationRepair(
       }
     );
   }
-  const currentRevision = await registrationRevision(binding.manifestPath, [binding.manifestPath]);
+  const currentRevision = await registrationRevision(binding.manifestPath, binding.writePaths);
   if (currentRevision !== binding.revision) {
     registrationRepairBindings.delete(request.previewId);
     throw new SetupApiRequestError(409, "REGISTER_REPAIR_PREVIEW_STALE", "Repair preview is stale.", {
@@ -938,24 +971,19 @@ export async function applyRegistrationRepair(
       { retryable: true, userAction: "Resolve the remaining process or port before retrying." }
     );
   }
-  const patched = await applyManifestPatch({
-    cwd: path.dirname(binding.manifestPath),
-    manifestPath: binding.manifestPath,
-    patch: binding.patch,
-    confirm: true
-  });
+  const appliedFiles = await applyRegistrationRepairFilePlan(binding.preview.fileWritePlan);
   const app = await runtime.registry.upsertManifest(await readManifestFile(binding.manifestPath), {
     manifestPath: binding.manifestPath
   });
   runtime.events.publish({ type: "app.registered", appId: app.id, correlationId, data: appRecordEventData(app) });
-  const revision = await registrationRevision(binding.manifestPath, [binding.manifestPath]);
+  const revision = await registrationRevision(binding.manifestPath, binding.writePaths);
   const policy = { ...DEFAULT_REGISTRATION_VERIFICATION_POLICY };
   const verification = await runtime.registrationVerification.verify({
     app,
     previewId: request.previewId,
     manifestRevision: revision,
     policy,
-    healthCandidates: registrationHealthCandidates(app),
+    healthCandidates: binding.healthCandidates,
     selectedRepairId: binding.preview.repairId
   });
   registrationRepairBindings.delete(request.previewId);
@@ -985,7 +1013,7 @@ export async function applyRegistrationRepair(
     approval: { required: false },
     registered: true,
     started: false,
-    filesWritten: patched.file.action !== "unchanged",
+    filesWritten: appliedFiles.some((file) => file.action === "created" || file.action === "updated"),
     retrySafe: status !== "registered_cleanup_failed",
     actions:
       status === "registered_verified"
@@ -993,8 +1021,46 @@ export async function applyRegistrationRepair(
         : status === "registered_cleanup_failed"
           ? ["View logs", "Retry stop", "Inspect cleanup"]
           : ["Preview another repair", "View logs", "Keep registered without verification", "Cancel"],
-    diagnostics: patched.diagnostics
+    diagnostics: diagnosticsForApp(app)
   };
+}
+
+async function applyRegistrationRepairFilePlan(
+  plan: RegistrationRepairPreviewResult["fileWritePlan"]
+): Promise<Array<{ path: string; action: "created" | "updated" | "unchanged" | "skipped" }>> {
+  const snapshots: Array<{ path: string; content?: string }> = [];
+  const applied: Array<{ path: string; action: "created" | "updated" | "unchanged" | "skipped" }> = [];
+  try {
+    for (const write of plan.writes) {
+      ensureInside(plan.root, write.path, "repair write");
+      if (write.action === "skip") {
+        applied.push({ path: write.path, action: "skipped" });
+        continue;
+      }
+      const before = await readText(write.path);
+      snapshots.push({ path: write.path, ...(before === undefined ? {} : { content: before }) });
+      if (before === write.preview) {
+        applied.push({ path: write.path, action: "unchanged" });
+        continue;
+      }
+      await writeTextAtomic(write.path, write.preview);
+      applied.push({ path: write.path, action: before === undefined ? "created" : "updated" });
+    }
+    return applied;
+  } catch (error) {
+    for (const snapshot of snapshots.reverse()) {
+      if (snapshot.content === undefined) {
+        await fs.rm(snapshot.path, { force: true }).catch(() => undefined);
+      } else {
+        await writeTextAtomic(snapshot.path, snapshot.content).catch(() => undefined);
+      }
+    }
+    throw error;
+  }
+}
+
+function registrationLaunchCommand(app: AppRecord): string {
+  return String(app.command ?? app.launch?.executable ?? "external");
 }
 
 function registrationTerminal(

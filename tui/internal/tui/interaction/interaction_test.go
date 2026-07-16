@@ -27,8 +27,8 @@ func TestModalAndTransientRestoreFocusAndOwnInput(t *testing.T) {
 func TestAppListTransientIsDistinctFromHelp(t *testing.T) {
 	state := New()
 	state.SetFocus(FocusResponse)
-	state.OpenTransient(TransientAppList)
-	if state.Transient != TransientAppList || state.Transient == TransientHelp || state.Owner() != OwnerTransient {
+	state.OpenTransient(TransientAppManager)
+	if state.Transient != TransientAppManager || state.Transient == TransientHelp || state.Owner() != OwnerTransient {
 		t.Fatalf("app list must own a distinct transient: %#v", state)
 	}
 	state.CloseTransient()
@@ -41,7 +41,7 @@ func TestPaneReopenTransientIsDedicatedAndRestoresFocus(t *testing.T) {
 	state := New()
 	state.SetFocus(FocusComposer)
 	state.OpenTransient(TransientPaneReopen)
-	if state.Transient != TransientPaneReopen || state.Transient == TransientAppList || state.Transient == TransientHelp || state.Owner() != OwnerTransient {
+	if state.Transient != TransientPaneReopen || state.Transient == TransientAppManager || state.Transient == TransientHelp || state.Owner() != OwnerTransient {
 		t.Fatalf("pane reopen must own a dedicated transient: %#v", state)
 	}
 	state.CloseTransient()

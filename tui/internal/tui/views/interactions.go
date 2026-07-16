@@ -21,7 +21,7 @@ func transformBodyRegion(region components.HitRegion, frame bodyViewportFrame, w
 }
 
 func paneHitRegions(style styles.Styles, data ShellData) []components.HitRegion {
-	if data.Confirmation != nil || data.ContextMenu != nil || data.RegisteredApps != nil || data.PaneReopen != nil || data.Help != nil || data.ShowHelp || data.DiagnosticsOpen || data.ResponseDetails || strings.TrimSpace(data.SetupPanel) != "" {
+	if data.Confirmation != nil || data.ContextMenu != nil || data.AppManager != nil || data.PackageManager != nil || data.RegistrationRepairs != nil || data.PaneReopen != nil || data.Help != nil || data.ShowHelp || data.DiagnosticsOpen || data.ResponseDetails || strings.TrimSpace(data.SetupPanel) != "" {
 		return nil
 	}
 	if data.ConnectionStatus != "connected" || !hasRenderableState(data) {
@@ -186,12 +186,45 @@ func helpHitRegions(data ShellData) []components.HitRegion {
 }
 
 func registeredAppHitRegions(data ShellData) []components.HitRegion {
-	if data.RegisteredApps == nil || len(data.RegisteredApps.Items) == 0 {
+	if data.AppManager == nil {
 		return nil
 	}
-	rows := registeredAppsViewportRows(data)
-	start := clampInt(data.RegisteredApps.Offset, 0, maxInt(0, len(data.RegisteredApps.Items)-rows))
-	end := minInt(len(data.RegisteredApps.Items), start+rows)
+	if data.AppManager.Surface == "rename-editor" || data.AppManager.Surface == "package-create" {
+		return nil
+	}
+	if data.AppManager.Surface == "package-picker" {
+		table := data.AppManager.PackagePicker
+		if table == nil {
+			return nil
+		}
+		rows := packageTableViewportRows(data)
+		start := clampInt(table.Offset, 0, maxInt(0, len(table.Rows)-rows))
+		end := minInt(len(table.Rows), start+rows)
+		regions := make([]components.HitRegion, 0, end-start)
+		for index := start; index < end; index++ {
+			regions = append(regions, components.HitRegion{Rect: components.Rect{X: 0, Y: 5 + index - start, Width: maxInt(1, contentWidth(data.Width)), Height: 1}, Kind: components.HitPackageRow, Index: index})
+		}
+		return regions
+	}
+	if data.AppManager.Surface == "actions" {
+		rows := appManagerActionViewportRows(data)
+		start := clampInt(data.AppManager.ActionOffset, 0, maxInt(0, len(data.AppManager.Actions)-rows))
+		end := minInt(len(data.AppManager.Actions), start+rows)
+		regions := make([]components.HitRegion, 0, end-start)
+		for index := start; index < end; index++ {
+			regions = append(regions, components.HitRegion{
+				Rect: components.Rect{X: 0, Y: appManagerActionStartY(data) + index - start, Width: maxInt(1, contentWidth(data.Width)), Height: 1},
+				Kind: components.HitAppManagerAction, Index: index,
+			})
+		}
+		return regions
+	}
+	if len(data.AppManager.Items) == 0 {
+		return nil
+	}
+	rows := appManagerTableViewportRows(data)
+	start := clampInt(data.AppManager.Offset, 0, maxInt(0, len(data.AppManager.Items)-rows))
+	end := minInt(len(data.AppManager.Items), start+rows)
 	regions := make([]components.HitRegion, 0, end-start)
 	for index := start; index < end; index++ {
 		regions = append(regions, components.HitRegion{
@@ -201,6 +234,45 @@ func registeredAppHitRegions(data ShellData) []components.HitRegion {
 		})
 	}
 	return regions
+}
+
+func packageManagerHitRegions(data ShellData) []components.HitRegion {
+	manager := data.PackageManager
+	if manager == nil {
+		return nil
+	}
+	width := maxInt(1, contentWidth(data.Width))
+	switch manager.Surface {
+	case "table":
+		rows := packageTableViewportRows(data)
+		start := clampInt(manager.Table.Offset, 0, maxInt(0, len(manager.Table.Rows)-rows))
+		end := minInt(len(manager.Table.Rows), start+rows)
+		regions := make([]components.HitRegion, 0, end-start)
+		for index := start; index < end; index++ {
+			regions = append(regions, components.HitRegion{Rect: components.Rect{X: 0, Y: 5 + index - start, Width: width, Height: 1}, Kind: components.HitPackageRow, Index: index})
+		}
+		return regions
+	case "actions":
+		rows := packageActionViewportRows(data)
+		start := clampInt(manager.ActionOffset, 0, maxInt(0, len(manager.Actions)-rows))
+		end := minInt(len(manager.Actions), start+rows)
+		regions := make([]components.HitRegion, 0, end-start)
+		for index := start; index < end; index++ {
+			regions = append(regions, components.HitRegion{Rect: components.Rect{X: 0, Y: packageManagerActionStartY(data) + index - start, Width: width, Height: 1}, Kind: components.HitPackageAction, Index: index})
+		}
+		return regions
+	case "members":
+		rows := packageMemberViewportRows(data)
+		start := clampInt(manager.MemberOffset, 0, maxInt(0, len(manager.Members)-rows))
+		end := minInt(len(manager.Members), start+rows)
+		regions := make([]components.HitRegion, 0, end-start)
+		for index := start; index < end; index++ {
+			regions = append(regions, components.HitRegion{Rect: components.Rect{X: 0, Y: packageManagerMemberStartY(data) + index - start, Width: width, Height: 1}, Kind: components.HitPackageMember, Index: index})
+		}
+		return regions
+	default:
+		return nil
+	}
 }
 
 func paneReopenHitRegions(data ShellData) []components.HitRegion {

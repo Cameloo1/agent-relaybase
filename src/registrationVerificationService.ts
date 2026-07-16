@@ -4,6 +4,8 @@ import path from "node:path";
 import { compileLaunchPlan } from "./launchPlan.ts";
 import { canBindPort } from "./ports.ts";
 import { redactSecretLikeValues } from "./redaction.ts";
+import { detectProject, proposeSetupPlans } from "./setupEngine.ts";
+import { normalizeManifest } from "./validation.ts";
 import type {
   RegistrationProofIdentity,
   RegistrationRepairOption,
@@ -47,10 +49,10 @@ export class RegistrationVerificationService {
   }
 
   repairOption(appId: string, repairId: string): RegistrationRepairOption | undefined {
-    return this.#attempts
-      .get(appId)
-      ?.at(-1)
-      ?.result.repairs.find((repair) => repair.id === repairId);
+    return [...(this.#attempts.get(appId) ?? [])]
+      .reverse()
+      .flatMap((attempt) => attempt.result.repairs)
+      .find((repair) => repair.id === repairId);
   }
 
   cleanupResolved(appId: string): boolean {
@@ -104,11 +106,14 @@ export class RegistrationVerificationService {
     const previous = this.#attempts.get(request.app.id)?.at(-1);
     if (previous?.result.status === "verified" && JSON.stringify(previous.proof) === JSON.stringify(proof)) {
       const reused = { ...previous.result, attempted: false, reused: true, durationMs: 0 };
-      this.#record(request, correlationId, proof, reused, 0);
+      this.#record(request, correlationId, proof, reused, 0, false);
       return reused;
     }
     const failedDigests = this.#failedPlanDigests.get(request.app.id) ?? new Set<string>();
     if (failedDigests.has(proof.launchPlanDigest)) {
+      const failedAttempt = [...(this.#attempts.get(request.app.id) ?? [])]
+        .reverse()
+        .find((attempt) => attempt.proof.launchPlanDigest === proof.launchPlanDigest);
       const result = failureResult(
         "REGISTER_VERIFY_UNSUPPORTED",
         "preflight",
@@ -116,9 +121,14 @@ export class RegistrationVerificationService {
         "Preview a different deterministic repair before retrying.",
         false,
         null,
-        []
+        [],
+        {
+          attempted: false,
+          reused: true,
+          repairs: failedAttempt?.result.repairs ?? []
+        }
       );
-      this.#record(request, correlationId, proof, result, 0);
+      this.#record(request, correlationId, proof, result, 0, false);
       return result;
     }
 
@@ -148,7 +158,14 @@ export class RegistrationVerificationService {
       startView = await this.runtime.processes.start(request.app.id, lifecycleOptions);
     } catch (error) {
       const logs = await this.#safeLogs(request.app.id);
-      const result = classifyThrownStart(error, logs, Date.now() - started);
+      const classified = classifyThrownStart(error, logs, Date.now() - started);
+      const result = await withDeterministicSetupRepair(
+        request.app,
+        classified,
+        proof.launchPlanDigest,
+        this.runtime.host,
+        this.runtime.port
+      );
       failedDigests.add(proof.launchPlanDigest);
       this.#failedPlanDigests.set(request.app.id, failedDigests);
       this.#record(request, correlationId, proof, result, redactionCount(logs));
@@ -223,6 +240,13 @@ export class RegistrationVerificationService {
       };
     } else {
       result = classifyStartView(request.app, startView, stopView, stop, logs, Date.now() - started);
+      result = await withDeterministicSetupRepair(
+        request.app,
+        result,
+        proof.launchPlanDigest,
+        this.runtime.host,
+        this.runtime.port
+      );
       failedDigests.add(proof.launchPlanDigest);
       this.#failedPlanDigests.set(request.app.id, failedDigests);
     }
@@ -245,7 +269,8 @@ export class RegistrationVerificationService {
     correlationId: string,
     proof: RegistrationProofIdentity,
     result: RegistrationVerificationResult,
-    redactions: number
+    redactions: number,
+    retainAttempt = true
   ): void {
     const record: RegistrationVerificationRecord = {
       schemaVersion: 1,
@@ -259,8 +284,10 @@ export class RegistrationVerificationService {
       recordedAt: new Date().toISOString(),
       redactionCount: redactions
     };
-    const next = [...(this.#attempts.get(request.app.id) ?? []), record].slice(-MAX_ATTEMPTS_PER_APP);
-    this.#attempts.set(request.app.id, next);
+    if (retainAttempt) {
+      const next = [...(this.#attempts.get(request.app.id) ?? []), record].slice(-MAX_ATTEMPTS_PER_APP);
+      this.#attempts.set(request.app.id, next);
+    }
     this.runtime.operations.recordEvidence({
       kind: "registration_verification",
       targetId: request.app.id,
@@ -364,19 +391,85 @@ function proofIdentity(
 ): RegistrationProofIdentity {
   return {
     manifestRevision: request.manifestRevision,
-    launchPlanDigest: digest({
-      executable: launchPlan.executable,
-      args: launchPlan.args,
-      cwd: launchPlan.cwd,
-      environmentNames: Object.keys(launchPlan.environment).sort(),
-      port: launchPlan.port,
-      health: launchPlan.health
-    }),
+    launchPlanDigest: launchPlanDigest(launchPlan),
     policyDigest: digest(policy),
     adapterId: launchPlan.adapterId,
     adapterVersion: launchPlan.adapterVersion,
     relaybaseVersion: process.env.npm_package_version ?? "0.1.0"
   };
+}
+
+function launchPlanDigest(launchPlan: CompiledLaunchPlan): string {
+  return digest({
+    executable: launchPlan.executable,
+    args: launchPlan.args,
+    cwd: launchPlan.cwd,
+    environmentNames: Object.keys(launchPlan.environment).sort(),
+    port: launchPlan.port,
+    health: launchPlan.health
+  });
+}
+
+async function withDeterministicSetupRepair(
+  app: AppRecord,
+  result: RegistrationVerificationResult,
+  failedDigest: string,
+  host: string,
+  hubPort: number
+): Promise<RegistrationVerificationResult> {
+  if (!result.failure || result.status === "cleanup_failed") return result;
+  const setupRepair = await deterministicSetupPlanRepair(app, failedDigest, host, hubPort).catch(() => undefined);
+  if (!setupRepair) return result;
+
+  const retained = result.repairs.filter(
+    (repair) => repair.kind !== "dynamic_binding" && repair.kind !== "manual_launch"
+  );
+  const hasRecommended = retained.some((repair) => repair.recommended);
+  const repair = { ...setupRepair, recommended: !hasRecommended };
+  return {
+    ...result,
+    repairs: hasRecommended ? [...retained, repair].slice(0, 3) : [repair, ...retained].slice(0, 3)
+  };
+}
+
+async function deterministicSetupPlanRepair(
+  app: AppRecord,
+  failedDigest: string,
+  host: string,
+  hubPort: number
+): Promise<RegistrationRepairOption | undefined> {
+  if (!app.manifestPath) return undefined;
+  const detection = await detectProject(app.cwd);
+  const plans = await proposeSetupPlans(detection);
+  for (const candidate of plans) {
+    if (candidate.requiresInput?.length || candidate.manifest.command === "external") continue;
+    let candidateApp: AppRecord;
+    try {
+      candidateApp = normalizeManifest(candidate.manifest, { manifestPath: app.manifestPath });
+    } catch {
+      continue;
+    }
+    if (candidateApp.id !== app.id) continue;
+    const compiled = compileLaunchPlan(candidateApp, {
+      host,
+      port: candidateApp.upstreamPort ?? 17_000,
+      hubPort
+    });
+    if (launchPlanDigest(compiled) === failedDigest) continue;
+    return {
+      id: `setup-plan:${candidate.id}`,
+      kind: "setup_plan",
+      label: `Use ${candidate.label}`,
+      recommended: true,
+      previewOnly: true,
+      approvalRequired: true,
+      setupPlanId: candidate.id,
+      reason:
+        candidate.reasons[0] ??
+        "Relaybase detected a different deterministic setup plan that has not failed verification."
+    };
+  }
+  return undefined;
 }
 
 function digest(value: unknown): string {

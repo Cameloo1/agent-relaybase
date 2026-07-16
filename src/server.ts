@@ -3,6 +3,7 @@ import net from "node:net";
 import { enqueueLifecycleOperation, handleApiRequest } from "./api.ts";
 import { AgentGatewayService } from "./agent/gateway.ts";
 import { AppPackageService } from "./appPackageService.ts";
+import { recoverAppRenames } from "./appRename.ts";
 import {
   appStateEventData,
   DaemonEventBus,
@@ -95,9 +96,11 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
     stateDir,
     registry,
     listAppStatuses: () => runtime.processes.listStatuses(),
-    enqueueLifecycle: ({ appId, correlationId }) => enqueueLifecycleOperation(runtime, appId, "start", correlationId)
+    enqueueLifecycle: ({ appId, correlationId }) => enqueueLifecycleOperation(runtime, appId, "start", correlationId),
+    publishEvent: (event) => runtime.events.publish(event)
   });
   runtime.registrationVerification = new RegistrationVerificationService(runtime);
+  await recoverAppRenames(runtime);
   runtime.exports = new LogExportService(runtime);
   runtime.mcp = new RelaybaseMcpService(runtime);
   wireDaemonEvents(runtime);
