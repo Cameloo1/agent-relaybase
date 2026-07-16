@@ -16,6 +16,9 @@ export interface RelaybaseCommandOptions {
 export type DaemonEnsureCode =
   | "daemon_running"
   | "daemon_started"
+  | "daemon_state_mismatch"
+  | "daemon_auth_missing"
+  | "daemon_auth_invalid"
   | "daemon_not_running"
   | "daemon_runtime_missing"
   | "daemon_start_timeout"
@@ -25,18 +28,39 @@ export type DaemonEnsureCode =
   | "port_occupied"
   | "non_relaybase_listener";
 
+export type DaemonDiscoveryCode =
+  | "daemon_ready"
+  | "daemon_state_mismatch"
+  | "daemon_auth_missing"
+  | "daemon_auth_invalid"
+  | "daemon_identity_invalid"
+  | "daemon_unreachable"
+  | "non_relaybase_listener";
+
 export interface DaemonDiscoveryResult {
+  transportReachable: boolean;
   reachable: boolean;
+  compatible: boolean;
+  authenticated: boolean;
+  stateDirMatches: boolean;
+  code: DaemonDiscoveryCode;
+  clientStateDir: string;
+  daemonStateDir?: string;
   body?: Record<string, unknown>;
   statusCode?: number;
+  authStatusCode?: number;
   error?: string;
 }
 
 export interface DaemonEnsureResult {
   reachable: boolean;
+  compatible: boolean;
+  authenticated: boolean;
   started: boolean;
   code: DaemonEnsureCode;
   userAction: string;
+  clientStateDir?: string;
+  daemonStateDir?: string;
   pid?: number;
   command?: string;
   args?: string[];
@@ -72,20 +96,46 @@ export function resolveDaemonRuntimeInvocation(moduleUrl: string): DaemonRuntime
 export async function ensureDaemon(options: RelaybaseCommandOptions, allowStart: boolean): Promise<DaemonEnsureResult> {
   const existing = await discovery(options);
   if (existing.reachable) {
+    if (!existing.compatible) {
+      const code: DaemonEnsureCode =
+        existing.code === "daemon_state_mismatch"
+          ? "daemon_state_mismatch"
+          : existing.code === "daemon_auth_missing"
+            ? "daemon_auth_missing"
+            : "daemon_auth_invalid";
+      return {
+        reachable: true,
+        compatible: false,
+        authenticated: existing.authenticated,
+        started: false,
+        code,
+        userAction: userActionForDaemonCode(code, options),
+        clientStateDir: options.stateDir,
+        ...(existing.daemonStateDir ? { daemonStateDir: existing.daemonStateDir } : {}),
+        error: existing.error ?? daemonCompatibilityMessage(existing)
+      };
+    }
     return {
       reachable: true,
+      compatible: true,
+      authenticated: true,
       started: false,
       code: "daemon_running",
-      userAction: "Relaybase daemon is already reachable."
+      userAction: "Relaybase daemon is already reachable and authenticated.",
+      clientStateDir: options.stateDir,
+      ...(existing.daemonStateDir ? { daemonStateDir: existing.daemonStateDir } : {})
     };
   }
 
-  if (existing.statusCode && existing.statusCode > 0) {
+  if (existing.transportReachable) {
     return {
       reachable: false,
+      compatible: false,
+      authenticated: false,
       started: false,
       code: "non_relaybase_listener",
       userAction: `Stop the non-Relaybase service on ${options.host}:${options.port}, or run Relaybase on another port.`,
+      clientStateDir: options.stateDir,
       error: existing.error ?? `HTTP ${existing.statusCode}`
     };
   }
@@ -93,9 +143,12 @@ export async function ensureDaemon(options: RelaybaseCommandOptions, allowStart:
   if (!allowStart) {
     return {
       reachable: false,
+      compatible: false,
+      authenticated: false,
       started: false,
       code: "daemon_not_running",
       userAction: "Start Relaybase with: relaybase serve",
+      clientStateDir: options.stateDir,
       error: existing.error
     };
   }
@@ -111,6 +164,8 @@ export async function ensureDaemon(options: RelaybaseCommandOptions, allowStart:
   } catch (error) {
     return {
       reachable: false,
+      compatible: false,
+      authenticated: false,
       started: false,
       code: "daemon_runtime_missing",
       userAction: userActionForDaemonCode("daemon_runtime_missing", options),
@@ -138,6 +193,8 @@ export async function ensureDaemon(options: RelaybaseCommandOptions, allowStart:
   } catch (error) {
     return {
       reachable: false,
+      compatible: false,
+      authenticated: false,
       started: false,
       code: "daemon_runtime_missing",
       userAction: userActionForDaemonCode("daemon_runtime_missing", options),
@@ -157,6 +214,8 @@ export async function ensureDaemon(options: RelaybaseCommandOptions, allowStart:
   } catch (error) {
     return {
       reachable: false,
+      compatible: false,
+      authenticated: false,
       started: false,
       code: "daemon_state_unavailable",
       userAction: `Fix permissions for the Relaybase state directory: ${options.stateDir}`,
@@ -185,6 +244,8 @@ export async function ensureDaemon(options: RelaybaseCommandOptions, allowStart:
   } catch (error) {
     return {
       reachable: false,
+      compatible: false,
+      authenticated: false,
       started: false,
       code: "daemon_spawn_failed",
       userAction: "Inspect the daemon log and retry from a terminal that can run Node.",
@@ -218,7 +279,10 @@ export async function ensureDaemon(options: RelaybaseCommandOptions, allowStart:
 
   const baseResult: Omit<DaemonEnsureResult, "code" | "userAction"> = {
     reachable: false,
+    compatible: false,
+    authenticated: false,
     started: true,
+    clientStateDir: options.stateDir,
     ...(child.pid ? { pid: child.pid } : {}),
     command,
     args,
@@ -254,12 +318,15 @@ export async function ensureDaemon(options: RelaybaseCommandOptions, allowStart:
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     const probe = await discovery(options);
-    if (probe.reachable) {
+    if (probe.compatible) {
       return {
         ...baseResult,
         reachable: true,
+        compatible: true,
+        authenticated: true,
         code: "daemon_started",
-        userAction: "Relaybase daemon started and is reachable."
+        userAction: "Relaybase daemon started and is authenticated.",
+        ...(probe.daemonStateDir ? { daemonStateDir: probe.daemonStateDir } : {})
       };
     }
     if (spawnError) {
@@ -303,13 +370,105 @@ export async function discovery(options: RelaybaseCommandOptions): Promise<Daemo
   const response = await daemonHttpRequest(options, "GET", "/.well-known/mcp.json");
   if (!response.ok) {
     return {
+      transportReachable: response.statusCode > 0,
       reachable: false,
+      compatible: false,
+      authenticated: false,
+      stateDirMatches: false,
+      code: response.statusCode > 0 ? "non_relaybase_listener" : "daemon_unreachable",
+      clientStateDir: options.stateDir,
       statusCode: response.statusCode,
       error: response.body || `HTTP ${response.statusCode}`
     };
   }
 
-  return { reachable: true, statusCode: response.statusCode, body: safeJson(response.body) };
+  const body = safeJson(response.body);
+  if (body.product !== "Relaybase" || body.package !== "@cameloo/relaybase") {
+    return {
+      transportReachable: true,
+      reachable: false,
+      compatible: false,
+      authenticated: false,
+      stateDirMatches: false,
+      code: "daemon_identity_invalid",
+      clientStateDir: options.stateDir,
+      statusCode: response.statusCode,
+      body,
+      error: "The configured listener did not return a valid Relaybase discovery identity."
+    };
+  }
+
+  const daemonStateDir = discoveryStateDir(body);
+  const stateDirMatches = Boolean(daemonStateDir && sameStateDirectory(options.stateDir, daemonStateDir));
+  if (!stateDirMatches) {
+    return {
+      transportReachable: true,
+      reachable: true,
+      compatible: false,
+      authenticated: false,
+      stateDirMatches: false,
+      code: "daemon_state_mismatch",
+      clientStateDir: options.stateDir,
+      ...(daemonStateDir ? { daemonStateDir } : {}),
+      statusCode: response.statusCode,
+      body,
+      error: daemonStateDir
+        ? "Relaybase is reachable, but the client and daemon use different state directories."
+        : "Relaybase discovery did not identify the daemon state directory."
+    };
+  }
+
+  const token = await readExistingSessionToken(options.stateDir);
+  if (!token) {
+    return {
+      transportReachable: true,
+      reachable: true,
+      compatible: false,
+      authenticated: false,
+      stateDirMatches: true,
+      code: "daemon_auth_missing",
+      clientStateDir: options.stateDir,
+      ...(daemonStateDir ? { daemonStateDir } : {}),
+      statusCode: response.statusCode,
+      body,
+      error: "Relaybase is reachable, but the selected state directory has no readable session token."
+    };
+  }
+
+  const session = await daemonHttpRequest(options, "GET", "/__hub/api/session", undefined, token);
+  if (!session.ok) {
+    return {
+      transportReachable: true,
+      reachable: true,
+      compatible: false,
+      authenticated: false,
+      stateDirMatches: true,
+      code: "daemon_auth_invalid",
+      clientStateDir: options.stateDir,
+      ...(daemonStateDir ? { daemonStateDir } : {}),
+      statusCode: response.statusCode,
+      authStatusCode: session.statusCode,
+      body,
+      error:
+        session.statusCode === 401 || session.statusCode === 403
+          ? "Relaybase rejected the session token from the selected state directory."
+          : `Relaybase session validation failed with HTTP ${session.statusCode || "unavailable"}.`
+    };
+  }
+
+  return {
+    transportReachable: true,
+    reachable: true,
+    compatible: true,
+    authenticated: true,
+    stateDirMatches: true,
+    code: "daemon_ready",
+    clientStateDir: options.stateDir,
+    ...(daemonStateDir ? { daemonStateDir } : {}),
+    statusCode: response.statusCode,
+    authStatusCode: session.statusCode,
+    body
+  };
 }
 
 export function daemonHttpRequest(
@@ -383,6 +542,12 @@ function classifyDaemonStartFailure(error: string, logTail: string[]): DaemonEns
 
 function userActionForDaemonCode(code: DaemonEnsureCode, options: RelaybaseCommandOptions): string {
   switch (code) {
+    case "daemon_state_mismatch":
+      return "Run relaybase diagnose-token. Use the running daemon state directory, or stop it explicitly before starting Relaybase with a different state directory.";
+    case "daemon_auth_missing":
+      return `Run relaybase diagnose-token and restore read access to ${path.join(options.stateDir, "session-token")}.`;
+    case "daemon_auth_invalid":
+      return "Run relaybase diagnose-token. Relaybase will not copy or expose either session token.";
     case "port_occupied":
       return `Free ${options.host}:${options.port}, or choose another Relaybase port with --port.`;
     case "non_relaybase_listener":
@@ -397,6 +562,48 @@ function userActionForDaemonCode(code: DaemonEnsureCode, options: RelaybaseComma
       return "Inspect the daemon log and retry; Relaybase did not become reachable before timeout.";
     default:
       return "Inspect the daemon log and retry.";
+  }
+}
+
+function discoveryStateDir(body: Record<string, unknown>): string | undefined {
+  const auth = body.auth;
+  if (!auth || typeof auth !== "object" || Array.isArray(auth)) {
+    return undefined;
+  }
+  const stateDir = (auth as Record<string, unknown>).stateDir;
+  return typeof stateDir === "string" && stateDir.trim() ? stateDir.trim() : undefined;
+}
+
+export function sameStateDirectory(left: string, right: string): boolean {
+  return stateDirectoryKey(left) === stateDirectoryKey(right);
+}
+
+function stateDirectoryKey(value: string): string {
+  const trimmed = value.trim().replace(/[\\/]+$/, "");
+  if (/^[a-z]:[\\/]/i.test(trimmed)) {
+    return path.win32.normalize(trimmed.replace(/\//g, "\\")).toLowerCase();
+  }
+  const resolved = path.resolve(trimmed || ".");
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+async function readExistingSessionToken(stateDir: string): Promise<string | undefined> {
+  try {
+    const token = (await fs.readFile(path.join(stateDir, "session-token"), "utf8")).trim();
+    return token || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function daemonCompatibilityMessage(result: DaemonDiscoveryResult): string {
+  switch (result.code) {
+    case "daemon_state_mismatch":
+      return "Relaybase is reachable, but the selected state directory does not match the running daemon.";
+    case "daemon_auth_missing":
+      return "Relaybase is reachable, but the selected state directory has no readable session token.";
+    default:
+      return "Relaybase is reachable, but it rejected the selected session token.";
   }
 }
 

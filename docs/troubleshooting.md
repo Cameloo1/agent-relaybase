@@ -72,7 +72,7 @@ X-Relaybase-App: <app-id>
 
 ## Authentication or token mismatch
 
-Use the state directory reported by `relaybase check`. Ensure the daemon and client use the same `RELAYBASE_STATE_DIR`. Do not paste token contents into terminals, logs, screenshots, issues, or support messages.
+Run `relaybase diagnose-token`, then use the reported client and daemon state directories to correct `RELAYBASE_STATE_DIR`. Do not paste token contents into terminals, logs, screenshots, issues, or support messages.
 
 ## Setup was blocked
 

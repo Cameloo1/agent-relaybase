@@ -73,6 +73,14 @@ export function runPackageInstallSmoke(options = {}) {
       console.error("Installed relaybase check did not resolve its packaged TUI binary.");
       return 1;
     }
+    if (
+      !checkOutput.includes(`Relaybase package: ${expected}`) ||
+      !/Installed TUI: ready \([^\r\n;]+; build [0-9a-f]{12}\)\./.test(checkOutput)
+    ) {
+      report(check);
+      console.error("Installed relaybase check did not report package and safe TUI build identity.");
+      return 1;
+    }
     if (/MODULE_NOT_FOUND|scripts[\\/]tui-go\.mjs|Cannot find module/i.test(checkOutput)) {
       report(check);
       console.error("Installed relaybase check attempted to use source-only tooling.");

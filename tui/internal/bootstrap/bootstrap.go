@@ -17,18 +17,22 @@ type Client struct {
 }
 
 type DaemonResult struct {
-	Reachable    bool     `json:"reachable"`
-	Started      bool     `json:"started"`
-	Code         string   `json:"code"`
-	UserAction   string   `json:"userAction"`
-	PID          int      `json:"pid,omitempty"`
-	LogPath      string   `json:"logPath,omitempty"`
-	PIDPath      string   `json:"pidPath,omitempty"`
-	MetadataPath string   `json:"metadataPath,omitempty"`
-	ExitCode     *int     `json:"exitCode,omitempty"`
-	Signal       string   `json:"signal,omitempty"`
-	Error        string   `json:"error,omitempty"`
-	LogTail      []string `json:"logTail,omitempty"`
+	Reachable      bool     `json:"reachable"`
+	Compatible     bool     `json:"compatible"`
+	Authenticated  bool     `json:"authenticated"`
+	Started        bool     `json:"started"`
+	Code           string   `json:"code"`
+	UserAction     string   `json:"userAction"`
+	PID            int      `json:"pid,omitempty"`
+	LogPath        string   `json:"logPath,omitempty"`
+	PIDPath        string   `json:"pidPath,omitempty"`
+	MetadataPath   string   `json:"metadataPath,omitempty"`
+	ExitCode       *int     `json:"exitCode,omitempty"`
+	Signal         string   `json:"signal,omitempty"`
+	Error          string   `json:"error,omitempty"`
+	LogTail        []string `json:"logTail,omitempty"`
+	ClientStateDir string   `json:"clientStateDir,omitempty"`
+	DaemonStateDir string   `json:"daemonStateDir,omitempty"`
 }
 
 type responseBody struct {

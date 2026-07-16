@@ -1156,6 +1156,17 @@ test("HTTP mutations return structured unauthorized diagnostics", async () => {
 
   try {
     await hub.listen();
+    const sessionToken = (await fs.readFile(path.join(stateDir, "session-token"), "utf8")).trim();
+    const unauthorizedSession = await apiRequest(hub.address().port, "GET", "/__hub/api/session");
+    assert.equal(unauthorizedSession.statusCode, 401);
+    assert.equal(JSON.parse(unauthorizedSession.body).code, "UNAUTHORIZED_SESSION");
+    const authorizedSession = await apiRequest(hub.address().port, "GET", "/__hub/api/session", undefined, {
+      "x-relaybase-token": sessionToken
+    });
+    assert.equal(authorizedSession.statusCode, 200);
+    assert.equal(JSON.parse(authorizedSession.body).session.authenticated, true);
+    assert.doesNotMatch(authorizedSession.body, new RegExp(sessionToken));
+
     const suppliedToken = "supplied-secret-token";
     const response = await apiRequest(hub.address().port, "POST", "/__hub/api/apps/anything/start", undefined, {
       "x-relaybase-token": suppliedToken,

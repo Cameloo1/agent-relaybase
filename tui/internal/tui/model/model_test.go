@@ -84,6 +84,67 @@ func TestDaemonUnavailableDiagnostic(t *testing.T) {
 	}
 }
 
+func TestUnauthorizedDaemonIsStableAuthNeededAndPreservesLastKnownState(t *testing.T) {
+	root := applyState(newTestModel(t), notesFrontendBackendState())
+	apiError := &relaybaseclient.APIError{
+		StatusCode: http.StatusUnauthorized,
+		ErrorBody:  relaybaseclient.RelaybaseError{Code: "UNAUTHORIZED_STATE", Message: "Unauthorized Relaybase state read."},
+	}
+
+	updated, cmd := root.Update(commands.StateFailedMsg{Err: apiError})
+	model := updated.(RootModel)
+
+	if cmd != nil {
+		t.Fatal("unchanged rejected token must enter a stable state without a rapid retry")
+	}
+	if model.ConnectionStatus() != "auth_needed" || model.EventStatus() != "auth_needed" {
+		t.Fatalf("expected auth-needed statuses, daemon=%s events=%s", model.ConnectionStatus(), model.EventStatus())
+	}
+	if model.state == nil || len(model.state.Apps) != 2 {
+		t.Fatalf("last-known daemon state was discarded: %#v", model.state)
+	}
+	if !hasDiagnostic(model.Diagnostics(), authTokenInvalidDiagnosticCode) || hasDiagnostic(model.Diagnostics(), daemonUnavailableDiagnosticCode) {
+		t.Fatalf("expected auth warning without offline error: %#v", model.Diagnostics())
+	}
+}
+
+func TestUnauthorizedDaemonReloadsRotatedTokenAndRetriesOnce(t *testing.T) {
+	stateDir := t.TempDir()
+	root := newTestModelInStateDir(stateDir)
+	root.cfg.TokenPath = filepath.Join(stateDir, "session-token")
+	if err := os.WriteFile(root.cfg.TokenPath, []byte("rotated-token\n"), 0o600); err != nil {
+		t.Fatalf("write rotated token: %v", err)
+	}
+	apiError := &relaybaseclient.APIError{StatusCode: http.StatusUnauthorized}
+
+	updated, cmd := root.Update(commands.StateFailedMsg{Err: apiError})
+	model := updated.(RootModel)
+
+	if cmd == nil {
+		t.Fatal("rotated token should schedule one authenticated state retry")
+	}
+	if model.ConnectionStatus() != "connecting" || model.client.Token() != "rotated-token" {
+		t.Fatalf("rotation not applied before retry: status=%s token=%q", model.ConnectionStatus(), model.client.Token())
+	}
+	updated, cmd = model.Update(commands.StateFailedMsg{Err: apiError})
+	model = updated.(RootModel)
+	if cmd != nil || model.ConnectionStatus() != "auth_needed" {
+		t.Fatalf("same rejected token should stop retrying: status=%s cmd=%v", model.ConnectionStatus(), cmd != nil)
+	}
+}
+
+func TestUnauthorizedEventStreamUsesAuthNeededInsteadOfOffline(t *testing.T) {
+	root := applyState(newTestModel(t), notesFrontendBackendState())
+	apiError := &relaybaseclient.APIError{StatusCode: http.StatusForbidden}
+
+	updated, cmd := root.Update(events.StreamDisconnectedMsg{Err: apiError})
+	model := updated.(RootModel)
+
+	if cmd != nil || model.ConnectionStatus() != "auth_needed" || model.EventStatus() != "auth_needed" {
+		t.Fatalf("event auth failure should remain stable and degraded: daemon=%s events=%s cmd=%v", model.ConnectionStatus(), model.EventStatus(), cmd != nil)
+	}
+}
+
 func TestInitialDaemonStateFetchGatesDependentStartupCalls(t *testing.T) {
 	requests := []string{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1227,10 +1288,12 @@ func TestDaemonBootstrapSuccessClearsStaleRecoveryDiagnostics(t *testing.T) {
 	root.addDiagnostic("daemon_bootstrap_daemon_not_running", "error", "bridge could not start")
 
 	updated, _ := root.Update(commands.DaemonBootstrapEnsureMsg{Result: &bootstrap.DaemonResult{
-		Reachable:  true,
-		Started:    true,
-		Code:       "daemon_started",
-		UserAction: "Relaybase daemon started and is reachable.",
+		Reachable:     true,
+		Compatible:    true,
+		Authenticated: true,
+		Started:       true,
+		Code:          "daemon_started",
+		UserAction:    "Relaybase daemon started and is reachable.",
 	}})
 	model := updated.(RootModel)
 
@@ -1249,6 +1312,25 @@ func TestDaemonBootstrapSuccessClearsStaleRecoveryDiagnostics(t *testing.T) {
 	}
 	if !hasDiagnostic(model.Diagnostics(), "daemon_bootstrap_ready") {
 		t.Fatalf("expected bootstrap-ready diagnostic, got %#v", model.Diagnostics())
+	}
+}
+
+func TestReachableIncompatibleBootstrapBecomesAuthNeeded(t *testing.T) {
+	root := applyState(newTestModel(t), notesFrontendBackendState())
+	updated, _ := root.Update(commands.DaemonBootstrapStatusMsg{Result: &bootstrap.DaemonResult{
+		Reachable:     true,
+		Compatible:    false,
+		Authenticated: false,
+		Code:          "daemon_state_mismatch",
+		UserAction:    "Use the selected Relaybase state directory.",
+	}})
+	model := updated.(RootModel)
+
+	if model.ConnectionStatus() != "auth_needed" || model.EventStatus() != "auth_needed" {
+		t.Fatalf("reachable incompatible daemon should be degraded, daemon=%s events=%s", model.ConnectionStatus(), model.EventStatus())
+	}
+	if model.state == nil || len(model.state.Apps) != 2 {
+		t.Fatalf("bootstrap mismatch discarded last-known state: %#v", model.state)
 	}
 }
 

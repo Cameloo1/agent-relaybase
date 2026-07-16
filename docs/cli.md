@@ -120,6 +120,15 @@ relaybase check --plan
 
 It does not run the package dry-run, make OpenRouter requests, start unknown user apps, run `npm link`, or remove command shims.
 
+## diagnose-token
+
+```powershell
+relaybase diagnose-token
+relaybase diagnose-token --json
+```
+
+`diagnose-token` compares the selected state-directory identity with the reachable Relaybase daemon and verifies whether the selected session token is accepted. It reports only token presence and authentication status; it never prints or copies token contents. The older `diagnose_token` spelling remains a compatibility alias.
+
 ## repair-prefix
 
 ```powershell

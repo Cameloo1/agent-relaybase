@@ -492,6 +492,47 @@ test("CLI rejects unknown options and serves command scoped help", async () => {
   assert.match(prefixRepairHelp.stdout, /Ordinary start and check commands never perform this repair/);
 });
 
+test("CLI diagnose-token proves state identity without exposing token contents", async () => {
+  const daemonStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-diagnose-daemon-state-"));
+  const mismatchedStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-diagnose-client-state-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir: daemonStateDir });
+
+  try {
+    await hub.listen();
+    const port = String(hub.address().port);
+    const token = (await fs.readFile(path.join(daemonStateDir, "session-token"), "utf8")).trim();
+    const common = ["--host", "127.0.0.1", "--port", port, "--state-dir", daemonStateDir];
+
+    const diagnosed = await runRelaybaseCli(["diagnose-token", ...common]);
+    assert.equal(diagnosed.code, 0);
+    assert.match(diagnosed.stdout, /Daemon: online/);
+    assert.match(diagnosed.stdout, /State match: yes/);
+    assert.match(diagnosed.stdout, /Authentication: accepted/);
+    assert.equal((diagnosed.stdout + diagnosed.stderr).includes(token), false);
+
+    const compatibilityAlias = await runRelaybaseCli(["diagnose_token", "--json", ...common]);
+    assert.equal(compatibilityAlias.code, 0);
+    assert.equal(JSON.parse(compatibilityAlias.stdout).diagnosis, "daemon_ready");
+    assert.equal((compatibilityAlias.stdout + compatibilityAlias.stderr).includes(token), false);
+
+    const mismatch = await runRelaybaseCli([
+      "diagnose-token",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      port,
+      "--state-dir",
+      mismatchedStateDir
+    ]);
+    assert.equal(mismatch.code, 1);
+    assert.match(mismatch.stdout, /Daemon: degraded/);
+    assert.match(mismatch.stdout, /Diagnosis: daemon_state_mismatch/);
+    assert.equal((mismatch.stdout + mismatch.stderr).includes(token), false);
+  } finally {
+    await hub.close();
+  }
+});
+
 test("CLI bundled start, check, and verify expose safe executable plans", async () => {
   const startPlan = await runRelaybaseCli(["start", "--plan", "--port", "17782", "--", "--smoke-render"]);
   assert.equal(startPlan.code, 0);
@@ -1022,9 +1063,42 @@ test("open reports daemon token mismatch without falling back to local registry 
 
     assert.equal(result.registered, false);
     assert.equal(result.started, false);
-    assert.match(result.error ?? "", /401/);
+    assert.match(result.error ?? "", /different state directories|not authenticated/i);
     assert.equal(result.nextActions?.[0]?.owner, "token");
+    assert.match(result.nextActions?.[0]?.command ?? "", /diagnose-token/);
     assert.equal(await exists(path.join(cliStateDir, "registry.json")), false);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("configure fails authentication preflight before writing a manifest or alternate registry", async () => {
+  const project = await tempProject("relaybase-configure-state-mismatch-");
+  const daemonStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-configure-daemon-state-"));
+  const clientStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-configure-client-state-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir: daemonStateDir });
+  await fs.writeFile(
+    path.join(project, "package.json"),
+    JSON.stringify({ name: "mismatch-app", scripts: { dev: "node server.js" } }, null, 2)
+  );
+
+  try {
+    await hub.listen();
+    const result = await configureProject({
+      cwd: project,
+      host: "127.0.0.1",
+      port: hub.address().port,
+      stateDir: clientStateDir,
+      yes: true,
+      startDaemon: false
+    });
+
+    assert.equal(result.verification.registered, false);
+    assert.equal(result.verification.recoveryHint?.code, "relaybase-auth");
+    assert.equal(result.appliedFiles.length, 0);
+    assert.equal(result.reportPath, undefined);
+    assert.equal(await exists(path.join(project, "relaybase.app.json")), false);
+    assert.equal(await exists(path.join(clientStateDir, "registry.json")), false);
   } finally {
     await hub.close();
   }
@@ -1267,6 +1341,20 @@ test("classifies launch failures into actionable recovery architectures", () => 
   assert.deepEqual(
     classifyLaunchFailure({ lastError: "App did not become healthy before the startup timeout." }).code,
     "ignored-port"
+  );
+  assert.equal(
+    classifyLaunchFailure({
+      error: JSON.stringify({ code: "UNAUTHORIZED_MUTATION", message: "Unauthorized Relaybase mutation." }),
+      statusCode: 401
+    }).code,
+    "relaybase-auth"
+  );
+  assert.equal(
+    classifyLaunchFailure({
+      error: "unauthorized: authentication required by registry",
+      architecture: "docker-compose-service"
+    }).code,
+    "image_pull_auth_failed"
   );
 });
 

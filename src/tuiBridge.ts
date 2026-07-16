@@ -234,23 +234,20 @@ export async function runRelaybaseTui(
     return 1;
   }
 
-  const checkDaemon = dependencies.checkDaemon ?? checkDaemonReachable;
-  let daemon = await checkDaemon(baseURL);
+  const discoveryResult = dependencies.checkDaemon ? undefined : await discovery(daemonLaunchOptions(options));
+  const daemon = dependencies.checkDaemon
+    ? await dependencies.checkDaemon(baseURL)
+    : daemonReachabilityFromDiscovery(discoveryResult!);
   let bootstrapReport: DaemonEnsureResult | undefined;
-  if (!daemon.reachable) {
+  if (discoveryResult?.reachable && !discoveryResult.compatible) {
+    bootstrapReport = daemonBootstrapReportFromDiscovery(discoveryResult);
+    stderr.write(formatDaemonBootstrapDiagnostic(baseURL, bootstrapReport));
+  } else if (!daemon.reachable) {
     if (options.daemonStartPolicy === "never") {
-      bootstrapReport = {
-        reachable: false,
-        started: false,
-        code: "daemon_not_running",
-        userAction: "Start Relaybase with: relaybase serve",
-        error: daemon.message
-      };
+      bootstrapReport = offlineBootstrapReport(options);
     } else {
       bootstrapReport = await (dependencies.ensureDaemon ?? ensureDaemon)(daemonLaunchOptions(options), true);
-      if (bootstrapReport.reachable) {
-        daemon = { reachable: true, statusCode: 200, message: bootstrapReport.userAction };
-      } else {
+      if (!bootstrapReport.compatible) {
         stderr.write(formatDaemonBootstrapDiagnostic(baseURL, bootstrapReport));
       }
     }
@@ -263,6 +260,8 @@ export async function runRelaybaseTui(
     } catch (error) {
       bootstrapReport ??= {
         reachable: daemon.reachable,
+        compatible: daemon.reachable,
+        authenticated: daemon.reachable,
         started: false,
         code: daemon.reachable ? "daemon_running" : "daemon_not_running",
         userAction: daemon.reachable
@@ -377,13 +376,16 @@ export function formatDaemonUnavailableDiagnostic(baseURL: string, daemon: Daemo
 }
 
 export function formatDaemonBootstrapDiagnostic(baseURL: string, result: DaemonEnsureResult): string {
+  const headline = result.reachable
+    ? `relaybase tui: Relaybase is reachable at ${baseURL}, but this client is not authenticated.`
+    : `relaybase tui: Relaybase daemon is not reachable at ${baseURL}.`;
   return [
-    `relaybase tui: Relaybase daemon is not reachable at ${baseURL}.`,
+    headline,
     `Diagnosis: ${result.code}`,
     result.error ? `Detail: ${result.error}` : undefined,
     `Next action: ${result.userAction}`,
     result.logPath ? `Daemon log: ${result.logPath}` : undefined,
-    "Launching the TUI anyway; use /daemon repair or 'fix daemon' inside the TUI to retry through the local bridge."
+    "Launching the TUI with recovery controls available through /daemon repair."
   ]
     .filter((line): line is string => Boolean(line))
     .join("\n")
@@ -538,23 +540,41 @@ async function handleTuiBootstrapRequest(
   if (request.method === "GET" && pathname === "/daemon/status") {
     const current = await discovery(daemonLaunchOptions(options));
     sendBootstrapJson(response, 200, {
-      daemon: current.reachable
+      daemon: current.compatible
         ? {
             reachable: true,
+            compatible: true,
+            authenticated: true,
             started: false,
             code: "daemon_running",
-            userAction: "Relaybase daemon is reachable."
+            userAction: "Relaybase daemon is reachable and authenticated.",
+            clientStateDir: current.clientStateDir,
+            ...(current.daemonStateDir ? { daemonStateDir: current.daemonStateDir } : {})
           }
-        : {
-            reachable: false,
-            started: false,
-            code: current.statusCode && current.statusCode > 0 ? "non_relaybase_listener" : "daemon_not_running",
-            userAction:
-              current.statusCode && current.statusCode > 0
+        : current.reachable
+          ? {
+              reachable: true,
+              compatible: false,
+              authenticated: current.authenticated,
+              started: false,
+              code: current.code,
+              userAction: "Run relaybase diagnose-token before retrying daemon-backed actions.",
+              clientStateDir: current.clientStateDir,
+              ...(current.daemonStateDir ? { daemonStateDir: current.daemonStateDir } : {}),
+              error: current.error
+            }
+          : {
+              reachable: false,
+              compatible: false,
+              authenticated: false,
+              started: false,
+              code: current.transportReachable ? "non_relaybase_listener" : "daemon_not_running",
+              userAction: current.transportReachable
                 ? `Stop the non-Relaybase service on ${options.host}:${options.port}, or run Relaybase on another port.`
                 : "Use /daemon repair to start the Relaybase daemon through the launch bridge.",
-            error: current.error
-          }
+              clientStateDir: current.clientStateDir,
+              error: current.error
+            }
     });
     return;
   }
@@ -612,9 +632,13 @@ function daemonLaunchOptions(options: TuiBridgeOptions): RelaybaseCommandOptions
 function safeBootstrapReport(result: DaemonEnsureResult): DaemonEnsureResult {
   return {
     reachable: result.reachable,
+    compatible: result.compatible,
+    authenticated: result.authenticated,
     started: result.started,
     code: result.code,
     userAction: result.userAction,
+    ...(result.clientStateDir ? { clientStateDir: result.clientStateDir } : {}),
+    ...(result.daemonStateDir ? { daemonStateDir: result.daemonStateDir } : {}),
     ...(result.pid ? { pid: result.pid } : {}),
     ...(result.logPath ? { logPath: result.logPath } : {}),
     ...(result.pidPath ? { pidPath: result.pidPath } : {}),
@@ -623,6 +647,51 @@ function safeBootstrapReport(result: DaemonEnsureResult): DaemonEnsureResult {
     ...(result.signal !== undefined ? { signal: result.signal } : {}),
     ...(result.error ? { error: redactDiagnosticText(result.error) } : {}),
     ...(result.logTail ? { logTail: result.logTail.map(redactDiagnosticText) } : {})
+  };
+}
+
+function daemonReachabilityFromDiscovery(result: Awaited<ReturnType<typeof discovery>>): DaemonReachability {
+  return {
+    reachable: result.compatible,
+    statusCode: result.authStatusCode ?? result.statusCode ?? 0,
+    message: result.compatible ? "Relaybase daemon is reachable and authenticated." : (result.error ?? result.code)
+  };
+}
+
+function daemonBootstrapReportFromDiscovery(result: Awaited<ReturnType<typeof discovery>>): DaemonEnsureResult {
+  const code =
+    result.code === "daemon_state_mismatch" || result.code === "daemon_auth_missing"
+      ? result.code
+      : "daemon_auth_invalid";
+  const userAction =
+    code === "daemon_state_mismatch"
+      ? "Run relaybase diagnose-token. Use the running daemon state directory, or stop it explicitly before selecting a different state directory."
+      : code === "daemon_auth_missing"
+        ? "Run relaybase diagnose-token and restore read access to the selected state directory session token."
+        : "Run relaybase diagnose-token. Relaybase will not copy or expose either session token.";
+  return {
+    reachable: true,
+    compatible: false,
+    authenticated: false,
+    started: false,
+    code,
+    userAction,
+    clientStateDir: result.clientStateDir,
+    ...(result.daemonStateDir ? { daemonStateDir: result.daemonStateDir } : {}),
+    ...(result.error ? { error: result.error } : {})
+  };
+}
+
+function offlineBootstrapReport(options: TuiBridgeOptions): DaemonEnsureResult {
+  return {
+    reachable: false,
+    compatible: false,
+    authenticated: false,
+    started: false,
+    code: "daemon_not_running",
+    userAction: "Start Relaybase with: relaybase start",
+    clientStateDir: options.stateDir,
+    error: "Relaybase daemon is not reachable."
   };
 }
 

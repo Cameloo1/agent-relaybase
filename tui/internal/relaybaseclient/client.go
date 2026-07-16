@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 var ErrMissingToken = errors.New("relaybase auth token is missing")
@@ -18,6 +19,7 @@ var ErrMissingToken = errors.New("relaybase auth token is missing")
 type Client struct {
 	baseURL    string
 	token      string
+	tokenMu    sync.RWMutex
 	http       *http.Client
 	streamHTTP *http.Client
 }
@@ -77,7 +79,19 @@ func (c *Client) BaseURL() string {
 }
 
 func (c *Client) HasToken() bool {
-	return c.token != ""
+	return c.Token() != ""
+}
+
+func (c *Client) Token() string {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	return c.token
+}
+
+func (c *Client) SetToken(token string) {
+	c.tokenMu.Lock()
+	c.token = strings.TrimSpace(token)
+	c.tokenMu.Unlock()
 }
 
 func (c *Client) GetState(ctx context.Context) (*RelaybaseState, error) {
@@ -660,8 +674,8 @@ func (c *Client) newRequest(ctx context.Context, method string, path string, bod
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	if token := c.Token(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	return req, nil
 }

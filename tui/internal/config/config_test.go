@@ -82,3 +82,63 @@ func TestExplicitStateDirPrefersThatStateToken(t *testing.T) {
 		t.Fatalf("expected selected token path, got %s", cfg.TokenPath)
 	}
 }
+
+func TestExplicitStateDirWithoutTokenClearsInheritedFileToken(t *testing.T) {
+	defaultStateDir := testfixtures.IsolatedStateDir(t)
+	if err := os.WriteFile(filepath.Join(defaultStateDir, "session-token"), []byte("default-token\n"), 0o600); err != nil {
+		t.Fatalf("write default token fixture: %v", err)
+	}
+	selectedStateDir := testfixtures.IsolatedStateDir(t)
+	cfg := LoadWithEnv(func(key string) string {
+		if key == "RELAYBASE_STATE_DIR" {
+			return defaultStateDir
+		}
+		return ""
+	})
+
+	cfg.StateDir = selectedStateDir
+	cfg.ReloadTokenForStateDir(true)
+
+	if cfg.Token != "" {
+		t.Fatalf("explicit tokenless state inherited another state token: %q", cfg.Token)
+	}
+}
+
+func TestExplicitEnvironmentTokenSurvivesTokenlessStateOverride(t *testing.T) {
+	selectedStateDir := testfixtures.IsolatedStateDir(t)
+	cfg := LoadWithEnv(func(key string) string {
+		if key == "RELAYBASE_TOKEN" {
+			return "explicit-token"
+		}
+		return ""
+	})
+
+	cfg.StateDir = selectedStateDir
+	cfg.ReloadTokenForStateDir(true)
+
+	if cfg.Token != "explicit-token" {
+		t.Fatalf("explicit environment token was discarded: %q", cfg.Token)
+	}
+}
+
+func TestReloadTokenFromDiskUpdatesOnlyForANewNonemptyToken(t *testing.T) {
+	stateDir := testfixtures.IsolatedStateDir(t)
+	tokenPath := filepath.Join(stateDir, "session-token")
+	cfg := Config{StateDir: stateDir, Token: "old-token", TokenPath: tokenPath}
+
+	if cfg.ReloadTokenFromDisk() {
+		t.Fatal("missing token file must not clear or replace the in-memory token")
+	}
+	if cfg.Token != "old-token" {
+		t.Fatalf("missing token file changed token to %q", cfg.Token)
+	}
+	if err := os.WriteFile(tokenPath, []byte("new-token\n"), 0o600); err != nil {
+		t.Fatalf("write rotated token: %v", err)
+	}
+	if !cfg.ReloadTokenFromDisk() || cfg.Token != "new-token" {
+		t.Fatalf("expected rotated token, changed=%v token=%q", cfg.Token == "new-token", cfg.Token)
+	}
+	if cfg.ReloadTokenFromDisk() {
+		t.Fatal("unchanged token must not trigger another retry")
+	}
+}

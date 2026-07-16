@@ -123,7 +123,7 @@ Common recovery paths:
 - Registration cleanup failed: do not retry launch verification until the remaining process or backend-port owner is resolved.
 - Windows reports `spawn UNKNOWN`: install the current signed release and retry. Do not weaken Windows Application Control; inspect `Microsoft-Windows-CodeIntegrity/Operational` for the blocking evidence.
 - Port conflict: let Relaybase choose a dynamic port or update the manifest’s explicit port strategy.
-- Token mismatch: use the state directory reported by `relaybase check`; never paste the token into logs or issues.
+- Token mismatch: run `relaybase diagnose-token`, align the selected and daemon state directories, and never paste the token into logs or issues.
 
 See [Troubleshooting](docs/troubleshooting.md) for symptom-led recovery and [Getting started](docs/getting-started.md) for a complete first-run walkthrough.
 

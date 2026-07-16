@@ -28,6 +28,7 @@ import {
   type DaemonReachability
 } from "../src/tuiBridge.ts";
 import type { DaemonEnsureResult } from "../src/daemonLauncher.ts";
+import { arrowSelectCursorRows } from "../src/cliPrompt.ts";
 import { normalizeManifest, validateAppId } from "../src/validation.ts";
 import { compileLaunchPlan } from "../src/launchPlan.ts";
 import {
@@ -185,6 +186,12 @@ test("validates app ids", () => {
   assert.throws(() => validateAppId("Notes"));
   assert.throws(() => validateAppId("-notes"));
   assert.throws(() => validateAppId("notes.local"));
+});
+
+test("interactive arrow menus clear the title and every choice before repainting", () => {
+  assert.equal(arrowSelectCursorRows(4), 5);
+  assert.equal(arrowSelectCursorRows(0), 1);
+  assert.equal(arrowSelectCursorRows(-1), 1);
 });
 
 test("normalizes API errors and redacts secret-like details", () => {
@@ -544,6 +551,8 @@ test("TUI bridge starts Relaybase daemon before spawning when daemon is unavaila
         assert.equal(allowStart, true);
         return {
           reachable: true,
+          compatible: true,
+          authenticated: true,
           started: true,
           code: "daemon_started",
           userAction: "Relaybase daemon started and is reachable."

@@ -506,9 +506,10 @@ func (m *RootModel) recoverPackageRunPoll(runID string, attempt int, err error) 
 func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case daemonRetryMsg:
-		if m.connectionStatus != "offline" {
+		if m.connectionStatus != "offline" && m.connectionStatus != "auth_needed" {
 			return m, nil
 		}
+		m.reloadTokenFromDisk()
 		m.connectionStatus = "connecting"
 		return m, commands.FetchStateCmd(m.ctx, m.client)
 	case eventRetryMsg:
@@ -1218,6 +1219,29 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, batchCommands(cmds...)
 	case commands.StateFailedMsg:
+		if isAuthAPIError(msg.Err) {
+			m.appManagerRefreshing = false
+			m.appManagerPaneRefreshID = ""
+			if m.stream != nil {
+				_ = m.stream.Close()
+				m.stream = nil
+			}
+			if m.reloadTokenFromDisk() {
+				m.connectionStatus = "connecting"
+				m.eventStatus = "checking"
+				m.addOrReplaceDiagnostic(authTokenInvalidDiagnosticCode, "warning", "Relaybase reloaded a rotated session token and is retrying once.")
+				return m, commands.FetchStateCmd(m.ctx, m.client)
+			}
+			m.connectionStatus = "auth_needed"
+			m.eventStatus = "auth_needed"
+			m.agentStatus = "waiting"
+			if m.appManagerVisible {
+				m.appManagerNotice = "Relaybase is reachable, but authentication is required; showing last known state with daemon actions disabled."
+			}
+			m.clearDiagnostics(daemonUnavailableDiagnosticCode, eventDisconnectedDiagnosticCode, agentGatewayUnavailableCode, agentDiagnosticsUnavailableCode)
+			m.addOrReplaceDiagnostic(authTokenInvalidDiagnosticCode, "warning", m.authNeededMessage())
+			return m, nil
+		}
 		m.connectionStatus = "offline"
 		m.appManagerRefreshing = false
 		m.appManagerPaneRefreshID = ""
@@ -2263,8 +2287,15 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.stream = nil
 		code := eventDiagnosticCode(msg.Err)
 		if code == authTokenInvalidDiagnosticCode {
-			m.eventStatus = "disconnected"
-			m.addOrReplaceDiagnostic(code, "warning", "Relaybase auth token was rejected by the daemon event stream.")
+			if m.reloadTokenFromDisk() {
+				m.connectionStatus = "connecting"
+				m.eventStatus = "checking"
+				m.addOrReplaceDiagnostic(code, "warning", "Relaybase reloaded a rotated session token and is reconnecting once.")
+				return m, commands.FetchStateCmd(m.ctx, m.client)
+			}
+			m.connectionStatus = "auth_needed"
+			m.eventStatus = "auth_needed"
+			m.addOrReplaceDiagnostic(code, "warning", m.authNeededMessage())
 			return m, nil
 		}
 		if m.connectionStatus != "connected" {
@@ -5723,12 +5754,19 @@ func (m *RootModel) applyDaemonBootstrapResult(result *bootstrap.DaemonResult) {
 		return
 	}
 	m.lastBootstrapResult = result
-	if result.Reachable {
+	if result.Compatible {
 		m.clearDiagnosticsByPrefix("daemon_bootstrap_")
 		m.clearDiagnostics(daemonUnavailableDiagnosticCode, eventDisconnectedDiagnosticCode, authTokenInvalidDiagnosticCode)
 		m.addOrReplaceDiagnostic("daemon_bootstrap_ready", "info", bootstrapResultMessage(result))
 		m.connectionStatus = "connecting"
 		m.eventStatus = "checking"
+		return
+	}
+	if result.Reachable {
+		m.clearDiagnostics("daemon_bootstrap_ready", daemonUnavailableDiagnosticCode)
+		m.connectionStatus = "auth_needed"
+		m.eventStatus = "auth_needed"
+		m.addOrReplaceDiagnostic("daemon_bootstrap_"+valueOr(result.Code, "auth_needed"), "warning", bootstrapResultMessage(result))
 		return
 	}
 	m.clearDiagnostics("daemon_bootstrap_ready")
@@ -5748,13 +5786,32 @@ func (m *RootModel) close() {
 }
 
 func eventDiagnosticCode(err error) string {
+	if isAuthAPIError(err) {
+		return authTokenInvalidDiagnosticCode
+	}
+	return eventDisconnectedDiagnosticCode
+}
+
+func isAuthAPIError(err error) bool {
 	var apiError *relaybaseclient.APIError
 	if errors.As(err, &apiError) {
 		if apiError.StatusCode == 401 || apiError.StatusCode == 403 {
-			return "auth_token_invalid"
+			return true
 		}
 	}
-	return "event_stream_disconnected"
+	return false
+}
+
+func (m *RootModel) reloadTokenFromDisk() bool {
+	if m.client == nil || !m.cfg.ReloadTokenFromDisk() {
+		return false
+	}
+	m.client.SetToken(m.cfg.Token)
+	return true
+}
+
+func (m RootModel) authNeededMessage() string {
+	return "Relaybase is reachable, but this TUI is not authenticated for the running daemon state. Run relaybase diagnose-token, then use /daemon retry."
 }
 
 func shouldRefreshState(eventType string) bool {

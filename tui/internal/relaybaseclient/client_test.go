@@ -44,6 +44,35 @@ func TestGetStateSuccess(t *testing.T) {
 	}
 }
 
+func TestSetTokenAppliesRotationToSubsequentRequests(t *testing.T) {
+	request := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		request++
+		want := "Bearer old-token"
+		if request == 2 {
+			want = "Bearer new-token"
+		}
+		if got := r.Header.Get("Authorization"); got != want {
+			t.Fatalf("request %d authorization=%q want=%q", request, got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"apps":[]}`))
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "old-token", server.Client())
+	if _, err := client.GetState(context.Background()); err != nil {
+		t.Fatalf("first state request: %v", err)
+	}
+	client.SetToken(" new-token ")
+	if _, err := client.GetState(context.Background()); err != nil {
+		t.Fatalf("second state request: %v", err)
+	}
+	if got := client.Token(); got != "new-token" {
+		t.Fatalf("client token=%q", got)
+	}
+}
+
 func TestQueryLogsSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/__hub/api/apps/notes/logs" {

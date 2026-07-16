@@ -181,6 +181,7 @@ export interface VerificationResult {
   error?: string;
   recoveryHint?: LaunchFailureClassification;
   nextActions?: NextAction[];
+  registryApp?: AppRecord;
 }
 
 export interface ConfigureProjectResult {
@@ -235,7 +236,12 @@ export interface HealthCheckResult {
   ok: boolean;
   daemon: {
     reachable: boolean;
+    compatible: boolean;
+    authenticated: boolean;
+    status: "online" | "degraded" | "offline";
     url: string;
+    clientStateDir: string;
+    daemonStateDir?: string;
     error?: string;
   };
   project: {
@@ -290,6 +296,7 @@ export interface LaunchFailureClassification {
     | "dependency-missing"
     | "crash-loop"
     | "stale-process"
+    | "relaybase-auth"
     | DockerErrorCode;
   message: string;
   nextArchitectures: SetupArchitecture[];
@@ -776,6 +783,37 @@ export async function configureProject(options: ConfigureProjectOptions): Promis
     }),
     event("plan_selected", { id: selectedPlan.id, architecture: selectedPlan.architecture })
   ];
+  const noStart = options.noStart ?? answers.noStart;
+  if (!options.dryRun && !noStart) {
+    const daemon = await ensureDaemon(options, options.startDaemon !== false);
+    events.push(event("daemon_preflight", daemonDetails(daemon)));
+    if (!daemon.compatible) {
+      const owner: NextActionOwner = daemon.reachable ? "token" : "daemon";
+      return {
+        detection,
+        candidates,
+        selectedPlan,
+        appliedFiles: [],
+        recoveryAttempts: [],
+        verification: {
+          attempted: true,
+          daemonStarted: daemon.started,
+          daemon,
+          registered: false,
+          started: false,
+          ready: false,
+          error: daemon.error ?? daemon.userAction,
+          recoveryHint: classifyLaunchFailure({
+            error: daemon.error ?? daemon.userAction,
+            errorCode: daemon.code,
+            statusCode: daemon.reachable ? 401 : 0,
+            architecture: selectedPlan.architecture
+          }),
+          nextActions: nextActionsForOpenFailure(options, { owner, daemon })
+        }
+      };
+    }
+  }
   let appliedFiles = options.dryRun
     ? selectedPlan.writes.map((write) => ({
         path: write.path,
@@ -789,16 +827,17 @@ export async function configureProject(options: ConfigureProjectOptions): Promis
     events.push(event("files_applied", { files: appliedFiles }));
   }
 
-  let registryApp = options.dryRun ? undefined : await registerConfiguredManifest(selectedPlan, options.stateDir);
+  let registryApp =
+    options.dryRun || !noStart ? undefined : await registerConfiguredManifest(selectedPlan, options.stateDir);
   if (registryApp) {
     events.push(event("registered", { id: registryApp.id, stateDir: options.stateDir }));
   }
 
-  const noStart = options.noStart ?? answers.noStart;
   let verification =
     noStart || options.dryRun
       ? { attempted: false, daemonStarted: false, registered: Boolean(registryApp), started: false, ready: false }
       : await verifyConfiguredApp(selectedPlan, options, events);
+  registryApp ??= verification.registryApp;
   const recoveryAttempts: RecoveryAttempt[] = [];
 
   if (
@@ -823,7 +862,6 @@ export async function configureProject(options: ConfigureProjectOptions): Promis
       const retryAppliedFiles = await applySetupPlan(retryPlan, {
         writeEnv: retryPlan.envStrategy !== "runtime-injection" && retryPlan.envStrategy !== "none"
       });
-      const retryRegistryApp = await registerConfiguredManifest(retryPlan, options.stateDir);
       const retryVerification = await verifyConfiguredApp(retryPlan, options, events);
       recoveryAttempts.push({
         planId: retryPlan.id,
@@ -833,7 +871,7 @@ export async function configureProject(options: ConfigureProjectOptions): Promis
       });
       selectedPlan = retryPlan;
       appliedFiles = retryAppliedFiles;
-      registryApp = retryRegistryApp;
+      registryApp = retryVerification.registryApp;
       verification = retryVerification;
       if (retryVerification.ready) {
         break;
@@ -919,7 +957,20 @@ export async function openProject(options: OpenProjectOptions): Promise<OpenProj
   }
 
   const daemonStarted = await ensureDaemon(options, options.startDaemon !== false);
-  if (!daemonStarted.reachable) {
+  if (!daemonStarted.compatible) {
+    if (daemonStarted.reachable) {
+      return {
+        appId: app.id,
+        url: humanUrl(app.id, options.port),
+        openedBrowser: false,
+        registered: false,
+        started: false,
+        ready: false,
+        daemon: daemonStarted,
+        error: daemonStarted.error ?? "Relaybase is reachable, but this state directory is not authenticated.",
+        nextActions: nextActionsForOpenFailure(options, { owner: "token", daemon: daemonStarted })
+      };
+    }
     let localRegistryError: string | undefined;
     let registered = false;
     try {
@@ -1047,7 +1098,19 @@ export async function healthProject(options: HealthProjectOptions): Promise<Heal
     });
   }
 
-  if (daemon.reachable && appId) {
+  if (daemon.reachable && !daemon.compatible) {
+    findings.push({
+      severity: "warning",
+      code: daemon.code === "daemon_state_mismatch" ? "DAEMON_STATE_MISMATCH" : "DAEMON_AUTH_REQUIRED",
+      message:
+        daemon.code === "daemon_state_mismatch"
+          ? "Relaybase is reachable, but the client and daemon use different state directories."
+          : "Relaybase is reachable, but the selected session token was not accepted.",
+      repair: "Run relaybase diagnose-token."
+    });
+  }
+
+  if (daemon.compatible && appId) {
     const stateResponse = await getAppStateViaApi(options, appId);
     if (stateResponse.ok && stateResponse.state) {
       state = stateResponse.state;
@@ -1117,7 +1180,7 @@ export async function healthProject(options: HealthProjectOptions): Promise<Heal
   }
 
   if (options.prove) {
-    proof = await proveProject(options, detection.root, manifestPath, appId, dockerProfile, daemon.reachable);
+    proof = await proveProject(options, detection.root, manifestPath, appId, dockerProfile, daemon.compatible);
     if (!proof.ok) {
       findings.push({
         severity: "error",
@@ -1132,7 +1195,7 @@ export async function healthProject(options: HealthProjectOptions): Promise<Heal
 
   const ok =
     findings.every((finding) => finding.severity !== "error") &&
-    Boolean(daemon.reachable) &&
+    Boolean(daemon.compatible) &&
     Boolean(manifestPath) &&
     (proof ? proof.ok : true);
   const nextActions = nextActionsFromHealthFindings(options, findings, state);
@@ -1142,7 +1205,12 @@ export async function healthProject(options: HealthProjectOptions): Promise<Heal
     ok,
     daemon: {
       reachable: daemon.reachable,
+      compatible: daemon.compatible,
+      authenticated: daemon.authenticated,
+      status: daemon.compatible ? "online" : daemon.reachable ? "degraded" : "offline",
       url: `http://${options.host}:${options.port}`,
+      clientStateDir: options.stateDir,
+      ...(daemon.daemonStateDir ? { daemonStateDir: daemon.daemonStateDir } : {}),
       ...(daemon.error ? { error: daemon.error } : {})
     },
     project: {
@@ -1157,19 +1225,48 @@ export async function healthProject(options: HealthProjectOptions): Promise<Heal
     ...(proof ? { proof } : {}),
     findings,
     ...(nextActions.length ? { nextActions } : {}),
-    ...(ok ? {} : { recommendedAction: "Run relaybase configure --repair." })
+    ...(ok
+      ? {}
+      : {
+          recommendedAction:
+            daemon.reachable && !daemon.compatible
+              ? "Run relaybase diagnose-token."
+              : "Run relaybase configure --repair."
+        })
   };
 }
 
 export function classifyLaunchFailure(input: {
   error?: string;
+  errorCode?: string;
+  statusCode?: number;
+  architecture?: SetupArchitecture;
   lastError?: string;
   logs?: string[];
   runtimeStatus?: string;
 }): LaunchFailureClassification {
   const text = [input.error, input.lastError, ...(input.logs ?? [])].filter(Boolean).join("\n").toLowerCase();
-  const dockerFailure = classifyDockerFailure(text);
-  if (dockerFailure.code !== "unknown") {
+  const structuredCode = input.errorCode ?? relaybaseErrorCode(input.error);
+  if (
+    input.statusCode === 401 ||
+    input.statusCode === 403 ||
+    structuredCode?.startsWith("UNAUTHORIZED_") ||
+    structuredCode === "daemon_state_mismatch" ||
+    structuredCode === "daemon_auth_missing" ||
+    structuredCode === "daemon_auth_invalid"
+  ) {
+    return {
+      code: "relaybase-auth",
+      message: "Relaybase is reachable, but this client is not authenticated for the running daemon state.",
+      nextArchitectures: [],
+      requiresApproval: false
+    };
+  }
+
+  const dockerEvidence =
+    input.architecture === "docker-compose-service" || /\b(docker|compose|container|registry|image pull)\b/.test(text);
+  const dockerFailure = dockerEvidence ? classifyDockerFailure(text) : undefined;
+  if (dockerFailure && dockerFailure.code !== "unknown") {
     return {
       code: dockerFailure.code,
       message: dockerFailure.message,
@@ -1274,9 +1371,13 @@ function nextActionsForOpenFailure(
     actions.push({
       owner: "token",
       action:
-        "Use the same Relaybase state directory and session token as the running daemon, or restart the daemon with this state directory.",
-      command: `relaybase open --state-dir ${quoteArg(options.stateDir)} --json`,
-      evidence: input.registerResponse?.body
+        "Diagnose the selected state directory and running daemon before retrying; Relaybase will not copy or display either token.",
+      command: `relaybase diagnose-token --state-dir ${quoteArg(options.stateDir)}`,
+      ...(input.registerResponse
+        ? {
+            evidence: `${relaybaseErrorCode(input.registerResponse.body) ?? "RELAYBASE_AUTH_REQUIRED"}: HTTP ${input.registerResponse.statusCode}`
+          }
+        : {})
     });
   } else if (input.owner === "permissions") {
     actions.push({
@@ -1394,6 +1495,9 @@ function nextActionsFromHealthFindings(
 }
 
 function ownerForLaunchFailure(recoveryHint: LaunchFailureClassification): NextActionOwner {
+  if (recoveryHint.code === "relaybase-auth") {
+    return "token";
+  }
   if (recoveryHint.code === "health-route") {
     return "health-url";
   }
@@ -1417,6 +1521,9 @@ function ownerForLaunchFailure(recoveryHint: LaunchFailureClassification): NextA
 }
 
 function ownerForFinding(finding: HealthFinding): NextActionOwner {
+  if (finding.code.includes("AUTH") || finding.code.includes("STATE_MISMATCH")) {
+    return "token";
+  }
   if (finding.code.includes("DAEMON")) {
     return "daemon";
   }
@@ -1484,13 +1591,13 @@ async function proveProject(
 
   if (lifecycle && !effectiveDaemonReachable) {
     const daemon = await ensureDaemon(options, options.startDaemon === true);
-    effectiveDaemonReachable = daemon.reachable;
+    effectiveDaemonReachable = daemon.compatible;
     checks.push({
       name: "daemon-start",
-      ok: daemon.reachable,
-      severity: daemon.reachable ? "info" : "error",
-      message: daemon.reachable
-        ? `Relaybase daemon ${daemon.started ? "started" : "was already reachable"}.`
+      ok: daemon.compatible,
+      severity: daemon.compatible ? "info" : "error",
+      message: daemon.compatible
+        ? `Relaybase daemon ${daemon.started ? "started" : "was already reachable and authenticated"}.`
         : (daemon.error ?? "Relaybase daemon could not be started."),
       details: daemonDetails(daemon)
     });
@@ -1731,17 +1838,22 @@ async function verifyConfiguredApp(
   const appId = String(selectedPlan.manifest.id);
   const daemon = await ensureDaemon(options, options.startDaemon !== false);
   events.push(event("daemon", daemonDetails(daemon)));
-  if (!daemon.reachable) {
+  if (!daemon.compatible) {
     return {
       attempted: true,
       daemonStarted: daemon.started,
       daemon,
-      registered: true,
+      registered: false,
       started: false,
       ready: false,
       error: daemon.error,
-      recoveryHint: classifyLaunchFailure({ error: daemon.error }),
-      nextActions: nextActionsForOpenFailure(options, { owner: "daemon", daemon })
+      recoveryHint: classifyLaunchFailure({
+        error: daemon.error,
+        errorCode: daemon.code,
+        statusCode: daemon.reachable ? 401 : 0,
+        architecture: selectedPlan.architecture
+      }),
+      nextActions: nextActionsForOpenFailure(options, { owner: daemon.reachable ? "token" : "daemon", daemon })
     };
   }
 
@@ -1760,7 +1872,12 @@ async function verifyConfiguredApp(
       started: false,
       ready: false,
       error: registerResponse.body,
-      recoveryHint: classifyLaunchFailure({ error: registerResponse.body }),
+      recoveryHint: classifyLaunchFailure({
+        error: registerResponse.body,
+        errorCode: relaybaseErrorCode(registerResponse.body),
+        statusCode: registerResponse.statusCode,
+        architecture: selectedPlan.architecture
+      }),
       nextActions: nextActionsForOpenFailure(options, {
         owner: registerResponse.statusCode === 401 ? "token" : "daemon",
         daemon,
@@ -1768,6 +1885,8 @@ async function verifyConfiguredApp(
       })
     };
   }
+
+  const registeredBody = safeJson(registerResponse.body) as { app?: AppRecord };
 
   const startResponse = await mutateAppViaApi(options, appId, "start").catch((error: unknown) => ({
     ok: false,
@@ -1789,7 +1908,8 @@ async function verifyConfiguredApp(
         error: startResponse.body,
         lastError: state?.lastError ?? undefined,
         logs: state?.recentLogs,
-        runtimeStatus: state?.runtime.status
+        runtimeStatus: state?.runtime.status,
+        architecture: selectedPlan.architecture
       })
     : undefined;
   return {
@@ -1797,6 +1917,7 @@ async function verifyConfiguredApp(
     daemonStarted: daemon.started,
     daemon,
     registered: true,
+    ...(registeredBody.app ? { registryApp: registeredBody.app } : {}),
     started: startResponse.ok,
     ready,
     ...(state ? { state } : {}),
@@ -1825,7 +1946,7 @@ function recoveryPlans(
 
 async function stopConfiguredApp(options: RelaybaseCommandOptions, appId: string): Promise<void> {
   const daemon = await discovery(options);
-  if (!daemon.reachable) {
+  if (!daemon.compatible) {
     return;
   }
   await mutateAppViaApi(options, appId, "stop").catch(() => undefined);
@@ -2956,6 +3077,18 @@ function safeJson(text: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function relaybaseErrorCode(raw: string | undefined): string | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const parsed = safeJson(raw) as {
+    code?: unknown;
+    relaybaseError?: { code?: unknown };
+  };
+  const code = parsed.relaybaseError?.code ?? parsed.code;
+  return typeof code === "string" ? code : undefined;
 }
 
 function event(type: string, data: Record<string, unknown>): Record<string, unknown> {

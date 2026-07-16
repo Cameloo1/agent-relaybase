@@ -495,7 +495,7 @@ func renderAgentResponseContent(style styles.Styles, data ShellData, width int, 
 }
 
 func operatorInventoryViewport(data ShellData) bool {
-	return data.ConnectionStatus == "connected" && data.FocusedPane == nil && len(data.Panes) == 0 && len(data.Inventory) > 0
+	return connectionCanRenderState(data.ConnectionStatus) && data.FocusedPane == nil && len(data.Panes) == 0 && len(data.Inventory) > 0
 }
 
 // InventorySelectionLine returns the selected row in the exact rendered
@@ -533,10 +533,14 @@ func renderOperatorRail(style styles.Styles, data ShellData, width int) string {
 	if attention == "" {
 		attention = "none"
 	}
-	connection := operatorRailField(style, "Relaybase", valueOr(data.ConnectionStatus, "unknown"))
+	connectionState := valueOr(data.ConnectionStatus, "unknown")
+	connectionLabel := displayConnectionStatus(connectionState)
+	connection := operatorRailDisplayField(style, "Relaybase", connectionLabel, connectionState)
+	compactConnection := operatorRailDisplayField(style, "Relaybase", compactConnectionStatus(connectionState), connectionState)
 	agentStatus := valueOr(data.AgentStatus, "unknown")
 	agent := style.Muted.Render("Agent ") + operatorRailTone(style, agentStatus).Render(displayAgentStatus(agentStatus))
-	events := operatorRailField(style, "Events", valueOr(data.EventStatus, "unknown"))
+	eventStatus := valueOr(data.EventStatus, "unknown")
+	events := operatorRailDisplayField(style, "Events", displayEventStatus(eventStatus), eventStatus)
 	if data.EventCount > 0 {
 		events += style.Muted.Render(fmt.Sprintf(" (%d)", data.EventCount))
 	}
@@ -581,9 +585,9 @@ func renderOperatorRail(style styles.Styles, data ShellData, width int) string {
 
 	columnWidths := operatorRailColumnWidths(width, 5)
 	connectionSlot := firstOperatorRailCandidate(
-		maxInt(1, columnWidths[0]-1),
+		maxInt(1, columnWidths[0]),
 		connection,
-		style.Muted.Render("Relaybase ")+operatorRailTone(style, data.ConnectionStatus).Render("online"),
+		compactConnection,
 	)
 	agentSlot := firstOperatorRailCandidate(maxInt(1, columnWidths[1]-1), withOperatorRailDetail(style, agent, thread), agent)
 	appsSlot := operatorAppRailSlot(style, maxInt(1, columnWidths[2]-1), group, apps, compactApps, tightApps, minimumApps)
@@ -614,14 +618,18 @@ func operatorAttentionTone(style styles.Styles, diagnostics []DiagnosticLine) li
 }
 
 func operatorRailField(style styles.Styles, label string, state string) string {
-	return style.Muted.Render(label+" ") + operatorRailTone(style, state).Render(state)
+	return operatorRailDisplayField(style, label, state, state)
+}
+
+func operatorRailDisplayField(style styles.Styles, label string, display string, state string) string {
+	return style.Muted.Render(label+" ") + operatorRailTone(style, state).Render(display)
 }
 
 func operatorRailTone(style styles.Styles, state string) lipgloss.Style {
 	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "connected", "running", "ready", "healthy", "active", "session", "streaming":
+	case "connected", "online", "running", "ready", "healthy", "active", "session", "streaming":
 		return style.PaneLogSuccess
-	case "waiting", "degraded", "connecting", "checking", "pending", "stale", "starting", "stopping", "sending", "reconnecting", "needs_config":
+	case "waiting", "degraded", "auth_needed", "connecting", "checking", "pending", "stale", "starting", "stopping", "sending", "reconnecting", "needs_config":
 		return style.PaneLogWarning
 	case "offline", "failed", "error", "disconnected", "unavailable":
 		return style.PaneLogError
@@ -629,6 +637,32 @@ func operatorRailTone(style styles.Styles, state string) lipgloss.Style {
 		return style.Muted
 	default:
 		return style.Muted
+	}
+}
+
+func displayConnectionStatus(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "connected":
+		return "online"
+	case "auth_needed":
+		return "auth needed"
+	default:
+		return valueOr(strings.ReplaceAll(strings.TrimSpace(state), "_", " "), "unknown")
+	}
+}
+
+func compactConnectionStatus(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "connected":
+		return "online"
+	case "auth_needed":
+		return "auth"
+	case "reconnecting":
+		return "retry"
+	case "connecting":
+		return "wait"
+	default:
+		return valueOr(strings.ReplaceAll(strings.TrimSpace(state), "_", " "), "unknown")
 	}
 }
 
@@ -640,6 +674,15 @@ func displayAgentStatus(state string) string {
 		return "setup needed"
 	default:
 		return valueOr(strings.TrimSpace(state), "unknown")
+	}
+}
+
+func displayEventStatus(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "auth_needed":
+		return "auth"
+	default:
+		return valueOr(strings.ReplaceAll(strings.TrimSpace(state), "_", " "), "unknown")
 	}
 }
 
@@ -1176,13 +1219,17 @@ func renderBody(style styles.Styles, data ShellData) string {
 	if strings.TrimSpace(data.SetupPanel) != "" {
 		return withDiagnosticsSummary(style, data, style.Body.Width(contentWidth(data.Width)).Render(safemarkdown.SanitizeTerminalText(data.SetupPanel)))
 	}
-	if data.ConnectionStatus != "connected" || !hasRenderableState(data) {
+	if !connectionCanRenderState(data.ConnectionStatus) || !hasRenderableState(data) {
 		return style.Body.Width(contentWidth(data.Width)).Render(renderConnectionState(data))
 	}
 	if data.FocusedPane != nil {
 		return withDiagnosticsSummary(style, data, renderFocusedPane(style, data, *data.FocusedPane))
 	}
 	return withDiagnosticsSummary(style, data, renderPaneGrid(style, data))
+}
+
+func connectionCanRenderState(status string) bool {
+	return status == "connected" || status == "auth_needed"
 }
 
 func hasRenderableState(data ShellData) bool {
@@ -1193,8 +1240,8 @@ func hasRenderableState(data ShellData) bool {
 }
 
 func renderStatusLine(data ShellData, width int) string {
-	daemonStatus := valueOr(data.ConnectionStatus, "connecting")
-	eventStatus := valueOr(data.EventStatus, "connecting")
+	daemonStatus := displayConnectionStatus(valueOr(data.ConnectionStatus, "connecting"))
+	eventStatus := displayEventStatus(valueOr(data.EventStatus, "connecting"))
 	agentStatus := valueOr(data.AgentStatus, "checking")
 	if width < 64 {
 		line := fmt.Sprintf("d:%s e:%s a:%s apps:%d", daemonStatus, eventStatus, agentStatus, data.AppCount)
@@ -2015,6 +2062,8 @@ func renderConnectionState(data ShellData) string {
 		return strings.Join(lines, "\n")
 	case "connecting":
 		return "Connecting to Relaybase daemon…\n\nRegistered apps and monitoring panes will appear after daemon state loads."
+	case "auth_needed":
+		return "Relaybase authentication is required\n\nThe daemon is reachable, but this TUI cannot read its protected state. Run relaybase diagnose-token, then use /daemon retry."
 	default:
 		if !data.StateKnown {
 			return "Loading Relaybase daemon state…"

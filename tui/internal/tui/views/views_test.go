@@ -2,6 +2,7 @@ package views
 
 import (
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -793,7 +794,7 @@ func TestRegisteredAppsModalHasExplicitEmptyAndOfflineState(t *testing.T) {
 func TestConnectionAndDiagnosticStatesAreDistinct(t *testing.T) {
 	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
 	style := styles.New(theme)
-	base := ShellData{Width: 80, Height: 16, EventStatus: "connecting", AgentStatus: "checking", KeyMap: keymap.Default(), AssistantPrompt: "> _"}
+	base := ShellData{OperatorConsole: true, Width: 80, Height: 24, EventStatus: "connecting", AgentStatus: "checking", KeyMap: keymap.Default(), AssistantPrompt: "> _"}
 
 	base.ConnectionStatus = "connecting"
 	if rendered := compactSnapshot(RenderShell(style, base)); !strings.Contains(rendered, "Connecting to Relaybase daemon") {
@@ -803,6 +804,16 @@ func TestConnectionAndDiagnosticStatesAreDistinct(t *testing.T) {
 	if rendered := compactSnapshot(RenderShell(style, base)); !strings.Contains(rendered, "Loading Relaybase daemon state") {
 		t.Fatalf("missing loading state:\n%s", rendered)
 	}
+	base.ConnectionStatus = "auth_needed"
+	base.EventStatus = "auth_needed"
+	base.StateKnown = true
+	base.Panes = paneSnapshots(1)
+	base.PaneLayout = panes.CalculateLayout(base.Width, 6, 1)
+	if rendered := compactSnapshot(RenderShell(style, base)); !strings.Contains(rendered, "Relaybase auth") || !strings.Contains(rendered, "Events auth") || strings.Contains(rendered, "auth_n.") || !strings.Contains(rendered, "App 1: frontend") || strings.Contains(rendered, "daemon is offline") {
+		t.Fatalf("auth-needed state should remain yellow/degraded and preserve last-known panes:\n%s", rendered)
+	}
+	base.Panes = nil
+	base.StateKnown = false
 	base.ConnectionStatus = "offline"
 	base.Diagnostics = []DiagnosticLine{{Code: "daemon", Severity: "error", Message: "unreachable"}}
 	if rendered := compactSnapshot(RenderShell(style, base)); !strings.Contains(rendered, "daemon is offline") || strings.Contains(rendered, "unreachable") {
@@ -811,6 +822,59 @@ func TestConnectionAndDiagnosticStatesAreDistinct(t *testing.T) {
 	base.DiagnosticsOpen = true
 	if rendered := compactSnapshot(RenderShell(style, base)); !strings.Contains(rendered, "unreachable") || !strings.Contains(rendered, "Esc to return") {
 		t.Fatalf("diagnostics drawer missing detail and exit hint:\n%s", rendered)
+	}
+}
+
+func TestConnectionLabelsAndColorsShareOneProjection(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	style := styles.New(theme)
+	tests := []struct {
+		state      string
+		label      string
+		compact    string
+		foreground any
+	}{
+		{state: "connected", label: "online", compact: "online", foreground: theme.Success},
+		{state: "auth_needed", label: "auth needed", compact: "auth", foreground: theme.Warning},
+		{state: "connecting", label: "connecting", compact: "wait", foreground: theme.Warning},
+		{state: "offline", label: "offline", compact: "offline", foreground: theme.Error},
+	}
+	for _, test := range tests {
+		t.Run(test.state, func(t *testing.T) {
+			if got := displayConnectionStatus(test.state); got != test.label {
+				t.Fatalf("display label=%q want=%q", got, test.label)
+			}
+			if got := compactConnectionStatus(test.state); got != test.compact {
+				t.Fatalf("compact label=%q want=%q", got, test.compact)
+			}
+			if got := operatorRailTone(style, test.state).GetForeground(); !reflect.DeepEqual(got, test.foreground) {
+				t.Fatalf("foreground=%v want=%v", got, test.foreground)
+			}
+		})
+	}
+}
+
+func TestConnectedHeaderNeverFallsBackToAnOfflineLabelAtNarrowWidths(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	style := styles.New(theme)
+	for _, width := range []int{40, 52, 64, 80, 120} {
+		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
+			rendered := compactSnapshot(RenderShell(style, ShellData{
+				OperatorConsole:  true,
+				Width:            width,
+				Height:           24,
+				ConnectionStatus: "connected",
+				EventStatus:      "connected",
+				AgentStatus:      "waiting",
+				StateKnown:       true,
+				KeyMap:           keymap.Default(),
+				AssistantPrompt:  "> _",
+				PageCount:        1,
+			}))
+			if !strings.Contains(rendered, "Relaybase online") || strings.Contains(rendered, "Relaybase offline") {
+				t.Fatalf("connected header changed semantic label at width %d:\n%s", width, rendered)
+			}
+		})
 	}
 }
 

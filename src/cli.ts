@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -14,7 +15,8 @@ import {
 } from "./appListing.ts";
 import type { DockerComposeDetection, DockerSetupOptions } from "./dockerProfile.ts";
 import { createRelaybaseServer } from "./server.ts";
-import { ensureDaemon } from "./daemonLauncher.ts";
+import { discovery, ensureDaemon } from "./daemonLauncher.ts";
+import { arrowSelectCursorRows } from "./cliPrompt.ts";
 import { Registry } from "./registry.ts";
 import { DEFAULT_HOST, DEFAULT_PORT, getDefaultStateDir, getOrCreateSessionToken } from "./state.ts";
 import type { AppState, AppStatusView } from "./types.ts";
@@ -151,6 +153,10 @@ async function main(): Promise<void> {
     case "check":
       process.exitCode = await checkRelaybase(options);
       return;
+    case "diagnose-token":
+    case "diagnose_token":
+      process.exitCode = await diagnoseToken(options);
+      return;
     case "verify":
       process.exitCode = await verifyRelaybase(options);
       return;
@@ -247,6 +253,7 @@ async function checkRelaybase(options: CliOptions): Promise<number> {
   }
 
   console.log("Relaybase check");
+  console.log(`Relaybase package: ${packageVersion()}`);
   let exitCode = 0;
   if (sourceCheckout) {
     for (const step of steps) {
@@ -260,7 +267,9 @@ async function checkRelaybase(options: CliOptions): Promise<number> {
     console.log("==> Installed TUI");
     const resolution = await resolveTuiBinary();
     if (resolution.ok && resolution.path) {
-      console.log(`Installed TUI: ready (${resolution.source ?? "packaged binary"}).`);
+      console.log(
+        `Installed TUI: ready (${resolution.source ?? "packaged binary"}; build ${tuiBuildIdentity(resolution.path)}).`
+      );
     } else {
       process.stderr.write(formatMissingTuiBinaryDiagnostic(resolution));
       exitCode = 1;
@@ -282,6 +291,71 @@ async function checkRelaybase(options: CliOptions): Promise<number> {
   }
 
   return exitCode;
+}
+
+async function diagnoseToken(options: CliOptions): Promise<number> {
+  const tokenPath = path.join(options.stateDir, "session-token");
+  const tokenPresent = Boolean(readExistingSessionToken(options.stateDir));
+  const daemon = await discovery(options);
+  const result = {
+    ok: daemon.compatible,
+    diagnosis: daemon.code,
+    client: {
+      stateDir: options.stateDir,
+      tokenPath,
+      tokenPresent
+    },
+    daemon: {
+      reachable: daemon.reachable,
+      compatible: daemon.compatible,
+      authenticated: daemon.authenticated,
+      ...(daemon.daemonStateDir ? { stateDir: daemon.daemonStateDir } : {})
+    },
+    nextAction: tokenDiagnosisNextAction(daemon.code)
+  };
+
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log("Relaybase token diagnosis");
+    console.log(`Client state: ${result.client.stateDir}`);
+    console.log(`Client token: ${tokenPresent ? "present" : "missing"}`);
+    console.log(`Daemon: ${daemon.compatible ? "online" : daemon.reachable ? "degraded" : "offline"}`);
+    if (daemon.daemonStateDir) {
+      console.log(`Daemon state: ${daemon.daemonStateDir}`);
+    }
+    console.log(`State match: ${daemon.stateDirMatches ? "yes" : "no"}`);
+    console.log(`Authentication: ${daemon.authenticated ? "accepted" : "not accepted"}`);
+    console.log(`Diagnosis: ${daemon.code}`);
+    console.log(`Next: ${result.nextAction}`);
+    console.log("Token contents were not read from the daemon or printed.");
+  }
+  return daemon.compatible ? 0 : 1;
+}
+
+function tokenDiagnosisNextAction(code: string): string {
+  switch (code) {
+    case "daemon_state_mismatch":
+      return "Use the running daemon state directory, or stop that daemon explicitly before selecting another state directory.";
+    case "daemon_auth_missing":
+      return "Restore read access to the selected state directory session-token, then retry relaybase start.";
+    case "daemon_auth_invalid":
+      return "Restart the client after confirming it uses the same state directory as the running daemon.";
+    case "daemon_ready":
+      return "No token repair is needed.";
+    case "daemon_unreachable":
+      return "Run relaybase start to start the daemon and TUI.";
+    default:
+      return "Inspect the configured host, port, and state directory before retrying.";
+  }
+}
+
+function tuiBuildIdentity(binaryPath: string): string {
+  try {
+    return createHash("sha256").update(readFileSync(binaryPath)).digest("hex").slice(0, 12);
+  } catch {
+    return "unavailable";
+  }
 }
 
 async function verifyRelaybase(options: CliOptions): Promise<number> {
@@ -847,7 +921,7 @@ async function register(manifestPath: string | undefined, options: CliOptions): 
     );
   }
   const daemon = await ensureDaemon(options, options.daemonStartPolicy === "auto");
-  if (!daemon.reachable) {
+  if (!daemon.compatible) {
     throw new Error(`${daemon.userAction}${daemon.error ? ` (${daemon.error})` : ""}`);
   }
   const mode = path.basename(manifestPath).toLowerCase() === "relaybase.app.json" ? "manifest" : "folder";
@@ -1001,7 +1075,7 @@ async function listApps(options: CliOptions): Promise<void> {
   if (!stateResponse.ok) {
     if (stateResponse.statusCode === 401) {
       throw new Error(
-        "Relaybase is reachable, but its session token is unavailable or does not match this state directory. Run relaybase diagnose_token."
+        "Relaybase is reachable, but its session token is unavailable or does not match this state directory. Run relaybase diagnose-token."
       );
     }
     if (listFilterNeedsRuntime(options.listFilter)) {
@@ -1614,6 +1688,7 @@ Commands:
   agent                        Agent Gateway diagnostics and live provider smokes
   start                        Launch Relaybase daemon/TUI, or start an app when given <app-id>
   check                        Diagnose local Relaybase, TUI, project, and app state
+  diagnose-token               Compare client and daemon state identity without printing tokens
   verify                       Run bundled source-checkout verification gates
   configure                     Set up or repair the current project for Relaybase
   open                          Start the configured app and open its Relaybase route
@@ -1683,7 +1758,11 @@ function printConfigureResult(result: ConfigureProjectResult): void {
     console.log(`${file.action.padEnd(9)} ${file.path}`);
   }
   if (result.registryApp) {
-    console.log(`registered ${result.registryApp.id}`);
+    console.log(
+      result.verification.attempted
+        ? `registered ${result.registryApp.id}`
+        : `saved ${result.registryApp.id} for the selected Relaybase state directory`
+    );
   }
   if (result.verification.attempted) {
     console.log(`started: ${result.verification.started ? "yes" : "no"}`);
@@ -1692,7 +1771,7 @@ function printConfigureResult(result: ConfigureProjectResult): void {
       console.log(`url: ${result.verification.url}`);
     }
     if (result.verification.error) {
-      console.log(`failure: ${result.verification.error}`);
+      console.log(`failure: ${conciseRelaybaseFailure(result.verification.error)}`);
     }
     if (result.verification.recoveryHint) {
       console.log(`recovery: ${result.verification.recoveryHint.message}`);
@@ -1700,6 +1779,7 @@ function printConfigureResult(result: ConfigureProjectResult): void {
   } else {
     console.log("launch verification skipped");
   }
+  printNextActions(result.verification.nextActions);
   if (result.reportPath) {
     console.log(`report: ${result.reportPath}`);
   }
@@ -1723,7 +1803,7 @@ function printOpenResult(result: OpenProjectResult): void {
 function printHealthResult(result: HealthCheckResult): void {
   console.log(`Relaybase health`);
   console.log(`Project: ${result.cwd}`);
-  console.log(`Daemon: ${result.daemon.reachable ? "reachable" : "unreachable"} (${result.daemon.url})`);
+  console.log(`Daemon: ${result.daemon.status} (${result.daemon.url})`);
   console.log(`Configured: ${result.project.configured ? "yes" : "no"}`);
   if (result.appId) {
     console.log(`App: ${result.appId}`);
@@ -1754,7 +1834,7 @@ function printNextActions(nextActions: OpenProjectResult["nextActions"] | Health
   console.log("Next actions:");
   for (const action of nextActions) {
     const command = action.command ? ` command: ${action.command}` : "";
-    const evidence = action.evidence ? ` evidence: ${action.evidence}` : "";
+    const evidence = action.evidence ? ` evidence: ${conciseRelaybaseFailure(action.evidence)}` : "";
     console.log(`- ${action.owner}: ${action.action}${command}${evidence}`);
   }
 }
@@ -1847,7 +1927,7 @@ async function arrowSelect(prompt: string, choices: string[], initialIndex: numb
     for (let choiceIndex = 0; choiceIndex < choices.length; choiceIndex += 1) {
       process.stdout.write(`${choiceIndex === index ? "> " : "  "}${choices[choiceIndex]}\n`);
     }
-    process.stdout.write(`\x1b[${choices.length}A`);
+    process.stdout.write(`\x1b[${arrowSelectCursorRows(choices.length)}A`);
   };
 
   render();
@@ -1861,7 +1941,7 @@ async function arrowSelect(prompt: string, choices: string[], initialIndex: numb
         render();
       } else if (key.name === "return") {
         cleanup();
-        process.stdout.write(`\x1b[${choices.length}B`);
+        process.stdout.write(`\x1b[${arrowSelectCursorRows(choices.length)}B`);
         resolve(index);
       } else if (key.ctrl && key.name === "c") {
         cleanup();
@@ -1874,6 +1954,30 @@ async function arrowSelect(prompt: string, choices: string[], initialIndex: numb
     };
     process.stdin.on("keypress", onKeypress);
   });
+}
+
+function conciseRelaybaseFailure(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{")) {
+    return trimmed.replace(/\s+/g, " ");
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      code?: unknown;
+      message?: unknown;
+      error?: unknown;
+      relaybaseError?: { code?: unknown; message?: unknown };
+    };
+    const code = parsed.relaybaseError?.code ?? parsed.code;
+    const message = parsed.relaybaseError?.message ?? parsed.message ?? parsed.error;
+    return (
+      [typeof code === "string" ? code : undefined, typeof message === "string" ? message : undefined]
+        .filter(Boolean)
+        .join(": ") || "Relaybase returned structured diagnostic evidence; rerun with --json for details."
+    );
+  } catch {
+    return "Relaybase returned structured diagnostic evidence; rerun with --json for details.";
+  }
 }
 
 function hasDockerOptions(options: DockerSetupOptions): boolean {

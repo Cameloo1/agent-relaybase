@@ -86,6 +86,21 @@ export async function handleApiRequest(
   setCorrelationHeader(response, correlationId);
 
   try {
+    if (request.method === "GET" && url.pathname === "/__hub/api/session") {
+      requireToken(runtime, request, {
+        code: "UNAUTHORIZED_SESSION",
+        message: "Unauthorized Relaybase session check.",
+        userAction: "Run relaybase diagnose-token with the same state directory as the running daemon."
+      });
+      sendJson(response, 200, {
+        session: {
+          authenticated: true,
+          stateDir: runtime.stateDir
+        }
+      });
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/__hub/api/state") {
       requireToken(runtime, request, {
         code: "UNAUTHORIZED_STATE_READ",
@@ -905,7 +920,7 @@ function requireToken(
         detail: tokenDiagnostics(runtime),
         userAction:
           options.userAction ??
-          "Run relaybase diagnose_token or use the session token from this daemon state directory."
+          "Run relaybase diagnose-token or use the session token from this daemon state directory."
       }
     );
   }
