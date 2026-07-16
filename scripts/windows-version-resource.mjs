@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -17,6 +17,13 @@ export function windowsResourceVersion(version) {
   return `${parts.join(".")}.0`;
 }
 
+export function ensureGoCommandDirectories(env) {
+  for (const name of ["GOCACHE", "GOTMPDIR"]) {
+    const directory = env[name]?.trim();
+    if (directory) mkdirSync(directory, { recursive: true });
+  }
+}
+
 export function prepareWindowsVersionResources(options = {}) {
   const rootDir = options.rootDir ?? root;
   const tuiDir = path.join(rootDir, "tui");
@@ -28,6 +35,8 @@ export function prepareWindowsVersionResources(options = {}) {
   const generated = arches.map((arch) => `${outputPrefix}_windows_${arch}.syso`);
   for (const filePath of generated) rmSync(filePath, { force: true });
 
+  const commandEnv = options.env ?? process.env;
+  ensureGoCommandDirectories(commandEnv);
   const spawn = options.spawn ?? spawnSync;
   const result = spawn(
     "go",
@@ -48,7 +57,7 @@ export function prepareWindowsVersionResources(options = {}) {
     ],
     {
       cwd: tuiDir,
-      env: options.env ?? process.env,
+      env: commandEnv,
       encoding: "utf8",
       shell: false,
       stdio: ["ignore", "pipe", "pipe"]

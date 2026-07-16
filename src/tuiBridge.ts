@@ -311,7 +311,7 @@ export async function runRelaybaseTui(
     if (fallback) {
       child = fallback;
     } else {
-      stderr.write(formatTuiLaunchFailure(resolution.path, error));
+      stderr.write(formatTuiLaunchFailure(resolution.path, error, options.platform ?? process.platform));
       if (bootstrap) {
         await bootstrap.close();
       }

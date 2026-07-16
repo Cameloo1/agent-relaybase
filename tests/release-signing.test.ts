@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,7 +9,7 @@ import {
   inspectAuthenticodeBuffer,
   verifyAuthenticodeTrust
 } from "../scripts/windows-signature.mjs";
-import { windowsResourceVersion } from "../scripts/windows-version-resource.mjs";
+import { ensureGoCommandDirectories, windowsResourceVersion } from "../scripts/windows-version-resource.mjs";
 
 test("Authenticode inspection distinguishes signed, unsigned, and malformed PE files", () => {
   const signed = inspectAuthenticodeBuffer(peFixture({ signed: true }));
@@ -68,6 +68,19 @@ test("Windows version conversion is deterministic and bounded", () => {
   assert.equal(windowsResourceVersion("12.34.56-beta.1"), "12.34.56.0");
   assert.throws(() => windowsResourceVersion("1.2"), /cannot be represented/);
   assert.throws(() => windowsResourceVersion("1.2.70000"), /exceeds Windows version metadata limits/);
+});
+
+test("Windows resource generation prepares clean Go cache and temp directories", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "relaybase-go-directories-"));
+  const goCache = path.join(directory, "cache", "nested");
+  const goTmp = path.join(directory, "tmp", "nested");
+  try {
+    ensureGoCommandDirectories({ GOCACHE: goCache, GOTMPDIR: goTmp });
+    assert.equal(existsSync(goCache), true);
+    assert.equal(existsSync(goTmp), true);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("Windows trust validation is explicitly unavailable off Windows", () => {
