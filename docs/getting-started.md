@@ -1,17 +1,23 @@
 # Getting started
 
-This guide takes a clean machine from installation to a healthy app behind a stable Relaybase route.
+This guide takes a clean machine from the current source installation to a healthy app behind a stable Relaybase route.
 
 ## 1. Install Relaybase
 
-Install Node.js 24 or newer, then run:
+Install Git, Node.js 24 or newer, npm, and Go 1.25.x, then run:
 
 ```bash
-npm install --global @cameloo/relaybase
+git clone https://github.com/Cameloo1/relaybase.git
+cd relaybase
+npm ci
+npm run tui:build
+npm run relaybase -- repair-prefix
 relaybase --version
 ```
 
-The installation selects a prebuilt terminal UI package for Windows, macOS, or Linux on x64 or arm64. Go is required only for source development.
+On Windows PowerShell, use `npm.cmd` in place of `npm` if script execution policy blocks `npm.ps1`. `repair-prefix` explicitly links the checkout into npm's global command directory. If you prefer not to create that link, skip it and use `npm start` from the repository root whenever this guide says `relaybase start`.
+
+The public `@cameloo/relaybase` npm package is not available yet. These source instructions remain canonical until the first signed release is published and independently verified.
 
 ## 2. Open the operator console
 

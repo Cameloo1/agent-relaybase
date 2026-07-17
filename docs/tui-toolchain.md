@@ -65,14 +65,15 @@ npm run doctor:tui
 For day-to-day source checkout work, use the bundled commands first:
 
 ```powershell
+npm.cmd run tui:build
 npm.cmd start
 npm.cmd run check
 npm.cmd run verify
 ```
 
-`npm.cmd start` calls `relaybase start`, which launches the TUI through the Node bridge and lets the bridge safely ensure the daemon. `npm.cmd run check` performs read-only local diagnosis without a package dry-run. `npm.cmd run verify` runs the default source-checkout verification gate; add `-- --full`, `-- --release`, `-- --live`, or `-- --race` for deeper gates.
+`npm.cmd run tui:build` creates the current-platform development binary required by a fresh checkout. `npm.cmd start` then calls `relaybase start`, which launches the TUI through the Node bridge and lets the bridge safely ensure the daemon. `npm.cmd run check` performs read-only local diagnosis without a package dry-run. `npm.cmd run verify` runs the default source-checkout verification gate; add `-- --full`, `-- --release`, `-- --live`, or `-- --race` for deeper gates.
 
-On a fresh checkout, `npm.cmd start` is the bootstrap-safe entrypoint because it launches the source checkout directly. It does not inspect or mutate the global command prefix. When global command repair is intentional, use `relaybase repair-prefix --diagnose` or `--plan` first, then run `relaybase repair-prefix` explicitly. Only that repair command may run `npm link`. On Windows it preserves unrecognized/custom PowerShell shims and removes only a recognized npm-generated Relaybase `.ps1` shim with a recognized `.cmd` sibling, using atomic rename/restore behavior on failure.
+After the TUI build, `npm.cmd start` is the no-link entrypoint because it launches the source checkout directly. It does not inspect or mutate the global command prefix. When a global command is intentional, use `npm.cmd run relaybase -- repair-prefix --diagnose` or `--plan` first, then run `npm.cmd run relaybase -- repair-prefix` explicitly. Only that repair command may run `npm link`. On Windows it preserves unrecognized/custom PowerShell shims and removes only a recognized npm-generated Relaybase `.ps1` shim with a recognized `.cmd` sibling, using atomic rename/restore behavior on failure.
 
 Run TUI checks from the repository root:
 

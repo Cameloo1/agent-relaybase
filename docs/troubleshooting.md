@@ -4,18 +4,16 @@ Run `relaybase check` before changing state. It reports the installation, TUI, d
 
 ## `relaybase` is not recognized
 
-Confirm npm's global binary directory is on `PATH`, then reinstall:
+From the Relaybase source checkout, explicitly create or repair the command link:
 
 ```bash
-npm install --global @cameloo/relaybase
+npm run relaybase -- repair-prefix
 relaybase --version
 ```
 
-Source contributors should use `npm start` from the repository instead of silently replacing the global command. Use `relaybase repair-prefix --diagnose` before any explicit prefix repair.
+On Windows PowerShell, use `npm.cmd` in place of `npm` if script execution policy blocks `npm.ps1`. If npm's global command directory is not on `PATH`, open a new terminal after linking or continue with `npm start` from the checkout. The public npm package is not available yet.
 
 ## The TUI binary is missing
-
-For a normal npm installation, reinstall the package. The published tarball is required to contain all supported TUI binaries.
 
 For a source checkout:
 

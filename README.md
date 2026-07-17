@@ -3,7 +3,6 @@
 # Relaybase
 
 [![CI](https://github.com/Cameloo1/relaybase/actions/workflows/ci.yml/badge.svg)](https://github.com/Cameloo1/relaybase/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/%40cameloo%2Frelaybase)](https://www.npmjs.com/package/@cameloo/relaybase)
 ![Node](https://img.shields.io/badge/node-%3E%3D24-339933)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -13,15 +12,23 @@ Relaybase is a local-first control plane for the apps you build with coding agen
 
 ## Install
 
-Prerequisites: Node.js 24 or newer and npm. Relaybase supports Windows, macOS, and Linux on x64 and arm64. npm selects the matching prebuilt terminal UI package, so normal installation does not require Go.
+Relaybase is currently installed from source while its first signed npm release is being prepared. Prerequisites: Git, Node.js 24 or newer, npm, and Go 1.25.x.
 
 ```bash
-npm install --global @cameloo/relaybase
+git clone https://github.com/Cameloo1/relaybase.git
+cd relaybase
+npm ci
+npm run tui:build
+npm run relaybase -- repair-prefix
 relaybase --version
 relaybase start
 ```
 
-`relaybase start` safely starts the local daemon when needed and opens the operator console. Relaybase binds to `127.0.0.1` by default and does not expose apps to the public internet.
+On Windows PowerShell, use `npm.cmd` in place of `npm` if script execution policy blocks `npm.ps1`. The explicit `repair-prefix` step links this checkout into npm's global command directory; it does not start Relaybase. If you do not want a global command, skip that step and run `npm start` from the checkout instead.
+
+`relaybase start` safely starts the local daemon when needed and opens the operator console. Relaybase binds to `127.0.0.1` by default and does not expose apps to the public internet. Keep the checkout while using this source-linked installation.
+
+`@cameloo/relaybase` is not published on npm yet. The shorter `npm install --global @cameloo/relaybase` path will become the primary installation method only after the first signed release is published and independently verified.
 
 ## Register your first app
 
@@ -87,12 +94,14 @@ Relaybase can run as a stdio MCP server:
 {
   "mcpServers": {
     "relaybase": {
-      "command": "npx",
-      "args": ["-y", "@cameloo/relaybase", "mcp"]
+      "command": "relaybase",
+      "args": ["mcp"]
     }
   }
 }
 ```
+
+This configuration uses the source-linked `relaybase` command installed above. The npm/npx configuration will be documented after the package is published.
 
 Read-only MCP calls do not require mutation credentials. HTTP mutation tools require the local Relaybase token through `Authorization: Bearer <token>` or `x-relaybase-token: <token>`.
 
@@ -116,29 +125,16 @@ relaybase check
 
 Common recovery paths:
 
-- Missing TUI binary: reinstall `@cameloo/relaybase`; source contributors can run `npm run tui:build`.
+- Missing TUI binary: from the source checkout, run `npm run doctor:tui`, then `npm run tui:build`.
 - Daemon unavailable: run `relaybase serve`, then retry `relaybase start`.
 - App will not become healthy: run `relaybase health` and inspect the reported logs and `nextActions`.
 - Registration verification failed: preview the recommended health-route, dynamic-binding, or pinned-port repair; Relaybase never applies the repair without another approval.
 - Registration cleanup failed: do not retry launch verification until the remaining process or backend-port owner is resolved.
-- Windows reports `spawn UNKNOWN`: install the current signed release and retry. Do not weaken Windows Application Control; inspect `Microsoft-Windows-CodeIntegrity/Operational` for the blocking evidence.
+- Windows reports `spawn UNKNOWN`: the locally built unsigned executable may be blocked by Windows Application Control. Do not weaken that policy; inspect `Microsoft-Windows-CodeIntegrity/Operational`. A trusted signed Windows package remains a public-release gate.
 - Port conflict: let Relaybase choose a dynamic port or update the manifest’s explicit port strategy.
 - Token mismatch: run `relaybase diagnose-token`, align the selected and daemon state directories, and never paste the token into logs or issues.
 
 See [Troubleshooting](docs/troubleshooting.md) for symptom-led recovery and [Getting started](docs/getting-started.md) for a complete first-run walkthrough.
-
-## Install from source
-
-Source installation is for contributors. It requires Node.js 24+, npm, and Go 1.25.x for TUI work.
-
-```bash
-git clone https://github.com/Cameloo1/relaybase.git
-cd relaybase
-npm ci
-npm start
-```
-
-The source-checkout start path does not silently run `npm link` or replace global command shims. Use `relaybase repair-prefix --diagnose` before explicitly repairing a global development command.
 
 ## Documentation
 

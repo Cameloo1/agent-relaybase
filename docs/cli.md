@@ -11,15 +11,16 @@ relaybase --version
 
 `relaybase start` with no app id launches the normal daemon + TUI operator surface. `relaybase check` is a read-only local diagnosis bundle. `relaybase verify` is the source-checkout verification gate. Lower-level commands such as `configure`, `open`, `health`, `list`, `serve`, `tui`, and `start <app-id>` remain available for automation and direct lifecycle control.
 
-The npm wrappers call the same bundled paths from a source checkout:
+After installing dependencies, build the current-platform TUI once. The npm wrappers then call the same bundled paths from the source checkout:
 
 ```powershell
+npm.cmd run tui:build
 npm.cmd start
 npm.cmd run check
 npm.cmd run verify
 ```
 
-If PowerShell says `relaybase` is not recognized in a fresh checkout, run `npm.cmd start` from the repo root. The wrapper launches the source checkout directly and does not run `npm link`, change the global npm prefix, or delete shims. Prefix inspection and repair are separate explicit operations: `relaybase repair-prefix --diagnose`, `relaybase repair-prefix --plan`, and `relaybase repair-prefix`.
+If PowerShell says `relaybase` is not recognized, either run `npm.cmd start` from the repo root or explicitly link the checkout with `npm.cmd run relaybase -- repair-prefix`. The start wrapper launches the source checkout directly and does not run `npm link`, change the global npm prefix, or delete shims. Prefix inspection and repair remain separate explicit operations available through `npm.cmd run relaybase -- repair-prefix --diagnose`, `--plan`, and the mutating `repair-prefix` form.
 
 ## Shared Options
 
