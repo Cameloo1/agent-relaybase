@@ -120,6 +120,7 @@ jobs:
 
   tui-build:
     name: TUI Build Smoke (${{ matrix.os }})
+    needs: windows-native
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -153,6 +154,13 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Download Windows credential modules
+        if: runner.os == 'Windows'
+        uses: actions/download-artifact@v4
+        with:
+          name: relaybase-windows-native-${{ github.run_id }}
+          path: dist-runtime/native
 
       - name: Build compiled runtime
         run: npm run build:runtime

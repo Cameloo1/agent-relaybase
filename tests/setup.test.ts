@@ -23,7 +23,14 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 test("package workflows compile the runtime before lifecycle-disabled package verification", async () => {
   const ci = await fs.readFile(path.join(rootDir, ".github", "workflows", "ci.yml"), "utf8");
   const release = await fs.readFile(path.join(rootDir, ".github", "workflows", "release.yml"), "utf8");
+  const ciTuiBuild = workflowJob(ci, "tui-build");
 
+  assert.match(ciTuiBuild, /^ {4}needs: windows-native$/m);
+  assert.match(
+    ciTuiBuild,
+    /- name: Download Windows credential modules\s+if: runner\.os == 'Windows'\s+uses: actions\/download-artifact@v4/
+  );
+  assertWorkflowOrder(ci, "tui-build", "actions/download-artifact@v4", "npm run package:install-smoke");
   assertWorkflowOrder(ci, "tui-build", "npm run build:runtime", "npm run package:install-smoke");
   assertWorkflowOrder(ci, "package", "npm run build:runtime", "npm run package:check:strict");
   assertWorkflowOrder(release, "prepare", "npm run build:runtime", "npm run package:check:strict");
@@ -31,18 +38,22 @@ test("package workflows compile the runtime before lifecycle-disabled package ve
 });
 
 function assertWorkflowOrder(workflow: string, jobName: string, before: string, after: string): void {
-  const jobStartMatch = new RegExp(`^  ${jobName}:\\s*$`, "m").exec(workflow);
-  assert.ok(jobStartMatch, `workflow job ${jobName} is missing`);
-  const jobStart = jobStartMatch.index + jobStartMatch[0].length;
-  const remaining = workflow.slice(jobStart);
-  const nextJob = /^ {2}[a-zA-Z0-9_-]+:\s*$/m.exec(remaining);
-  const job = nextJob ? remaining.slice(0, nextJob.index) : remaining;
+  const job = workflowJob(workflow, jobName);
   const beforeIndex = job.indexOf(before);
   const afterIndex = job.indexOf(after);
 
   assert.ok(beforeIndex >= 0, `${jobName} must run ${before}`);
   assert.ok(afterIndex >= 0, `${jobName} must run ${after}`);
   assert.ok(beforeIndex < afterIndex, `${jobName} must run ${before} before ${after}`);
+}
+
+function workflowJob(workflow: string, jobName: string): string {
+  const jobStartMatch = new RegExp(`^  ${jobName}:\\s*$`, "m").exec(workflow);
+  assert.ok(jobStartMatch, `workflow job ${jobName} is missing`);
+  const jobStart = jobStartMatch.index + jobStartMatch[0].length;
+  const remaining = workflow.slice(jobStart);
+  const nextJob = /^ {2}[a-zA-Z0-9_-]+:\s*$/m.exec(remaining);
+  return nextJob ? remaining.slice(0, nextJob.index) : remaining;
 }
 
 test("detects package-manager, framework, env, and generates multiple setup architectures", async () => {
