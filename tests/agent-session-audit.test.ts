@@ -423,7 +423,15 @@ test("RA009 audit records approval, tool, setup, manifest, prove, repair, and us
 });
 
 test("OA-THREADS-002 persisted approvals recover pending and require reconfirmation before execution", async () => {
-  await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-recovered-approval-secret", async () => {
+  const previous = saveEnv([
+    "RELAYBASE_TEST_OPENROUTER_KEY",
+    "RELAYBASE_AGENT_ENABLED",
+    "RELAYBASE_AGENT_REMOTE_MODEL_ENABLED"
+  ]);
+  process.env.RELAYBASE_TEST_OPENROUTER_KEY = "sk-or-recovered-approval-secret";
+  process.env.RELAYBASE_AGENT_ENABLED = "1";
+  process.env.RELAYBASE_AGENT_REMOTE_MODEL_ENABLED = "1";
+  try {
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-approval-recovery-"));
     const fixture = fakeApprovalRelaybaseRuntime();
     const gateway = gatewayWithApprovalRunner("start_app", { appId: "notes-web" }, stateDir);
@@ -452,7 +460,9 @@ test("OA-THREADS-002 persisted approvals recover pending and require reconfirmat
     const approved = await restarted.resolveApproval(fixture.runtime, approval.id, "approved", { reconfirm: true });
     assert.equal(approved.status, "approved");
     await waitFor(() => fixture.calls.start === 1);
-  });
+  } finally {
+    restoreEnvValues(previous);
+  }
 });
 
 test("RA009 session export writes a redacted chat/audit artifact", async () => {

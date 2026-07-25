@@ -907,10 +907,10 @@ test("does not report stopped when stopCommand fails, times out, or verifyStoppe
         healthUrl: "/health",
         stopCommand: hookCommand(scenario.stopMode, marker, "stop"),
         ...(scenario.verifyMode ? { verifyStoppedCommand: hookCommand(scenario.verifyMode, marker, "verify") } : {}),
-        // A Node hook needs more than 200 ms to start reliably on Windows;
-        // retain the hang-path assertion while avoiding a cold-start timeout
-        // being misclassified as the explicit failure scenario.
-        stopTimeoutMs: 1_000
+        // Keep the intentional hang scenario bounded to one second. Other
+        // Windows hooks need a larger cold-start budget under parallel CI so
+        // an explicit failure is not misclassified as a timeout.
+        stopTimeoutMs: scenario.stopMode === "hang" ? 1_000 : process.platform === "win32" ? 5_000 : 1_000
       });
 
       const runtime = await hub.runtime.processes.start(scenario.id);
