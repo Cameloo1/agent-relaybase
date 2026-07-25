@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { parseNpmPackJson } from "./npm-pack-json.mjs";
+import { npmPackArguments, parseNpmPackJson } from "./npm-pack-json.mjs";
 import { currentPlatformBinaryPath, targetForPlatform } from "./tui-go.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -123,7 +123,7 @@ function runNpmPackDryRun(spawn) {
     : process.platform === "win32"
       ? { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", "npm.cmd"] }
       : { command: "npm", args: [] };
-  const args = [...runner.args, "pack", "--dry-run", "--json"];
+  const args = [...runner.args, ...npmPackArguments({ dryRun: true })];
   const configuredNpmCache = process.env.RELAYBASE_PACKAGE_NPM_CACHE?.trim();
   const packageCheckNpmCache = configuredNpmCache || mkdtempSync(temporaryNpmCachePrefix);
   const env = {

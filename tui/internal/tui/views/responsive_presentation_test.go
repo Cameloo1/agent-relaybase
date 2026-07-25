@@ -106,6 +106,101 @@ func TestThreadSwitcherBoundsKeepFourAndFiveSessionsPlusFooterVisible(t *testing
 	}
 }
 
+func TestSettingsModalUsesAvailableSpaceAndPreservesRowMeaning(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	style := styles.New(theme)
+	data := responsivePresentationShellData(160, 48, 1)
+	rows := make([]SettingsRowData, 0, 18)
+	rows = append(rows, SettingsRowData{
+		Index:  0,
+		Label:  "Move legacy key to protected storage",
+		Value:  "preview + confirm",
+		Hint:   "Preserves the legacy source until protected migration verifies.",
+		Action: true,
+	})
+	for index := 1; index < 17; index++ {
+		rows = append(rows, SettingsRowData{Index: index, Label: fmt.Sprintf("Setting %02d", index+1), Value: "current value", ReadOnly: true})
+	}
+	rows = append(rows, SettingsRowData{Index: 17, Label: "Restart daemon", Value: "safe recovery", Action: true})
+	data.Settings = &SettingsData{
+		Title:      "Agent security and credentials",
+		Breadcrumb: "Settings / Agent / Security and credentials",
+		Rows:       rows,
+		Selected:   0,
+		Saving:     true,
+		Notice:     "Running a local Agent security check...",
+		TotalRows:  len(rows),
+	}
+
+	frame := BuildShell(style, data)
+	plain := ansiEscapePattern.ReplaceAllString(frame.Text, "")
+	modal := responsivePresentationHit(frame, components.HitModal)
+	content := overlayContentBounds(style.Help, modal.Rect)
+	if modal.Rect.Width != data.Width-2 || modal.Rect.Height != data.Height-2 {
+		t.Fatalf("Settings modal did not use the available terminal space: modal=%#v", modal.Rect)
+	}
+	for _, required := range []string{
+		"Settings / Agent / Security and credentials",
+		"Move legacy key to protected storage",
+		"preview + confirm",
+		"Preserves the legacy source until protected migration verifies.",
+		"Restart daemon",
+		"safe recovery",
+		"Running a local Agent security check...",
+	} {
+		if !strings.Contains(plain, required) {
+			t.Fatalf("Settings modal omitted %q:\n%s", required, plain)
+		}
+	}
+	if strings.Contains(plain, "Saving Agent configuration...") {
+		t.Fatalf("Settings modal replaced specific progress with a misleading generic message:\n%s", plain)
+	}
+
+	visibleRows := 0
+	for _, region := range frame.HitMap.Regions() {
+		if region.Kind != components.HitSettingsRow {
+			continue
+		}
+		visibleRows++
+		if region.Rect.Y < content.Y || region.Rect.Y+region.Rect.Height > content.Y+content.Height {
+			t.Fatalf("Settings hit row escaped the expanded modal: region=%#v content=%#v", region, content)
+		}
+	}
+	if visibleRows != len(rows) {
+		t.Fatalf("visible Settings hit rows=%d, want %d", visibleRows, len(rows))
+	}
+}
+
+func TestSettingsModalKeepsMinimumHeightEditFlowVisible(t *testing.T) {
+	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
+	style := styles.New(theme)
+	data := responsivePresentationShellData(40, 18, 1)
+	data.Settings = &SettingsData{
+		Title:      "Agent security repair preview",
+		Breadcrumb: "Settings / Agent / Security",
+		Rows: []SettingsRowData{
+			{Index: 0, Label: "Apply exact repair", Value: "confirm + verify", Action: true},
+			{Index: 1, Label: "Cancel", Value: "no changes", Action: true},
+		},
+		Selected:  0,
+		Editing:   true,
+		EditValue: "disconnect_local_credential",
+		Notice:    "Type exact phrase.",
+		TotalRows: 2,
+	}
+
+	frame := BuildShell(style, data)
+	plain := ansiEscapePattern.ReplaceAllString(frame.Text, "")
+	if lipgloss.Width(frame.Text) != data.Width || lipgloss.Height(frame.Text) != data.Height {
+		t.Fatalf("minimum Settings frame escaped %dx%d: %dx%d\n%s", data.Width, data.Height, lipgloss.Width(frame.Text), lipgloss.Height(frame.Text), plain)
+	}
+	for _, required := range []string{"Apply exact repair", "confirm + verify", "Cancel", "Edit value:", "Type exact phrase.", "Enter save", "Esc cancel edit"} {
+		if !strings.Contains(plain, required) {
+			t.Fatalf("minimum Settings edit flow clipped %q:\n%s", required, plain)
+		}
+	}
+}
+
 func TestMinimumHeightThreeRowComposerKeepsPaneLogAndExactFrame(t *testing.T) {
 	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
 	style := styles.New(theme)

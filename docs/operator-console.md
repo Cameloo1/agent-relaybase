@@ -80,7 +80,9 @@ The help catalog is also the command-completion source. It labels commands that 
 - **Interaction** shows context-menu shortcuts and edits local history retention.
 - **Agent** edits non-secret daemon-owned Operator Agent configuration and execution limits.
 
-Use Up and Down or the mouse to select a row. Enter opens a category, cycles or toggles a supported value, starts an edit, or invokes an action. `Esc` or Left returns to the category list; `q` closes settings.
+The Agent category follows the normal operating flow: **Status**, **Provider**, **Configuration**, **Security and credentials**, **Safety and permissions**, **Execution**, **Budgets**, then **Recovery**. Budget limits are ordered by scope: session, daily, then monthly. Recovery pages show the current error before the progressively broader reload and restart actions.
+
+Use Up and Down or the mouse to select a row. Home and End jump to the first and last rows. Enter opens a category, cycles or toggles a supported value, starts an edit, or invokes the action described by that row. `Esc` or Left returns to the parent page; `q` closes settings. The modal expands with the terminal and shows a row-range indicator when a longer page still needs scrolling.
 
 Appearance and Interaction values are stored in `<state-dir>/tui/preferences.json`. Agent values use the authenticated daemon Agent configuration API and are not copied into the TUI preference file. The Agent page accepts an environment-variable name for the provider key, never a raw key value.
 

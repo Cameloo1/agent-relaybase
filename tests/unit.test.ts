@@ -38,7 +38,7 @@ import {
   renderCleanWorktreeResult,
   runCleanWorktree
 } from "../scripts/check-worktree-clean.mjs";
-import { parseNpmPackJson } from "../scripts/npm-pack-json.mjs";
+import { npmPackArguments, parseNpmPackJson } from "../scripts/npm-pack-json.mjs";
 import { containsCredentialFixtureLiteral } from "../scripts/package-check.mjs";
 import {
   buildDoctorReport,
@@ -1537,6 +1537,17 @@ test("npm pack JSON parsing tolerates native prepack lifecycle output", () => {
   const parsed = parseNpmPackJson(payload);
   assert.equal(parsed?.[0]?.filename, "cameloo-relaybase-0.1.0.tgz");
   assert.equal(parsed?.[0]?.files?.[0]?.path, "dist-runtime/cli.js");
+});
+
+test("package verification packs prebuilt artifacts without rerunning lifecycle scripts", () => {
+  assert.deepEqual(npmPackArguments({ dryRun: true }), ["pack", "--dry-run", "--json", "--ignore-scripts"]);
+  assert.deepEqual(npmPackArguments({ destination: "C:\\release" }), [
+    "pack",
+    "--pack-destination",
+    "C:\\release",
+    "--json",
+    "--ignore-scripts"
+  ]);
 });
 
 test("package credential-fixture scan rejects literal secrets without rejecting redaction patterns", () => {

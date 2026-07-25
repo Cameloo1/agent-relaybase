@@ -114,8 +114,8 @@ func (m RootModel) settingsRows() []settingsRow {
 		}
 	case "interaction":
 		return []settingsRow{
-			{id: "context_keys", label: "Context menu", value: strings.Join(m.preferences.Keymap.ContextMenu, " / "), hint: "Persisted safe shortcut bindings.", readOnly: true},
 			{id: "history_days", label: "History retention", value: fmt.Sprintf("%d days", m.preferences.Assistant.HistoryRetentionDays), hint: "Enter a whole number from 1 to 365."},
+			{id: "context_keys", label: "Context menu", value: strings.Join(m.preferences.Keymap.ContextMenu, " / "), hint: "Persisted safe shortcut bindings.", readOnly: true},
 		}
 	case "agent", "agent_status", "agent_provider", "agent_security", "agent_security_findings", "agent_security_preview", "agent_security_result", "agent_configuration", "agent_safety", "agent_execution", "agent_budgets", "agent_recovery":
 		return m.agentSettingsRows()
@@ -138,8 +138,8 @@ func (m RootModel) agentSettingsRows() []settingsRow {
 		return []settingsRow{
 			{id: "agent_status_page", label: "Status", value: valueOr(config.Readiness, "unknown"), hint: "Readiness, source, credential, and runtime activity.", action: true},
 			{id: "agent_provider_page", label: "Provider", value: providerConnection(config), hint: "OpenRouter connection and credential protection.", action: true},
-			{id: "agent_security_page", label: "Security and credentials", value: agentSecuritySummary(m.agentSecurityStatus), hint: "Protection, key health, migration, repair, and receipts.", action: true},
 			{id: "agent_configuration_page", label: "Configuration", value: valueOr(config.Provider.ModelSlug, "not configured"), hint: "Enablement, model, source, and revision.", action: true},
+			{id: "agent_security_page", label: "Security and credentials", value: agentSecuritySummary(m.agentSecurityStatus), hint: "Protection, key health, migration, repair, and receipts.", action: true},
 			{id: "agent_safety_page", label: "Safety and permissions", value: config.ApprovalPolicy, hint: "Tool access and approval gates.", action: true},
 			{id: "agent_execution_page", label: "Execution", value: fmt.Sprintf("%d total turns", config.Execution.TotalMaxTurns), hint: "Timeouts, turns, output, and no-progress limits.", action: true},
 			{id: "agent_budgets_page", label: "Budgets", value: budgetSummary(config.Budgets), hint: "Session, daily, and monthly limits.", action: true},
@@ -150,8 +150,8 @@ func (m RootModel) agentSettingsRows() []settingsRow {
 		rows := []settingsRow{
 			{id: "readiness", label: "Readiness", value: valueOr(config.Readiness, "unknown"), readOnly: true},
 			{id: "runtime_activity", label: "Runtime activity", value: valueOr(m.agentStatus, "idle"), readOnly: true},
-			{id: "source_health", label: "Configuration source", value: agentSourceSummary(config), readOnly: true},
 			{id: "credential_connection", label: "Credential", value: providerConnection(config), readOnly: true},
+			{id: "source_health", label: "Configuration source", value: agentSourceSummary(config), readOnly: true},
 			{id: "active_revision", label: "Active revision", value: agentRevisionSummary(config), readOnly: true},
 			{id: "older_run_revision", label: "Older run revision active", value: onOff(config.ActiveRunUsesOlderRevision), readOnly: true},
 		}
@@ -220,7 +220,7 @@ func (m RootModel) agentSettingsRows() []settingsRow {
 	var rows []settingsRow
 	switch m.settingsPage {
 	case "agent_configuration":
-		rows = filterSettingsRows(allRows, "agent_enabled", "remote_model", "model_slug", "model_source", "provider_restart", "key_env", "key_status", "referer_env", "title_env")
+		rows = filterSettingsRows(allRows, "agent_enabled", "remote_model", "model_slug", "key_env", "referer_env", "title_env", "model_source", "key_status", "provider_restart")
 		rows = append(rows,
 			settingsRow{id: "source_health", label: "Source health", value: agentSourceSummary(config), readOnly: true},
 			settingsRow{id: "active_revision", label: "Active revision", value: agentRevisionSummary(config), readOnly: true},
@@ -229,14 +229,14 @@ func (m RootModel) agentSettingsRows() []settingsRow {
 	case "agent_safety":
 		rows = filterSettingsRows(allRows, "tool_mode", "tool_allowlist", "approval_policy", "setup_write_policy", "browser_open", "copy_route")
 	case "agent_execution":
-		rows = filterSettingsRows(allRows, "segment_turns", "total_turns", "inactivity_seconds", "hard_seconds", "max_output_tokens", "reasoning", "no_progress")
+		rows = filterSettingsRows(allRows, "segment_turns", "total_turns", "reasoning", "max_output_tokens", "inactivity_seconds", "hard_seconds", "no_progress")
 	case "agent_budgets":
-		rows = filterSettingsRows(allRows, "daily_budget", "monthly_budget", "session_budget")
+		rows = filterSettingsRows(allRows, "session_budget", "daily_budget", "monthly_budget")
 	case "agent_recovery":
 		rows = []settingsRow{
+			{id: "recovery_error", label: "Last source error", value: agentSourceError(config), readOnly: true},
 			{id: "config_reload", label: "Reload Agent config", value: "no daemon restart", hint: "Validate and atomically apply the selected source.", action: true},
 			{id: "daemon_restart", label: "Restart daemon", value: "safe recovery", hint: "Use when shell environment or daemon state really requires restart.", action: true},
-			{id: "recovery_error", label: "Last source error", value: agentSourceError(config), readOnly: true},
 		}
 	default:
 		rows = allRows
@@ -285,28 +285,28 @@ func (m RootModel) agentSecurityRows(config *relaybaseclient.AgentConfig) []sett
 		{id: "security_state", label: "Security status", value: agentSecuritySummary(status), readOnly: true},
 		{id: "security_connection", label: "Provider connection", value: providerConnection(config), readOnly: true},
 		{id: "security_source", label: "Credential source", value: source, readOnly: true},
-		{id: "security_checked", label: "Last checked", value: checkedAt, readOnly: true},
-		{id: "security_validated", label: "Last successful validation", value: lastValidation, readOnly: true},
 		{id: "security_storage", label: "Storage", value: credentialProtection(config), readOnly: true},
 		{id: "security_readable", label: "Protected credential readable", value: readable, readOnly: true},
 		{id: "security_acl", label: "Current-user ACL", value: acl, readOnly: true},
-		{id: "windows_verification", label: "Require Windows verification", value: highSecurityStatus(config), hint: "Off by default; unavailable until secure daemon-owned prompt handling is proven.", readOnly: true},
-		{id: "dpapi_limit", label: "DPAPI limitation", value: "does not defeat same-user malware", hint: "DPAPI reduces offline, cross-user, and accidental plaintext exposure.", readOnly: true},
+		{id: "security_checked", label: "Last checked", value: checkedAt, readOnly: true},
+		{id: "security_validated", label: "Last successful validation", value: lastValidation, readOnly: true},
 		{id: "credential_label", label: "Provider key label", value: credentialLabel(config), readOnly: true},
 		{id: "credential_limit", label: "Spending limit", value: credentialLimit(config), readOnly: true},
 		{id: "credential_expiration", label: "Expiration", value: credentialExpiration(config), readOnly: true},
+		{id: "windows_verification", label: "Require Windows verification", value: highSecurityStatus(config), hint: "Off by default; unavailable until secure daemon-owned prompt handling is proven.", readOnly: true},
+		{id: "dpapi_limit", label: "DPAPI limitation", value: "does not defeat same-user malware", hint: "DPAPI reduces offline, cross-user, and accidental plaintext exposure.", readOnly: true},
+		{id: "provider_guidance", label: "Dedicated-key guidance", value: "Relaybase-only + limit + expiry", hint: "Use a dedicated OpenRouter key with conservative spending and expiration.", readOnly: true},
+		{id: "security_check", label: "Run security check", value: "local and silent", hint: "Does not contact OpenRouter or prompt for Windows verification.", action: true},
+		{id: "security_findings", label: "Review findings", value: findings, hint: "Inspect daemon-owned findings and available recovery actions.", action: true},
 		{id: "security_validate", label: "Validate now", value: "online provider check", hint: "Creates a bound external repair preview before contacting OpenRouter.", action: true},
 		{id: "security_replace", label: providerNavigationLabel, value: "OAuth PKCE", hint: "Return to the canonical connection page.", action: true},
 		{id: "security_migrate", label: "Move legacy key to protected storage", value: "preview + confirm", hint: "Preserves the legacy source until protected migration verifies.", action: true},
 		{id: "security_cleanup", label: "Remove legacy external assignment", value: "phrase required", hint: "Removes exactly one preview-bound assignment with no plaintext backup.", action: true},
 		{id: "security_key_management", label: "Open OpenRouter key management", value: "provider-owned action", hint: "Remote revocation is not claimed until the provider confirms it.", action: true},
 		{id: "security_disconnect", label: "Disconnect locally", value: "phrase required", hint: "Deletes local protected storage; the remote key may remain active.", action: true},
-		{id: "security_check", label: "Run security check", value: "local and silent", hint: "Does not contact OpenRouter or prompt for Windows verification.", action: true},
-		{id: "security_findings", label: "Review findings", value: findings, hint: "Inspect daemon-owned findings and available recovery actions.", action: true},
 		{id: "security_last_outcome", label: "Last repair outcome", value: lastOutcome, readOnly: true},
 		{id: "security_last_event", label: "Last security event", value: lastEvent, readOnly: true},
 		{id: "security_receipt", label: "Review repair receipt", value: lastOutcome, hint: "Show applied actions and post-repair verification.", action: true},
-		{id: "provider_guidance", label: "Dedicated-key guidance", value: "Relaybase-only + limit + expiry", hint: "Use a dedicated OpenRouter key with conservative spending and expiration.", readOnly: true},
 	}
 }
 
@@ -403,10 +403,13 @@ func (m RootModel) settingsDataForView() *views.SettingsData {
 	}
 	rows := m.settingsRows()
 	if len(rows) == 0 {
-		return &views.SettingsData{Page: m.settingsPage, Title: "Settings"}
+		return &views.SettingsData{Title: "Settings", Breadcrumb: settingsPageBreadcrumb(m.settingsPage)}
 	}
 	selected := clampInt(m.settingsSelected, 0, len(rows)-1)
-	visible := maxInt(3, minInt(9, (m.height-12)/2))
+	visible := settingsVisibleRowCount(m.height)
+	if m.settingsEditing && strings.TrimSpace(m.settingsNotice) != "" {
+		visible = maxInt(2, visible-1)
+	}
 	offset := clampInt(m.settingsOffset, 0, maxInt(0, len(rows)-visible))
 	if selected < offset {
 		offset = selected
@@ -427,34 +430,90 @@ func (m RootModel) settingsDataForView() *views.SettingsData {
 		title = settingsPageTitle(m.settingsPage)
 	}
 	return &views.SettingsData{
-		Page: m.settingsPage, Title: title, Rows: projected, Selected: selected,
+		Title: title, Breadcrumb: settingsPageBreadcrumb(m.settingsPage), Rows: projected, Selected: selected,
 		Editing: m.settingsEditing, EditValue: m.settingsInput.View(), Notice: m.settingsNotice,
 		Saving: m.settingsSaving, TotalRows: len(rows), FirstRow: offset,
 	}
 }
 
+func settingsPageBreadcrumb(page string) string {
+	switch page {
+	case "", "categories":
+		return "Settings"
+	case "general":
+		return "Settings / General"
+	case "appearance":
+		return "Settings / Appearance"
+	case "interaction":
+		return "Settings / Interaction"
+	case "agent":
+		return "Settings / Agent"
+	case "agent_status":
+		return "Settings / Agent / Status"
+	case "agent_provider":
+		return "Settings / Agent / Provider"
+	case "agent_security":
+		return "Settings / Agent / Security and credentials"
+	case "agent_security_findings":
+		return "Settings / Agent / Security and credentials / Findings"
+	case "agent_security_preview":
+		return "Settings / Agent / Security and credentials / Repair preview"
+	case "agent_security_result":
+		return "Settings / Agent / Security and credentials / Repair result"
+	case "agent_configuration":
+		return "Settings / Agent / Configuration"
+	case "agent_safety":
+		return "Settings / Agent / Safety and permissions"
+	case "agent_execution":
+		return "Settings / Agent / Execution"
+	case "agent_budgets":
+		return "Settings / Agent / Budgets"
+	case "agent_recovery":
+		return "Settings / Agent / Recovery"
+	default:
+		return "Settings / " + titleCase(strings.ReplaceAll(page, "_", " "))
+	}
+}
+
+func settingsVisibleRowCount(height int) int {
+	return maxInt(3, (height-12)/2)
+}
+
 func settingsPageTitle(page string) string {
-	titles := map[string]string{
-		"general":                 "General settings",
-		"appearance":              "Appearance settings",
-		"interaction":             "Interaction settings",
-		"agent":                   "Agent settings",
-		"agent_status":            "Agent status",
-		"agent_provider":          "Agent provider",
-		"agent_security":          "Agent security and credentials",
-		"agent_security_findings": "Agent security findings",
-		"agent_security_preview":  "Agent security repair preview",
-		"agent_security_result":   "Agent security repair result",
-		"agent_configuration":     "Agent configuration",
-		"agent_safety":            "Agent safety and permissions",
-		"agent_execution":         "Agent execution",
-		"agent_budgets":           "Agent budgets",
-		"agent_recovery":          "Agent recovery",
+	switch page {
+	case "general":
+		return "General settings"
+	case "appearance":
+		return "Appearance settings"
+	case "interaction":
+		return "Interaction settings"
+	case "agent":
+		return "Agent settings"
+	case "agent_status":
+		return "Agent status"
+	case "agent_provider":
+		return "Agent provider"
+	case "agent_security":
+		return "Agent security and credentials"
+	case "agent_security_findings":
+		return "Agent security findings"
+	case "agent_security_preview":
+		return "Agent security repair preview"
+	case "agent_security_result":
+		return "Agent security repair result"
+	case "agent_configuration":
+		return "Agent configuration"
+	case "agent_safety":
+		return "Agent safety and permissions"
+	case "agent_execution":
+		return "Agent execution"
+	case "agent_budgets":
+		return "Agent budgets"
+	case "agent_recovery":
+		return "Agent recovery"
+	default:
+		return titleCase(strings.ReplaceAll(page, "_", " ")) + " settings"
 	}
-	if title := titles[page]; title != "" {
-		return title
-	}
-	return titleCase(strings.ReplaceAll(page, "_", " ")) + " settings"
 }
 
 func (m RootModel) handleSettingsKey(msg tea.KeyPressMsg) (RootModel, tea.Cmd) {
@@ -524,7 +583,7 @@ func (m RootModel) handleSettingsKey(msg tea.KeyPressMsg) (RootModel, tea.Cmd) {
 }
 
 func (m *RootModel) followSettingsSelection(total int) {
-	visible := maxInt(3, minInt(9, (m.height-12)/2))
+	visible := settingsVisibleRowCount(m.height)
 	if m.settingsSelected < m.settingsOffset {
 		m.settingsOffset = m.settingsSelected
 	}
@@ -1137,13 +1196,13 @@ func appendDraftActions(rows []settingsRow, dirty bool) []settingsRow {
 }
 
 func filterSettingsRows(rows []settingsRow, ids ...string) []settingsRow {
-	wanted := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		wanted[id] = true
+	byID := make(map[string]settingsRow, len(rows))
+	for _, row := range rows {
+		byID[row.id] = row
 	}
 	filtered := make([]settingsRow, 0, len(ids))
-	for _, row := range rows {
-		if wanted[row.id] {
+	for _, id := range ids {
+		if row, ok := byID[id]; ok {
 			filtered = append(filtered, row)
 		}
 	}

@@ -144,7 +144,7 @@ npm.cmd run package:install-smoke
 
 The normal package check remains usable on hosts without Go and reports when strict binary proof is unavailable. Release verification is strict: the slim root tarball must contain the compiled runtime, pin every optional platform package to the same version, and exclude source, tests, caches, reports, and generated binaries. Every platform tarball must contain its exact executable, and a root-plus-platform tarball install must execute the packaged TUI and compiled daemon from a disposable directory. A normal published installation does not execute TypeScript from `node_modules` and does not require Go.
 
-Package checks use a newly created OS-temp npm cache by default and remove it when the check finishes, including failure paths. Set `RELAYBASE_PACKAGE_NPM_CACHE` to an explicit directory only when the operator deliberately wants to preserve and reuse that cache.
+Package checks use a newly created OS-temp npm cache by default and remove it when the check finishes, including failure paths. They package the explicitly built artifacts with npm lifecycle scripts disabled, so inspection cannot rebuild or replace an accepted native module. The ordinary npm publication path still runs `prepack`. Set `RELAYBASE_PACKAGE_NPM_CACHE` to an explicit directory only when the operator deliberately wants to preserve and reuse that cache.
 
 ## Release Checks
 

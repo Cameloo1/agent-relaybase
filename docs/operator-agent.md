@@ -40,7 +40,7 @@ Open Agent settings with:
 /settings agent security
 ```
 
-The Agent settings category contains dedicated Status, Provider, Security and credentials, Configuration, Safety and permissions, Execution, Budgets, and Recovery pages. Provider owns initial OAuth PKCE connect and replace. Security and credentials owns validation, protection, migration, exact legacy cleanup, disconnect, provider key-management guidance, local checks, repair previews, and durable receipts. Edits remain a local draft until **Save changes** validates and applies the complete draft against the revision it was opened from. Raw key values are never accepted by settings, repair, or generic config APIs.
+The Agent settings category contains dedicated Status, Provider, Configuration, Security and credentials, Safety and permissions, Execution, Budgets, and Recovery pages in that operating order. Provider owns initial OAuth PKCE connect and replace. Security and credentials owns validation, protection, migration, exact legacy cleanup, disconnect, provider key-management guidance, local checks, repair previews, and durable receipts. Edits remain a local draft until **Save changes** validates and applies the complete draft against the revision it was opened from. Raw key values are never accepted by settings, repair, or generic config APIs.
 
 ## Use the Agent
 

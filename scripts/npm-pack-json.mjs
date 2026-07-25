@@ -21,3 +21,10 @@ export function parseNpmPackJson(output) {
   }
   return undefined;
 }
+
+export function npmPackArguments(options = {}) {
+  const args = ["pack"];
+  if (options.dryRun) args.push("--dry-run");
+  if (options.destination) args.push("--pack-destination", options.destination);
+  return [...args, "--json", "--ignore-scripts"];
+}

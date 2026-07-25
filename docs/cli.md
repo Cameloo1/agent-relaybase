@@ -241,7 +241,7 @@ The default verification gate runs formatting, lint, typecheck, Node tests, Jest
 
 `--plan` prints the selected gate without executing it.
 
-`package:check`, used by the full gate, runs `npm pack --dry-run --json`. By default it creates and removes a disposable cache under the operating-system temp directory. Set `RELAYBASE_PACKAGE_NPM_CACHE` only when an intentional persistent cache override is required.
+`package:check`, used by the full gate, runs `npm pack --dry-run --json --ignore-scripts` against the explicitly built package contents. Package verification does not rerun `prepack`, mutate accepted native modules, or interrupt a Relaybase process that has loaded one. By default it creates and removes a disposable cache under the operating-system temp directory. Set `RELAYBASE_PACKAGE_NPM_CACHE` only when an intentional persistent cache override is required.
 
 ## register
 

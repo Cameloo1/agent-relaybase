@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { parseNpmPackJson } from "./npm-pack-json.mjs";
+import { npmPackArguments, parseNpmPackJson } from "./npm-pack-json.mjs";
 import { targetForPlatform } from "./tui-go.mjs";
 import { inspectWindowsSignature, verifyAuthenticodeTrust } from "./windows-signature.mjs";
 
@@ -239,7 +239,7 @@ function runCompiledCredentialProbe(workspace) {
 }
 
 function pack(cwd, destination, cache) {
-  const result = runNpm(["pack", "--pack-destination", destination, "--json"], { cwd, cache });
+  const result = runNpm(npmPackArguments({ destination }), { cwd, cache });
   if (result.status !== 0) {
     report(result);
     return undefined;

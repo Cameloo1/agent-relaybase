@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1386,6 +1387,88 @@ func TestSettingsModalHasCategoriesAndDedicatedCompleteAgentPage(t *testing.T) {
 		if !containsString(configurationLabels, label) {
 			t.Fatalf("Agent configuration page missing %q in %#v", label, configurationLabels)
 		}
+	}
+}
+
+func TestSettingsPagesUseOperationalRowOrder(t *testing.T) {
+	root := newTestModel(t)
+	root.agentConfig = enabledAgentConfig(true)
+	root.agentConfig.Execution = relaybaseclient.AgentExecutionPolicy{
+		SegmentMaxTurns:       8,
+		TotalMaxTurns:         32,
+		InactivityTimeoutMS:   120000,
+		HardRunTimeoutMS:      900000,
+		MaxOutputTokens:       4096,
+		ReasoningEffort:       "medium",
+		NoProgressRepeatLimit: 3,
+	}
+	root.agentConfig.ToolAllowlistMode = "all_registered"
+	root.agentConfig.ApprovalPolicy = "always_for_mutations"
+	root.agentConfig.SetupFileWritePolicy = "approval_required"
+	root.resetAgentSettingsDraft()
+
+	tests := []struct {
+		page string
+		ids  []string
+	}{
+		{page: "categories", ids: []string{"general", "appearance", "interaction", "agent"}},
+		{page: "general", ids: []string{"daemon_status", "daemon_restart"}},
+		{page: "appearance", ids: []string{"theme", "density", "agent_pane", "activity", "activity_charset"}},
+		{page: "interaction", ids: []string{"history_days", "context_keys"}},
+		{page: "agent", ids: []string{"agent_status_page", "agent_provider_page", "agent_configuration_page", "agent_security_page", "agent_safety_page", "agent_execution_page", "agent_budgets_page", "agent_recovery_page"}},
+		{page: "agent_status", ids: []string{"readiness", "runtime_activity", "credential_connection", "source_health", "active_revision", "older_run_revision"}},
+		{page: "agent_provider", ids: []string{"provider", "credential_connection", "credential_storage", "provider_model", "provider_connect", "provider_replace", "provider_manage_security"}},
+		{page: "agent_configuration", ids: []string{"agent_enabled", "remote_model", "model_slug", "key_env", "referer_env", "title_env", "model_source", "key_status", "provider_restart", "source_health", "active_revision", "config_reload"}},
+		{page: "agent_security", ids: []string{"security_state", "security_connection", "security_source", "security_storage", "security_readable", "security_acl", "security_checked", "security_validated", "credential_label", "credential_limit", "credential_expiration", "windows_verification", "dpapi_limit", "provider_guidance", "security_check", "security_findings", "security_validate", "security_replace", "security_migrate", "security_cleanup", "security_key_management", "security_disconnect", "security_last_outcome", "security_last_event", "security_receipt"}},
+		{page: "agent_safety", ids: []string{"tool_mode", "tool_allowlist", "approval_policy", "setup_write_policy", "browser_open", "copy_route"}},
+		{page: "agent_execution", ids: []string{"segment_turns", "total_turns", "reasoning", "max_output_tokens", "inactivity_seconds", "hard_seconds", "no_progress"}},
+		{page: "agent_budgets", ids: []string{"session_budget", "daily_budget", "monthly_budget"}},
+		{page: "agent_recovery", ids: []string{"recovery_error", "config_reload", "daemon_restart"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.page, func(t *testing.T) {
+			root.settingsPage = test.page
+			rows := root.settingsRows()
+			got := make([]string, 0, len(rows))
+			for _, row := range rows {
+				got = append(got, row.id)
+			}
+			if !reflect.DeepEqual(got, test.ids) {
+				t.Fatalf("settings order for %s = %#v, want %#v", test.page, got, test.ids)
+			}
+		})
+	}
+}
+
+func TestSettingsProjectionUsesTallTerminalCapacityAndReadableBreadcrumb(t *testing.T) {
+	root := newTestModel(t)
+	root.height = 48
+	root.settingsVisible = true
+	root.settingsPage = "agent_security"
+	root.agentConfig = enabledAgentConfig(true)
+	root.resetAgentSettingsDraft()
+
+	data := root.settingsDataForView()
+	if data == nil || data.TotalRows <= 9 || len(data.Rows) != 18 {
+		t.Fatalf("tall Settings projection did not use its vertical capacity: %#v", data)
+	}
+	if data.Breadcrumb != "Settings / Agent / Security and credentials" {
+		t.Fatalf("unexpected Settings breadcrumb %q", data.Breadcrumb)
+	}
+}
+
+func TestSettingsProjectionReservesSpaceForEditPrompt(t *testing.T) {
+	root := newTestModel(t)
+	root.height = 18
+	root.settingsVisible = true
+	root.settingsPage = "appearance"
+	root.settingsEditing = true
+	root.settingsNotice = "Type the exact confirmation phrase, then press Enter."
+
+	data := root.settingsDataForView()
+	if data == nil || len(data.Rows) != 2 {
+		t.Fatalf("minimum-height Settings edit did not reserve its prompt row: %#v", data)
 	}
 }
 

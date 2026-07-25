@@ -116,16 +116,16 @@ type AgentTranscriptItem struct {
 }
 
 type SettingsData struct {
-	Page      string
-	Title     string
-	Rows      []SettingsRowData
-	Selected  int
-	Editing   bool
-	EditValue string
-	Notice    string
-	Saving    bool
-	TotalRows int
-	FirstRow  int
+	Title      string
+	Breadcrumb string
+	Rows       []SettingsRowData
+	Selected   int
+	Editing    bool
+	EditValue  string
+	Notice     string
+	Saving     bool
+	TotalRows  int
+	FirstRow   int
 }
 
 type SettingsRowData struct {
@@ -1689,6 +1689,8 @@ func operatorOverlay(style styles.Styles, data ShellData, metrics layout.Metrics
 		bounds = threadSwitcherBounds(style, metrics, *data.ThreadSwitcher)
 	} else if data.Usage != nil {
 		bounds = usageBounds(style, metrics, *data.Usage)
+	} else if data.Settings != nil {
+		bounds = settingsBounds(metrics)
 	}
 
 	contentBounds := overlayContentBounds(style.Help, bounds)
@@ -1858,32 +1860,49 @@ func operatorOverlayContent(style styles.Styles, data ShellData) string {
 func renderSettings(style styles.Styles, data SettingsData, width int) string {
 	width = maxInt(24, width)
 	title := style.Control.Render(cleanInlineText(data.Title))
-	breadcrumb := "Settings"
-	if data.Page != "" && data.Page != "categories" {
-		breadcrumb += " / " + strings.ToUpper(data.Page[:1]) + data.Page[1:]
-	}
+	breadcrumb := valueOr(cleanInlineText(data.Breadcrumb), "Settings")
 	lines := []string{title, style.Muted.Render(truncateText(breadcrumb, width)), ""}
 	if len(data.Rows) == 0 {
 		lines = append(lines, style.Muted.Render("No settings are available."))
 	}
 	for _, row := range data.Rows {
 		marker := "  "
-		label := cleanInlineText(row.Label)
+		label := truncateText(cleanInlineText(row.Label), maxInt(1, width-ansi.StringWidth(marker)))
 		value := cleanInlineText(row.Value)
 		if row.Index == data.Selected {
 			marker = "> "
 			label = style.PaletteSelected.Render(label)
 		}
-		if row.Action {
-			value = "open"
-		}
 		if row.ReadOnly {
-			value += " · read only"
+			if value == "" {
+				value = "read only"
+			} else {
+				value += " · read only"
+			}
 		}
-		valueWidth := maxInt(8, width-ansi.StringWidth(marker)-ansi.StringWidth(label)-3)
-		lines = append(lines, truncateText(marker+label+"  "+truncateText(value, valueWidth), width))
-		if strings.TrimSpace(row.Hint) != "" {
-			lines = append(lines, style.Muted.Render(truncateText("    "+row.Hint, width)))
+		primary := marker + label
+		valueOnPrimary := false
+		primaryWidth := ansi.StringWidth(primary)
+		valueWidth := ansi.StringWidth(value)
+		if value != "" && primaryWidth+3+valueWidth <= width {
+			renderedValue := value
+			if row.Action {
+				renderedValue = style.Control.Render(value)
+			}
+			primary += strings.Repeat(" ", width-primaryWidth-valueWidth) + renderedValue
+			valueOnPrimary = true
+		}
+		lines = append(lines, primary)
+		detail := cleanInlineText(row.Hint)
+		if !valueOnPrimary {
+			if detail != "" && value != "" {
+				detail = value + " · " + detail
+			} else if value != "" {
+				detail = value
+			}
+		}
+		if strings.TrimSpace(detail) != "" {
+			lines = append(lines, style.Muted.Render(truncateText("    "+detail, width)))
 		} else {
 			lines = append(lines, "")
 		}
@@ -1892,7 +1911,7 @@ func renderSettings(style styles.Styles, data SettingsData, width int) string {
 		lines = append(lines, style.Control.Render("Edit value: ")+cleanInlineText(data.EditValue))
 	}
 	if data.Saving {
-		lines = append(lines, style.Muted.Render("Saving Agent configuration..."))
+		lines = append(lines, style.Muted.Render(truncateText(valueOr(strings.TrimSpace(data.Notice), "Working..."), width)))
 	} else if strings.TrimSpace(data.Notice) != "" {
 		lines = append(lines, style.Muted.Render(truncateText(data.Notice, width)))
 	}
@@ -1900,12 +1919,23 @@ func renderSettings(style styles.Styles, data SettingsData, width int) string {
 	if data.TotalRows > len(data.Rows) {
 		rangeLabel = fmt.Sprintf(" · rows %d-%d of %d", data.FirstRow+1, data.FirstRow+len(data.Rows), data.TotalRows)
 	}
-	footer := "↑↓ select · Enter change/open · ←/Esc back · Q close" + rangeLabel
+	footer := "↑↓ select · Enter select · ←/Esc back · Q close" + rangeLabel
 	if data.Editing {
 		footer = "Enter save · Esc cancel edit"
 	}
 	lines = append(lines, "", style.Muted.Render(truncateText(footer, width)))
 	return strings.Join(lines, "\n")
+}
+
+func settingsBounds(metrics layout.Metrics) components.Rect {
+	width := maxInt(1, metrics.Bounds.Width-2)
+	height := maxInt(1, metrics.Bounds.Height-2)
+	return components.Rect{
+		X:      maxInt(0, (metrics.Bounds.Width-width)/2),
+		Y:      maxInt(0, (metrics.Bounds.Height-height)/2),
+		Width:  width,
+		Height: height,
+	}
 }
 
 func threadSwitcherBounds(style styles.Styles, metrics layout.Metrics, data ThreadSwitcherData) components.Rect {

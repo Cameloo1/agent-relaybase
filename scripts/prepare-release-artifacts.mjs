@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { npmPackArguments } from "./npm-pack-json.mjs";
 import { targets } from "./tui-go.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -48,7 +49,7 @@ export function prepareReleaseArtifacts(options = {}) {
 
 function packPackage(packageDir, destination, cache, spawn) {
   const npm = npmRunner();
-  const result = spawn(npm.command, [...npm.args, "pack", "--pack-destination", destination, "--json"], {
+  const result = spawn(npm.command, [...npm.args, ...npmPackArguments({ destination })], {
     cwd: packageDir,
     env: { ...process.env, npm_config_cache: cache },
     encoding: "utf8",
