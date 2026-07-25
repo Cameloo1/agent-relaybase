@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
 import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { AgentConfigManager } from "../src/agent/configManager.ts";
 import type { CredentialDescriptor, CredentialStore, StoredCredential } from "../src/agent/credentialStore.ts";
@@ -181,6 +184,46 @@ test("an unverified managed credential remains unverified across config-manager 
   assert.equal(metadata.limitUsd, 3);
   assert.equal(restarted.getSafeState().credential?.connection, "connected");
   assert.equal(restarted.managedCredentialPersistenceState()?.verified, true);
+});
+
+test("Agent config status silently recovers a persisted DPAPI credential on its first read", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-status-recovery-"));
+  const store = new FixtureCredentialStore();
+  const secret = Buffer.from(NEW_SECRET);
+  const stored = await store.put("openrouter", secret);
+  secret.fill(0);
+  await fs.mkdir(path.join(stateDir, "agent"), { recursive: true });
+  await fs.writeFile(
+    path.join(stateDir, "agent", "config.json"),
+    JSON.stringify({
+      schemaVersion: 2,
+      enabled: true,
+      provider: {
+        modelSlug: "openrouter/test-model",
+        apiKeySourceType: "managed_windows_dpapi",
+        credentialId: stored.credentialId,
+        credentialState: {
+          verified: true,
+          lastValidatedAt: "2026-07-24T00:00:00.000Z"
+        },
+        remoteModelEnabled: true
+      }
+    }),
+    "utf8"
+  );
+  const gateway = new AgentGatewayService({ stateDir, credentialStore: store });
+
+  try {
+    assert.equal(gateway.getConfig().credential?.connection, "disconnected");
+    const status = await gateway.getConfigStatus();
+    assert.equal(status.credential?.connection, "connected");
+    assert.equal(status.provider.apiKeySource.configured, true);
+    assert.equal(status.readiness, "ready");
+    assert.doesNotMatch(JSON.stringify(status), new RegExp(NEW_SECRET));
+  } finally {
+    await gateway.close();
+    await fs.rm(stateDir, { recursive: true, force: true });
+  }
 });
 
 test("Agent provider browser launch uses only the safe authorization URL and a scrubbed child environment", async () => {

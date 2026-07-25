@@ -373,10 +373,11 @@ export class OperatorAgentRuntime {
           externalSignal
         );
       } catch (error) {
-        if (!isMaxTurnsExceededError(error)) {
+        const maxTurnsFailure = maxTurnsExceededFailure(error);
+        if (!maxTurnsFailure) {
           throw error;
         }
-        const state = maxTurnsRunState(error);
+        const state = maxTurnsFailure.state;
         if (!state || turnCeiling >= execution.totalMaxTurns) {
           throw new AgentRuntimeError(
             "AGENT_TURN_LIMIT_REACHED",
@@ -879,17 +880,29 @@ class NoProgressTracker {
 }
 
 function isMaxTurnsExceededError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const sdk = loadOpenAIAgentsSdkRuntime();
-  return (
-    error instanceof sdk.MaxTurnsExceededError || (error instanceof Error && error.name === "MaxTurnsExceededError")
-  );
+  return maxTurnsExceededFailure(error) !== undefined;
 }
 
-function maxTurnsRunState(error: unknown): unknown {
-  return error && typeof error === "object" && "state" in error ? (error as { state?: unknown }).state : undefined;
+function maxTurnsExceededFailure(error: unknown): { state?: unknown } | undefined {
+  const sdk = loadOpenAIAgentsSdkRuntime();
+  const visited = new Set<object>();
+  let candidate = error;
+  while (candidate && typeof candidate === "object" && !visited.has(candidate)) {
+    visited.add(candidate);
+    const state = "state" in candidate ? (candidate as { state?: unknown }).state : undefined;
+    const namedFailure =
+      candidate instanceof sdk.MaxTurnsExceededError ||
+      (candidate instanceof Error && candidate.name === "MaxTurnsExceededError");
+    const stateBoundMessage =
+      state !== undefined &&
+      candidate instanceof Error &&
+      /^Max turns \(\d+\) exceeded\.?$/i.test(candidate.message.trim());
+    if (namedFailure || stateBoundMessage) {
+      return state === undefined ? {} : { state };
+    }
+    candidate = "cause" in candidate ? (candidate as { cause?: unknown }).cause : undefined;
+  }
+  return undefined;
 }
 
 function loadRunnerConstructor(): new (options?: Record<string, unknown>) => OperatorAgentRunner {
@@ -985,6 +998,7 @@ function handleSdkStreamEvent(
       }
     });
     if (evaluateToolPolicy(toolName, args).status === "allowed") {
+      processing.noteToolCall(toolCallId);
       emitEvent({
         type: "tool.started",
         data: {
@@ -1016,7 +1030,7 @@ function handleSdkStreamEvent(
       result: output
     }
   });
-  processing.noteToolResult();
+  processing.noteToolResult(toolCallId);
 
   if (toolName === "preview_setup_writes" && status === "succeeded") {
     const data = output && typeof output === "object" ? (output as { data?: unknown }).data : undefined;
@@ -1034,6 +1048,8 @@ class ModelProcessingTracker {
   #active?: { turnId: string; responseId?: string; label: string; completedLabel: string };
   #turn = 0;
   #reviewingToolResult = false;
+  readonly #pendingToolCallIds = new Set<string>();
+  #anonymousPendingToolCalls = 0;
 
   constructor(emit: (event: AgentRuntimeEvent) => void) {
     this.#emit = emit;
@@ -1062,8 +1078,34 @@ class ModelProcessingTracker {
     }
   }
 
-  noteToolResult(): void {
+  noteToolCall(toolCallId?: string): void {
+    if (toolCallId) {
+      this.#pendingToolCallIds.add(toolCallId);
+      return;
+    }
+    this.#anonymousPendingToolCalls += 1;
+  }
+
+  noteToolResult(toolCallId?: string): void {
+    let matched = false;
+    if (toolCallId) {
+      matched = this.#pendingToolCallIds.delete(toolCallId);
+      if (!matched && this.#anonymousPendingToolCalls > 0) {
+        this.#anonymousPendingToolCalls -= 1;
+        matched = true;
+      }
+    } else if (this.#anonymousPendingToolCalls > 0) {
+      this.#anonymousPendingToolCalls -= 1;
+      matched = true;
+    } else if (this.#pendingToolCallIds.size === 1) {
+      this.#pendingToolCallIds.clear();
+      matched = true;
+    }
+    if (!matched || this.#pendingToolCallIds.size > 0 || this.#anonymousPendingToolCalls > 0) {
+      return;
+    }
     this.#reviewingToolResult = true;
+    this.#start();
   }
 
   complete(): void {

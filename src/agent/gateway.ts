@@ -152,6 +152,25 @@ export class AgentGatewayRequestError extends Error {
   }
 }
 
+class AgentProjectRootGrantRequiredError extends AgentRuntimeError {
+  readonly toolCallId?: string;
+  readonly toolName: string;
+
+  constructor(
+    pending: { toolCallId?: string; toolName: string },
+    authorization: { code: string; message: string; userAction: string; detail?: unknown }
+  ) {
+    super(authorization.code, authorization.message, {
+      retryable: true,
+      userAction: authorization.userAction,
+      detail: authorization.detail
+    });
+    this.name = "AgentProjectRootGrantRequiredError";
+    this.toolCallId = pending.toolCallId;
+    this.toolName = pending.toolName;
+  }
+}
+
 type AgentSubscriber = (event: AgentRunEvent) => void;
 
 type AgentSubmissionRequest = AgentMessageRequest & {
@@ -392,6 +411,11 @@ export class AgentGatewayService {
   }
 
   getConfig(): AgentConfig {
+    return this.#safeConfig();
+  }
+
+  async getConfigStatus(): Promise<AgentConfig> {
+    await this.#configManager.refreshManagedCredentialState();
     return this.#safeConfig();
   }
 
@@ -1483,6 +1507,10 @@ export class AgentGatewayService {
           );
         }
       } catch (error) {
+        if (error instanceof AgentProjectRootGrantRequiredError) {
+          this.#finishProjectRootGrantRequiredRun(session, run, error, message.content, input.knownSecrets);
+          return;
+        }
         this.#finishFailedRun(
           session,
           run,
@@ -1690,6 +1718,49 @@ export class AgentGatewayService {
       },
       { sessionId: session.id, runId: run.id, modelSlug: run.modelSlug, knownSecrets }
     );
+  }
+
+  #finishProjectRootGrantRequiredRun(
+    session: AgentSession,
+    run: AgentRun,
+    error: AgentProjectRootGrantRequiredError,
+    content: string,
+    knownSecrets: string[]
+  ): void {
+    const diagnostic = diagnosticFromRuntimeError(error, run.modelSlug);
+    const recoveryContent = diagnostic.userAction ?? diagnostic.message;
+    this.#rejectPendingApprovalsForRun(session.id, run.id, "project_root_grant_required");
+    this.#publishRunEvent(
+      session,
+      run,
+      "tool.failed",
+      {
+        ...(error.toolCallId ? { toolCallId: error.toolCallId } : {}),
+        toolName: error.toolName,
+        diagnostic
+      },
+      knownSecrets
+    );
+    this.#publishRunEvent(session, run, "diagnostic", diagnostic, knownSecrets);
+    this.#publishRunEvent(
+      session,
+      run,
+      "clarification_needed",
+      { kind: "clarification_needed", content: recoveryContent, diagnostic },
+      knownSecrets
+    );
+    this.#auditEvent(
+      "agent.project_root_grant_required",
+      {
+        sessionId: session.id,
+        runId: run.id,
+        toolName: error.toolName,
+        ...(error.toolCallId ? { toolCallId: error.toolCallId } : {}),
+        diagnostic
+      },
+      { sessionId: session.id, runId: run.id, modelSlug: run.modelSlug, knownSecrets }
+    );
+    this.#finishFailedRun(session, run, diagnostic, content, knownSecrets);
   }
 
   #rejectPendingApprovalsForRun(sessionId: string, runId: string, reason: string): void {
@@ -2021,11 +2092,7 @@ export class AgentGatewayService {
       projectRootGrants
     );
     if (!scopeAuthorization.ok) {
-      throw new AgentRuntimeError(scopeAuthorization.code, scopeAuthorization.message, {
-        retryable: false,
-        userAction: scopeAuthorization.userAction,
-        detail: scopeAuthorization.detail
-      });
+      throw new AgentProjectRootGrantRequiredError(pending, scopeAuthorization);
     }
     const preparedApproval = await prepareApprovalData(runtime, pending.toolName, pending.arguments, context);
     const approvalArguments = preparedApproval.arguments;
@@ -2283,19 +2350,34 @@ export class AgentGatewayService {
 
       delete run.completedAt;
       delete run.diagnostic;
-      const nextApproval = await this.#createPendingApproval(
-        runtime,
-        session,
-        run,
-        {
-          toolName: continuation.toolName,
-          arguments: continuation.arguments,
-          expectedResult: decision.policy.expectedResult,
-          risk: decision.policy.risk
-        },
-        approval.context ?? session.context ?? { daemonHasZeroApps: false, diagnostics: [] },
-        knownSecrets
-      );
+      let nextApproval: AgentApproval;
+      try {
+        nextApproval = await this.#createPendingApproval(
+          runtime,
+          session,
+          run,
+          {
+            toolName: continuation.toolName,
+            arguments: continuation.arguments,
+            expectedResult: decision.policy.expectedResult,
+            risk: decision.policy.risk
+          },
+          approval.context ?? session.context ?? { daemonHasZeroApps: false, diagnostics: [] },
+          knownSecrets
+        );
+      } catch (error) {
+        if (error instanceof AgentProjectRootGrantRequiredError) {
+          this.#finishProjectRootGrantRequiredRun(
+            session,
+            run,
+            error,
+            originalUserMessage(session, run.id)?.content ?? "",
+            knownSecrets
+          );
+          return;
+        }
+        throw error;
+      }
       run.status = "waiting_for_approval";
       this.#sessions.updateRun(session.id, run);
       this.#auditEvent(

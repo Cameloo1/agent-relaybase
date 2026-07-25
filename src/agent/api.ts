@@ -32,7 +32,7 @@ export async function handleAgentApiRequest(input: {
   const route = parts.slice(3);
 
   if (request.method === "GET" && route.length === 1 && route[0] === "config") {
-    sendJson(response, 200, { agent: { config: runtime.agentGateway.getConfig() } });
+    sendJson(response, 200, { agent: { config: await runtime.agentGateway.getConfigStatus() } });
     return true;
   }
 

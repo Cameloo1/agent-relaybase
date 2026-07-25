@@ -295,6 +295,38 @@ test("Operator Agent continues the same SDK run state across bounded turn segmen
   });
 });
 
+test("Operator Agent recognizes a state-bearing max-turn failure wrapped by the provider", async () => {
+  await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-wrapped-continuation-secret", async () => {
+    const runner = new SegmentedContinuationRunner(1, true);
+    const runtime = new OperatorAgentRuntime({
+      runnerFactory: () => runner,
+      segmentMaxTurns: 2,
+      totalMaxTurns: 4
+    });
+    const session = makeSession();
+    const run = makeRun(session.id);
+    const events: Array<{ type: AgentRunEvent["type"]; data: unknown }> = [];
+
+    const result = await runtime.execute({
+      relaybase: fakeRelaybaseRuntime(),
+      config: validAgentConfig(),
+      credential: "sk-or-explicit-runtime-fixture",
+      session,
+      message: makeMessage(session.id, run.id, "complete the wrapped longer task"),
+      run,
+      context: minimalTuiContext(),
+      emit: (event) => events.push(event)
+    });
+
+    assert.equal(result.status, "completed");
+    assert.equal(runner.inputs[1], runner.states[0]);
+    assert.deepEqual(
+      events.filter((event) => event.type === "run.continuing").map((event) => event.data),
+      [{ segment: 2, turnsUsed: 2, nextTurnCeiling: 4, totalMaxTurns: 4 }]
+    );
+  });
+});
+
 test("Operator Agent reports the hard turn limit precisely instead of a provider configuration error", async () => {
   await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-turn-limit-secret", async () => {
     const runner = new SegmentedContinuationRunner(Number.POSITIVE_INFINITY);
@@ -577,6 +609,45 @@ test("Agent Gateway emits read-only tool lifecycle events from SDK stream", asyn
   });
 });
 
+test("Operator Agent waits for all parallel tools before showing review thinking", async () => {
+  await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-parallel-tool-secret", async () => {
+    const gateway = new AgentGatewayService({
+      agentRuntime: new OperatorAgentRuntime({
+        runnerFactory: () => new ParallelReadOnlyToolRunner()
+      })
+    });
+    gateway.updateConfig({
+      enabled: true,
+      provider: {
+        modelSlug: "openrouter/test-model",
+        remoteModelEnabled: true,
+        apiKeyEnvVar: "RELAYBASE_TEST_OPENROUTER_KEY"
+      }
+    });
+    const relaybase = fakeRelaybaseRuntime();
+    const session = await gateway.createSession(relaybase, {});
+
+    const result = await submitAndWait(
+      gateway,
+      gateway.addMessage(relaybase, session.id, {
+        content: "Inspect apps and diagnostics in parallel."
+      })
+    );
+
+    assert.equal(result.run.status, "completed");
+    const events = gateway.sessionEvents(session.id);
+    const processingStarts = events.filter((event) => event.type === "model.processing_started");
+    const toolCompletions = events.filter((event) => event.type === "tool.completed");
+    assert.equal(processingStarts.length, 2);
+    assert.equal(toolCompletions.length, 2);
+    assert.equal((processingStarts[1]?.data as any).activity.label, "Reviewing tool result");
+    assert.ok(
+      processingStarts[1]!.sequence > Math.max(...toolCompletions.map((event) => event.sequence)),
+      "review thinking must begin only after every outstanding tool result is available"
+    );
+  });
+});
+
 test("Operator Agent runtime does not emit started for approval-gated SDK tool call items", async () => {
   await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-approval-stream-secret", async () => {
     const runtime = new OperatorAgentRuntime({
@@ -740,6 +811,58 @@ test("Agent Gateway converts SDK approval interruptions into pending approvals a
       assert.ok(gateway.sessionEvents(session.id).some((event) => event.type === "run.completed"));
     } finally {
       unsubscribe();
+    }
+  });
+});
+
+test("Agent Gateway records project-root denial as a visible retryable tool failure", async () => {
+  await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-root-recovery-secret", async () => {
+    const grantedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-granted-root-"));
+    const requestedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-requested-root-"));
+    const fixture = fakeApprovalRelaybaseRuntime();
+    const gateway = gatewayWithApprovalRunner("set_component_metadata", {
+      cwd: requestedRoot,
+      groupId: "research-observer",
+      componentRole: "frontend"
+    });
+    const session = await gateway.createSession(fixture.runtime, {
+      context: { currentCwd: grantedRoot, authorizedProjectRoots: [grantedRoot] }
+    });
+
+    try {
+      const result = await submitAndWait(
+        gateway,
+        gateway.addMessage(fixture.runtime, session.id, {
+          content: "update the requested project metadata",
+          context: { currentCwd: grantedRoot, authorizedProjectRoots: [grantedRoot] }
+        })
+      );
+
+      assert.equal(result.run.status, "failed");
+      assert.equal(result.run.diagnostic?.code, "PROJECT_ROOT_NOT_GRANTED");
+      assert.match(result.run.diagnostic?.userAction ?? "", /\/add|\/configure|\/register/i);
+      const events = gateway.sessionEvents(session.id);
+      const failedTool = events.find((event) => event.type === "tool.failed");
+      assert.equal((failedTool?.data as { toolName?: string } | undefined)?.toolName, "set_component_metadata");
+      assert.equal(
+        (failedTool?.data as { diagnostic?: { code?: string } } | undefined)?.diagnostic?.code,
+        "PROJECT_ROOT_NOT_GRANTED"
+      );
+      assert.equal(
+        events.some((event) => event.type === "clarification_needed"),
+        true
+      );
+      assert.equal(
+        events.some((event) => event.type === "tool.approval_required"),
+        false
+      );
+      assert.equal(
+        gateway.auditEvents().some((event) => event.type === "agent.project_root_grant_required"),
+        true
+      );
+    } finally {
+      await fs.rm(grantedRoot, { recursive: true, force: true });
+      await fs.rm(requestedRoot, { recursive: true, force: true });
     }
   });
 });
@@ -1525,12 +1648,14 @@ class FakeRunner implements OperatorAgentRunner {
 
 class SegmentedContinuationRunner implements OperatorAgentRunner {
   readonly failSegments: number;
+  readonly wrapFailures: boolean;
   readonly inputs: unknown[] = [];
   readonly runOptions: Record<string, unknown>[] = [];
   readonly states: object[] = [];
 
-  constructor(failSegments: number) {
+  constructor(failSegments: number, wrapFailures = false) {
     this.failSegments = failSegments;
+    this.wrapFailures = wrapFailures;
   }
 
   async run(_agent: unknown, input: unknown, options?: Record<string, unknown>): Promise<any> {
@@ -1539,6 +1664,7 @@ class SegmentedContinuationRunner implements OperatorAgentRunner {
     if (this.inputs.length <= this.failSegments) {
       const state = { checkpoint: this.inputs.length };
       this.states.push(state);
+      const wrapFailure = this.wrapFailures;
       const error = Object.assign(new Error(`Max turns (${String(options?.maxTurns)}) exceeded`), {
         name: "MaxTurnsExceededError",
         state
@@ -1549,7 +1675,7 @@ class SegmentedContinuationRunner implements OperatorAgentRunner {
         [Symbol.asyncIterator]() {
           return {
             async next() {
-              throw error;
+              throw wrapFailure ? Object.assign(new Error("Provider stream failed."), { cause: error }) : error;
             }
           };
         }
@@ -1647,11 +1773,60 @@ class ReadOnlyToolRunner implements OperatorAgentRunner {
             }
           }
         };
-        yield { type: "raw_model_stream_event", data: { type: "response.created", response: { id: "response-2" } } };
         yield { data: { delta: "Sample App" } };
       }
     };
   }
+}
+
+class ParallelReadOnlyToolRunner implements OperatorAgentRunner {
+  async run(): Promise<any> {
+    const listResult = { tool: "list_apps", status: "succeeded", data: { apps: [] } };
+    const diagnosticResult = { tool: "get_diagnostics", status: "succeeded", data: { diagnostics: [] } };
+    return {
+      finalOutput: "No apps or diagnostics are present.",
+      usage: { inputTokens: 24, outputTokens: 8 },
+      completed: Promise.resolve(),
+      async *[Symbol.asyncIterator]() {
+        yield { type: "raw_model_stream_event", data: { type: "response.created", response: { id: "response-1" } } };
+        yield toolCallStreamEvent("parallel-apps", "list_apps");
+        yield toolCallStreamEvent("parallel-diagnostics", "get_diagnostics");
+        yield toolOutputStreamEvent("parallel-apps", "list_apps", listResult);
+        yield toolOutputStreamEvent("parallel-diagnostics", "get_diagnostics", diagnosticResult);
+        yield { data: { delta: "No apps" } };
+      }
+    };
+  }
+}
+
+function toolCallStreamEvent(callId: string, name: string): unknown {
+  return {
+    type: "run_item_stream_event",
+    name: "tool_called",
+    item: {
+      rawItem: {
+        type: "function_call",
+        callId,
+        name,
+        arguments: "{}"
+      }
+    }
+  };
+}
+
+function toolOutputStreamEvent(callId: string, name: string, output: unknown): unknown {
+  return {
+    type: "run_item_stream_event",
+    name: "tool_output",
+    item: {
+      rawItem: {
+        type: "function_call_result",
+        callId,
+        name,
+        output: JSON.stringify(output)
+      }
+    }
+  };
 }
 
 class ApprovalRequiredToolCallRunner implements OperatorAgentRunner {
