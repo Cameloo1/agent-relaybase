@@ -1,6 +1,6 @@
 # TUI Architecture
 
-This document defines the architecture for the Relaybase Bubble Tea TUI release. As of R014, the repository contains an initial Go Bubble Tea client shell, pane dashboard, persistent preferences, context menus, deterministic slash commands, a deterministic natural-language assistant, an optional LLM assistant configuration shell under `tui/`, and a Node CLI bridge plus release packaging scaffolding. It is not the final release UI yet.
+This document describes the current Relaybase Bubble Tea terminal-client architecture. The implemented TUI includes the pane dashboard, searchable help and command palette, categorized settings, deterministic slash and natural-language commands, app and package managers, daemon-backed Operator Agent threads and approvals, transcript/tool-trace surfaces, a Node launch bridge, and cross-platform packaging checks.
 
 ## Invariant
 
@@ -20,7 +20,7 @@ The daemon owns:
 - HTTP API, MCP API, dashboard routes, proxy routes, WebSocket/SSE/event endpoints, and TCP tunnel entry points
 - child MCP startup, drain, restart, allowlists, and shutdown
 - log capture, log retention, durable export, redaction, and export audit metadata
-- preferences persistence, diagnostics, and operation state
+- Agent configuration, diagnostics, operation state, and durable Agent threads
 - mutation authorization and secret-safe error reporting
 
 ## Go Bubble Tea TUI Responsibilities
@@ -33,14 +33,14 @@ The TUI owns:
 - local view model state derived from daemon payloads
 - operation progress display using daemon operation ids
 - log viewing, paging, follow mode, slash-command input, and export request initiation
-- preference and diagnostics screens backed by daemon API responses
+- local TUI preference screens plus daemon-backed Agent configuration and diagnostics
 - clear offline, degraded, unauthorized, and stale-state presentation
 
 The TUI may cache response data for rendering, but cached data is not lifecycle truth.
 
-## R008 Go Module Layout
+## Go Module Layout
 
-Decision: the TUI uses a contained Go module under `tui/` instead of a root-level Go module. This keeps the existing Node/TypeScript daemon package layout stable, avoids changing the root package manager contract, and gives the future TUI binary a clear build boundary.
+The TUI uses a contained Go module under `tui/` instead of a root-level Go module. This keeps the Node/TypeScript daemon package layout stable, avoids changing the root package-manager contract, and gives the TUI binary a clear build boundary.
 
 Current layout:
 
@@ -50,12 +50,12 @@ Current layout:
 - `tui/internal/relaybaseclient`: typed HTTP and SSE client for daemon APIs.
 - `tui/internal/events`: Bubble Tea commands/messages for the global daemon event stream.
 - `tui/internal/tui/model`: root Bubble Tea model and diagnostics handling.
-- `tui/internal/tui/views`: header, status strip, shell body, help, and assistant bar composition.
+- `tui/internal/tui/views`: workspace, managers, settings, help, Agent transcript, status, and composer rendering.
 - `tui/internal/tui/components`: reusable render components.
 - `tui/internal/tui/keymap`: key bindings aligned with `docs/tui-keymap.md`.
 - `tui/internal/tui/styles`: Relaybase light theme, dark fallback, and terminal color fallback diagnostics.
 - `tui/internal/tui/commands`: non-blocking Bubble Tea commands for daemon state fetches.
-- `tui/internal/tui/assistant`: deterministic local assistant parser, response types, prompt text, optional LLM provider configuration shell, prompt preview/audit metadata helpers, tool proposal review, and secret-safe history sanitization.
+- `tui/internal/tui/assistant`: deterministic local assistant parsing and routing into slash commands or the daemon Agent Gateway.
 - `tui/internal/tui/setupwizard`: TUI-only setup/onboarding view state for no-apps prompts, setup choices, file diffs, repair previews, and manifest patch previews.
 - `tui/internal/tui/testfixtures`: test-only fake daemon helpers.
 
@@ -67,7 +67,7 @@ go run ./cmd/relaybase-tui --base-url http://127.0.0.1:7777
 go test ./...
 ```
 
-R008 shell behavior:
+Base client behavior:
 
 - fetches `/__hub/api/state`
 - connects to `/__hub/api/events`
@@ -75,7 +75,7 @@ R008 shell behavior:
 - supports `q` quit and `?` help
 - exposes client methods for lifecycle operations, log queries, and log exports only through daemon APIs
 
-R009 dashboard behavior:
+Dashboard behavior:
 
 - maps daemon `AppGroup` and `AppComponent` read models into dashboard panes
 - supports up to eight panes per page, multi-page navigation, selection, focus, pinned panes, hidden panes, follow mode, and independent scrollback state
@@ -84,7 +84,7 @@ R009 dashboard behavior:
 - reacts to the global `/__hub/api/events` stream by refreshing state or querying affected pane logs
 - keeps one global daemon event stream rather than opening one stream per pane
 
-R010 preference behavior:
+Local preference behavior:
 
 - stores TUI-only preferences under `<state-dir>/tui/preferences.json`
 - keeps the daemon as lifecycle and API truth while `/__hub/api/preferences` remains planned
@@ -92,7 +92,7 @@ R010 preference behavior:
 - persists theme, context-menu bindings, pane pins, hidden panes, pane order, pane colors, assistant bar color, and last page
 - rejects secret-like strings before writing preference JSON
 
-R011 command and menu behavior:
+Command and menu behavior:
 
 - opens pane context menus with Ctrl+Z when delivered by the terminal and Ctrl+O as a guaranteed fallback
 - opens assistant context menus from slash input
@@ -102,9 +102,9 @@ R011 command and menu behavior:
 - gates start, stop, restart, and log export behind a confirmation preview unless `--confirm` is explicitly supplied
 - calls daemon lifecycle and export APIs for mutations; it does not spawn processes, inspect ports, or manage lifecycle locally
 - persists only UI preference changes such as pane pin/color/order/hidden state, theme, assistant bar color, and page selection
-- reports chat export and LLM mode as unavailable diagnostics until those features exist
+- routes Agent threads, redacted thread export, and remote model work through the daemon Agent Gateway when enabled
 
-R012 natural assistant behavior:
+Deterministic natural assistant behavior:
 
 - uses a local deterministic parser only; there are no LLM calls, remote provider calls, or assistant-side network calls while parsing
 - treats ordinary typed text in the dashboard as assistant input; `/` still opens slash-command input
@@ -116,23 +116,23 @@ R012 natural assistant behavior:
 - stores natural assistant interaction history separately from slash/menu message history, in memory only, with retention applied from preferences
 - redacts secret-like input before placing it in assistant history; raw logs are not stored in assistant history
 
-R013/RA010 Operator Agent behavior:
+Operator Agent behavior:
 
 - deterministic assistant mode remains the default local fallback
-- provider configuration supports `deterministic`, `local_model`, and `remote_model` modes, provider/model names, optional base URL, API key reference, token budgets, enabled tool allowlist, `sendLogs`, and `sendDiagnostics`
-- API key preferences store references only, such as `env:PROVIDER_API_KEY`; raw key-looking values are rejected
-- remote mode requires explicit `remoteEnabled: true` and complete provider, model, base URL, and key reference before it is considered remotely callable
+- daemon Agent configuration exposes explicit enabled and remote-model states, an exact model slug, key-source metadata, budgets, tool mode/allowlist, approval policy, and bounded execution settings
+- raw provider keys are rejected from TUI preferences and daemon Agent configuration; only an environment-variable name and presence state are exposed
+- remote mode requires explicit Agent enablement, remote-model enablement, a model slug, a configured key source, available budget, and passing policy checks
 - model execution is daemon-owned through the Agent Gateway and OpenRouter provider path when explicitly enabled, configured, and within budget; the Go TUI does not call remote endpoints directly
-- prompt preview helpers redact before constructing preview lines and show data categories that would be sent
-- logs and diagnostics are excluded from prompt preview by default and require explicit opt-in
+- prompt construction and tool results are redacted before daemon persistence and TUI streaming
+- raw app logs and diagnostics are not silently copied into thread recall
 - LLM-proposed tool calls are reviewed against an allowlist; unknown or unlisted tools are blocked
 - lifecycle, setup, manifest, browser/clipboard-adjacent, and log export tool proposals require daemon approval previews before execution
-- model request audit metadata exists for timestamp, provider, model, data categories, estimated tokens, proposed tool calls, approvals, and confirmed actions; raw secrets are sanitized before metadata is retained
+- model and tool audit metadata records safe provider, model, usage, approval, target, operation, and result summaries; raw secrets are sanitized before retention
 - the Go TUI can create Agent Gateway sessions, send messages with selected pane/app/group/cwd context, stream session events, render setup/file-write/manifest/prove/repair previews, and approve or reject pending daemon approvals
 
 The TUI does not spawn apps, inspect ports, read manifests for lifecycle decisions, or implement any lifecycle state machine.
 
-RA003 setup/onboarding behavior:
+Setup and onboarding behavior:
 
 - exposes Go client methods for the daemon setup APIs under `/__hub/api/setup/*`
 - renders no-apps onboarding actions when the daemon reports no apps, groups, or components
@@ -155,7 +155,7 @@ The Node CLI bridge is the launch and compatibility surface between existing Rel
 
 The bridge does not start, stop, or restart apps directly except through daemon APIs that already own those lifecycle actions.
 
-## R014 Packaging And Release Path
+## Packaging And Release Path
 
 Current command paths:
 
@@ -217,7 +217,8 @@ The daemon API is the only product boundary between lifecycle truth and the TUI.
 - operation status endpoints for long-running work
 - event streams for updates
 - logs and export endpoints
-- preferences and diagnostics endpoints
+- daemon Agent configuration and diagnostics endpoints
+- local TUI preference storage under the selected state directory
 
 The TUI must treat daemon API errors as authoritative. It can retry client requests, reconnect event streams, or ask the user to choose a daemon-provided recovery action, but it must not infer lifecycle state by probing ports, reading manifests, or spawning commands on its own.
 

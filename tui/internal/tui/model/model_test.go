@@ -1280,6 +1280,318 @@ func TestDaemonRepairUsesBootstrapBridgeAfterConfirmation(t *testing.T) {
 	}
 }
 
+func TestDaemonRestartUsesBootstrapBridgeAfterConfirmation(t *testing.T) {
+	var requestedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedPath = r.URL.RequestURI()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"daemon":{"reachable":true,"compatible":true,"authenticated":true,"started":true,"restarted":true,"code":"daemon_restarted","requestId":"restart-test","oldInstanceId":"old","newInstanceId":"new","userAction":"Relaybase restarted."}}`))
+	}))
+	defer server.Close()
+
+	cfg := config.Config{
+		BaseURL:        "http://127.0.0.1:7777",
+		StateDir:       t.TempDir(),
+		Token:          "test-token",
+		ThemeMode:      "auto",
+		BootstrapURL:   server.URL,
+		BootstrapToken: "bootstrap-token",
+	}
+	root := NewRoot(cfg, relaybaseclient.New(cfg.BaseURL, cfg.Token, nil))
+	pending, cmd := root.submitSlashCommand("/daemon restart")
+	if cmd != nil || !pending.PendingConfirmation() {
+		t.Fatalf("expected pending daemon restart confirmation, cmd=%v pending=%v", cmd, pending.PendingConfirmation())
+	}
+	if pending.pendingConfirm == nil || !pending.pendingConfirm.DaemonRestart || len(pending.pendingConfirm.Details) != 3 {
+		t.Fatalf("expected safe restart preview details, got %#v", pending.pendingConfirm)
+	}
+
+	confirmed, cmd := pending.submitSlashCommand("/confirm")
+	if cmd == nil || confirmed.PendingConfirmation() {
+		t.Fatalf("expected confirmed restart command, cmd=%v pending=%v", cmd, confirmed.PendingConfirmation())
+	}
+	msg := cmd()
+	if requestedPath != "/daemon/restart" {
+		t.Fatalf("expected bridge restart endpoint, got %s", requestedPath)
+	}
+	result, ok := msg.(commands.DaemonBootstrapRestartMsg)
+	if !ok || result.Result == nil || !result.Result.Restarted || result.Result.NewInstanceID != "new" {
+		t.Fatalf("unexpected daemon restart message: %#v", msg)
+	}
+}
+
+func TestSettingsModalHasCategoriesAndDedicatedCompleteAgentPage(t *testing.T) {
+	root := newTestModel(t)
+	root.agentConfig = enabledAgentConfig(true)
+	root.agentConfig.Execution = relaybaseclient.AgentExecutionPolicy{
+		SegmentMaxTurns:       8,
+		TotalMaxTurns:         32,
+		InactivityTimeoutMS:   120000,
+		HardRunTimeoutMS:      900000,
+		MaxOutputTokens:       4096,
+		ReasoningEffort:       "medium",
+		NoProgressRepeatLimit: 3,
+	}
+	root.agentConfig.ToolAllowlistMode = "all_registered"
+	root.agentConfig.ApprovalPolicy = "always_for_mutations"
+	root.agentConfig.SetupFileWritePolicy = "approval_required"
+
+	categories, cmd := root.submitSlashCommand("/settings")
+	if cmd != nil || !categories.settingsVisible || categories.interaction.Transient != interaction.TransientSettings {
+		t.Fatalf("expected settings transient, cmd=%v state=%#v", cmd, categories.interaction)
+	}
+	for _, label := range []string{"General", "Appearance", "Interaction", "Agent"} {
+		if !strings.Contains(categories.Render(), label) {
+			t.Fatalf("settings categories missing %q:\n%s", label, categories.Render())
+		}
+	}
+
+	agentPage, cmd := root.submitSlashCommand("/settings agent")
+	if cmd != nil || agentPage.settingsPage != "agent" {
+		t.Fatalf("expected direct Agent settings page, page=%s cmd=%v", agentPage.settingsPage, cmd)
+	}
+	rendered := agentPage.Render()
+	rows := agentPage.settingsRows()
+	rowLabels := make([]string, 0, len(rows))
+	for _, row := range rows {
+		rowLabels = append(rowLabels, row.label)
+	}
+	for _, label := range []string{
+		"Status",
+		"Provider",
+		"Security and credentials",
+		"Configuration",
+		"Safety and permissions",
+		"Execution",
+		"Budgets",
+		"Recovery",
+	} {
+		if !containsString(rowLabels, label) {
+			t.Fatalf("Agent settings page missing %q in %#v; rendered page:\n%s", label, rowLabels, rendered)
+		}
+	}
+
+	securityPage, securityCmd := root.submitSlashCommand("/settings agent security")
+	if securityCmd == nil || securityPage.settingsPage != "agent_security" {
+		t.Fatalf("expected direct Agent security page and daemon refresh, page=%s cmd=%v", securityPage.settingsPage, securityCmd)
+	}
+
+	agentPage.settingsPage = "agent_configuration"
+	configurationRows := agentPage.settingsRows()
+	configurationLabels := make([]string, 0, len(configurationRows))
+	for _, row := range configurationRows {
+		configurationLabels = append(configurationLabels, row.label)
+	}
+	for _, label := range []string{"Model slug", "API key env var", "Source health", "Active revision", "Reload now"} {
+		if !containsString(configurationLabels, label) {
+			t.Fatalf("Agent configuration page missing %q in %#v", label, configurationLabels)
+		}
+	}
+}
+
+func TestAgentSettingsDraftDoesNotMutateAuthoritativeConfigUntilAtomicSave(t *testing.T) {
+	root := newTestModel(t)
+	root.agentConfig = enabledAgentConfig(true)
+	root.agentConfig.Revision = &relaybaseclient.AgentConfigRevision{
+		ID:         "revision-fixture",
+		Generation: 3,
+		LoadedAt:   "2026-07-24T00:00:00.000Z",
+	}
+	root.settingsVisible = true
+	root.settingsPage = "agent_configuration"
+	root.resetAgentSettingsDraft()
+
+	updated, cmd := root.saveAgentSetting(relaybaseclient.AgentConfigUpdate{Enabled: boolPointer(false)})
+	if cmd != nil {
+		t.Fatal("editing an Agent draft must not call the daemon")
+	}
+	if !root.agentConfig.Enabled {
+		t.Fatal("authoritative Agent config changed before Save")
+	}
+	if updated.settingsAgentDraft == nil || updated.settingsAgentDraft.Enabled || !updated.settingsAgentDirty {
+		t.Fatalf("expected dirty disabled draft, draft=%#v dirty=%v", updated.settingsAgentDraft, updated.settingsAgentDirty)
+	}
+	rows := updated.settingsRows()
+	if !containsSettingsRow(rows, "save_agent") || !containsSettingsRow(rows, "discard_agent") {
+		t.Fatalf("dirty Agent draft missing save/discard actions: %#v", rows)
+	}
+
+	saving, cmd := updated.commitAgentSettingsDraft()
+	if cmd == nil || !saving.settingsSaving {
+		t.Fatalf("expected one atomic save command, saving=%v cmd=%v", saving.settingsSaving, cmd)
+	}
+}
+
+func TestAgentProviderKeepsConnectionAndRoutesCredentialManagementToSecurity(t *testing.T) {
+	root := newTestModel(t)
+	root.agentConfig = enabledAgentConfig(true)
+	root.agentConfig.Credential = &relaybaseclient.AgentCredentialState{
+		Provider:         "openrouter",
+		Connection:       "connected",
+		Source:           "windows_dpapi",
+		Protection:       "windows-dpapi-current-user",
+		HighSecurityMode: "off",
+	}
+	root.settingsVisible = true
+	root.settingsPage = "agent_provider"
+	root.resetAgentSettingsDraft()
+
+	rows := root.settingsRows()
+	labels := make([]string, 0, len(rows))
+	for _, row := range rows {
+		labels = append(labels, row.label, row.value, row.hint)
+	}
+	rendered := strings.Join(labels, "\n")
+	for _, expected := range []string{
+		"Connect OpenRouter",
+		"Replace credential",
+		"Manage security",
+		"windows-dpapi-current-user",
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("provider settings missing %q:\n%s", expected, rendered)
+		}
+	}
+	for _, moved := range []string{"Retry credential validation", "Move legacy key", "Remove legacy external key", "Revoke remote key", "Disconnect locally"} {
+		if strings.Contains(rendered, moved) {
+			t.Fatalf("provider settings retained moved security mutation %q:\n%s", moved, rendered)
+		}
+	}
+}
+
+func TestAgentSecuritySettingsExposeDiagnosisRepairAndHonestProtectionBoundary(t *testing.T) {
+	root := newTestModel(t)
+	root.agentConfig = enabledAgentConfig(true)
+	root.agentConfig.Credential = &relaybaseclient.AgentCredentialState{
+		Provider:         "openrouter",
+		Connection:       "connected",
+		Source:           "windows_dpapi",
+		Protection:       "windows-dpapi-current-user",
+		LastValidatedAt:  "2026-07-24T00:00:00.000Z",
+		HighSecurityMode: "off",
+	}
+	root.agentSecurityStatus = &relaybaseclient.AgentSecurityStatus{
+		State:     "attention",
+		CheckedAt: "2026-07-24T00:01:00.000Z",
+		Findings: []relaybaseclient.AgentSecurityFinding{{
+			Code:                "AGENT_PROVIDER_KEY_UNVERIFIED",
+			State:               "blocked",
+			Title:               "Credential validation is incomplete",
+			Message:             "Remote runs remain blocked.",
+			Repairability:       "external",
+			RecommendedActionID: "validate_managed_credential",
+			RequiresNetwork:     true,
+		}},
+	}
+	root.settingsVisible = true
+	root.settingsPage = "agent_security"
+	root.resetAgentSettingsDraft()
+
+	renderedParts := []string{}
+	for _, row := range root.settingsRows() {
+		renderedParts = append(renderedParts, row.label, row.value, row.hint)
+	}
+	rendered := strings.Join(renderedParts, "\n")
+	for _, expected := range []string{
+		"Security status",
+		"Protected credential readable",
+		"Current-user ACL",
+		"Validate now",
+		"Move legacy key to protected storage",
+		"Remove legacy external assignment",
+		"Open OpenRouter key management",
+		"Disconnect locally",
+		"Run security check",
+		"Review findings",
+		"does not defeat same-user malware",
+		"Relaybase-only + limit + expiry",
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("security settings missing %q:\n%s", expected, rendered)
+		}
+	}
+	if strings.Contains(rendered, "sk-or-") {
+		t.Fatalf("security settings rendered a secret-like value:\n%s", rendered)
+	}
+}
+
+func TestAgentSecurityDestructiveRepairRequiresPhraseAndNeverStartsThinkingShimmer(t *testing.T) {
+	root := newTestModel(t)
+	root.agentConfig = enabledAgentConfig(true)
+	root.settingsVisible = true
+	root.settingsPage = "agent_security_preview"
+	root.agentSecurityRepairPreview = &relaybaseclient.AgentSecurityRepairPreview{
+		PreviewID: "preview-1",
+		ExpiresAt: "2026-07-24T00:10:00Z",
+		Actions: []relaybaseclient.AgentSecurityRepairAction{{
+			ID:        "disconnect_local_credential",
+			Title:     "Disconnect local credential",
+			RiskClass: "destructive_local",
+			Changes:   []string{"Delete the exact local protected credential."},
+			Preserves: []string{"Remote provider key state."},
+		}},
+		Confirmation: relaybaseclient.AgentSecurityRepairConfirmation{
+			Required: true,
+			Value:    "disconnect_local_credential",
+			Phrase:   "disconnect_local_credential",
+		},
+	}
+	for index, row := range root.settingsRows() {
+		if row.id == "security_apply" {
+			root.settingsSelected = index
+			break
+		}
+	}
+	prompted, cmd := root.activateSettingsSelection()
+	if cmd != nil || !prompted.settingsEditing || prompted.settingsEditField != "security_confirmation" {
+		t.Fatalf("destructive apply did not enter phrase confirmation: editing=%v field=%q cmd=%v", prompted.settingsEditing, prompted.settingsEditField, cmd)
+	}
+	prompted.settingsInput.SetValue("wrong")
+	rejected, cmd := prompted.commitSettingsEdit()
+	if cmd != nil || rejected.settingsSaving {
+		t.Fatalf("wrong phrase must not apply: saving=%v cmd=%v", rejected.settingsSaving, cmd)
+	}
+	if rejected.agentActivityAuthoritative() {
+		t.Fatal("repair control-plane state must never become authoritative model thinking")
+	}
+	rejected.settingsEditing = true
+	rejected.settingsEditField = "security_confirmation"
+	rejected.settingsInput.SetValue("disconnect_local_credential")
+	authorized, cmd := rejected.commitSettingsEdit()
+	if cmd == nil || !authorized.settingsSaving {
+		t.Fatalf("exact phrase did not submit bound repair: saving=%v cmd=%v", authorized.settingsSaving, cmd)
+	}
+	if authorized.agentActivityAuthoritative() {
+		t.Fatal("repair apply must remain static and must not start the thinking shimmer")
+	}
+}
+
+func TestAgentProviderWaitingForBrowserContinuesStatusPolling(t *testing.T) {
+	root := newTestModel(t)
+	root.settingsVisible = true
+	root.settingsPage = "agent_provider"
+	root.agentProviderStatus = &relaybaseclient.AgentProviderStatus{
+		Attempt: &relaybaseclient.AgentProviderAttempt{AttemptID: "attempt-1", Status: "waiting_for_browser"},
+	}
+	updated, cmd := root.Update(commands.AgentProviderStatusLoadedMsg{Status: root.agentProviderStatus})
+	model := updated.(RootModel)
+	if cmd == nil {
+		t.Fatal("waiting_for_browser must continue bounded provider polling")
+	}
+	if !strings.Contains(model.settingsNotice, "waiting for browser") {
+		t.Fatalf("unexpected provider notice: %q", model.settingsNotice)
+	}
+}
+
+func containsSettingsRow(rows []settingsRow, id string) bool {
+	for _, row := range rows {
+		if row.id == id {
+			return true
+		}
+	}
+	return false
+}
+
 func TestDaemonBootstrapSuccessClearsStaleRecoveryDiagnostics(t *testing.T) {
 	root := newTestModel(t)
 	root.addDiagnostic(daemonUnavailableDiagnosticCode, "error", "daemon offline")
@@ -2760,6 +3072,22 @@ func TestAgentConfigRemoteModelDisabledDiagnosticRenders(t *testing.T) {
 	}
 }
 
+func TestAgentConfigDisabledStateKeepsIndependentReadinessDiagnostics(t *testing.T) {
+	root := newTestModel(t)
+	config := enabledAgentConfig(false)
+	config.Enabled = false
+	config.Provider.RemoteModelEnabled = false
+	config.Provider.ModelSlug = ""
+	updated, _ := root.Update(commands.AgentConfigLoadedMsg{Config: config})
+	model := updated.(RootModel)
+
+	for _, code := range []string{"agent_disabled", "agent_remote_model_disabled", "agent_model_missing", "openrouter_api_key_missing"} {
+		if !hasDiagnostic(model.Diagnostics(), code) {
+			t.Fatalf("expected independent %s diagnostic, got %#v", code, model.Diagnostics())
+		}
+	}
+}
+
 func TestAgentConfigLoadsActiveDaemonThread(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/__hub/api/agent/sessions/active" {
@@ -2893,6 +3221,28 @@ func TestAssistantNewThreadFallsBackLocalWhenAgentDisabled(t *testing.T) {
 	history := strings.Join(root.assistantHistoryForView(), "\n")
 	if !strings.Contains(history, "New local-only assistant thread started") || strings.Contains(history, "old message") {
 		t.Fatalf("expected honest local-only reset, got %#v", history)
+	}
+}
+
+func TestAssistantProviderStatusReportsModelSourceAndRestartRequirement(t *testing.T) {
+	root := newTestModel(t)
+	root.agentConfig = &relaybaseclient.AgentConfig{
+		Enabled: true,
+		Provider: relaybaseclient.AgentProviderConfig{
+			Provider:        "openrouter",
+			ModelSlug:       "openai/gpt-5.6-luna",
+			ModelSource:     relaybaseclient.AgentModelSource{Kind: "cwd_env_file", Label: ".env"},
+			RestartRequired: true,
+		},
+	}
+
+	root.reportAssistantProviderStatus()
+	history := strings.Join(root.assistantHistoryForView(), "\n")
+	if !strings.Contains(history, "openai/gpt-5.6-luna from .env") {
+		t.Fatalf("expected effective model and source, got %q", history)
+	}
+	if !strings.Contains(history, "restart Relaybase to apply") {
+		t.Fatalf("expected restart-required guidance, got %q", history)
 	}
 }
 

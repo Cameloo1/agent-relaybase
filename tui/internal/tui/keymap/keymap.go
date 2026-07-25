@@ -23,6 +23,7 @@ type KeyMap struct {
 	Help            key.Binding
 	Diagnostics     key.Binding
 	AgentPane       key.Binding
+	AgentChat       key.Binding
 	Tab             key.Binding
 	CopyLogs        key.Binding
 	StopSelected    key.Binding
@@ -68,6 +69,7 @@ func WithContextMenu(contextMenu []string) KeyMap {
 		Help:            key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Diagnostics:     key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "diagnostics")),
 		AgentPane:       key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "agent pane")),
+		AgentChat:       key.NewBinding(key.WithKeys("f6"), key.WithHelp("f6", "agent chat")),
 		Tab:             key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "complete")),
 		CopyLogs:        key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy 20 logs")),
 		StopSelected:    key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "stop selected pane")),
@@ -98,6 +100,7 @@ func (k KeyMap) FullHelp() []key.Binding {
 		k.Help,
 		k.Diagnostics,
 		k.AgentPane,
+		k.AgentChat,
 		k.Tab,
 		k.CopyLogs,
 		k.StopSelected,

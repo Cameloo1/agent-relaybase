@@ -33,6 +33,7 @@ export interface AgentToolExecutionContext {
   approved?: boolean;
   correlationId?: string;
   emit?: (event: { type: AgentRunEventType; data: unknown }) => void;
+  registeredToolNames?: readonly string[];
 }
 
 export type AgentToolStatus =

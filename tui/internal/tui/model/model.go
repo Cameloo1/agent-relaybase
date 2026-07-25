@@ -88,148 +88,184 @@ var agentConfigDiagnosticCodes = []string{
 
 type daemonRetryMsg struct{}
 type eventRetryMsg struct{}
+type agentActivityTickMsg struct{}
 
 type RootModel struct {
-	cfg                          config.Config
-	client                       *relaybaseclient.Client
-	bootstrapClient              *bootstrap.Client
-	ctx                          context.Context
-	cancel                       context.CancelFunc
-	state                        *relaybaseclient.RelaybaseState
-	stream                       *relaybaseclient.EventStream
-	connectionStatus             string
-	eventStatus                  string
-	eventCount                   int
-	diagnostics                  []Diagnostic
-	theme                        styles.Theme
-	styles                       styles.Styles
-	keymap                       keymap.KeyMap
-	paneManager                  panes.Manager
-	appInventory                 inventory.Manager
-	contextMenu                  contextmenu.Menu
-	preferences                  preferences.Preferences
-	preferenceStore              preferences.Store
-	commandInput                 string
-	commandActive                bool
-	composer                     composer.Model
-	paste                        *pendingPaste
-	pasteGeneration              uint64
-	interaction                  interaction.State
-	agentPreviousFocus           interaction.PrimaryFocus
-	responseOffset               int
-	responseFollow               bool
-	responseNewOutput            int
-	assistantHistory             []string
-	assistantTimeline            []string
-	naturalHistory               []assistant.HistoryEntry
-	agentDelta                   string
-	lastAssistantLine            string
-	historyExpanded              bool
-	setupSession                 setupwizard.State
-	registrationPreview          *relaybaseclient.RegistrationSetupResult
-	regRepairPreview             *relaybaseclient.RegistrationRepairPreviewResult
-	regVerifyAppID               string
-	pendingConfirm               *confirmationRequest
-	quitConfirmation             bool
-	agentConfig                  *relaybaseclient.AgentConfig
-	agentStatus                  string
-	agentDiagnostics             []relaybaseclient.AgentDiagnostic
-	agentSession                 *relaybaseclient.AgentSession
-	agentSessions                []relaybaseclient.AgentSession
-	threadDrafts                 map[string]threadDraftState
-	threadResponses              map[string]threadResponseState
-	agentStream                  *relaybaseclient.AgentEventStream
-	agentStreamSessionID         string
-	agentStreamGeneration        uint64
-	agentInitialReplay           bool
-	agentReplayStatus            string
-	agentPendingInput            string
-	agentPendingGeneration       uint64
-	agentMessageGeneration       uint64
-	pendingSubmissionDraft       *submissionDraftState
-	authorizedProjectRoots       []string
-	pendingAgentApproval         *relaybaseclient.AgentApproval
-	lastNaturalAction            string
-	helpVisible                  bool
-	helpSearch                   textinput.Model
-	helpMatches                  []slash.CommandMatch
-	helpSelected                 int
-	helpDetailOffset             int
-	appManagerVisible            bool
-	appManagerMode               appManagerMode
-	appManagerSurface            appManagerSurface
-	appManagerOffset             int
-	appManagerActionOffset       int
-	appManagerSelectedActionID   appManagerActionID
-	appManagerRenameInput        textinput.Model
-	appManagerPackageNameInput   textinput.Model
-	appManagerRenameAppID        string
-	appManagerRenameCurrentName  string
-	appManagerRefreshing         bool
-	appManagerNotice             string
-	appManagerPaneRefreshID      string
-	appManagerPendingAppID       string
-	appManagerPendingAction      appManagerActionID
-	appManagerPackageSelectedID  string
-	appManagerPackageOffset      int
-	appManagerPendingPackageID   string
-	packageManagerVisible        bool
-	packageManagerSurface        packageManagerSurface
-	packageManagerSelectedID     string
-	packageManagerOffset         int
-	packageManagerActionOffset   int
-	packageManagerSelectedAction packageManagerActionID
-	packageManagerNameInput      textinput.Model
-	packageManagerCreating       bool
-	packageManagerMembers        []string
-	packageManagerMemberSelected int
-	packageManagerMemberOffset   int
-	packageManagerRunOffset      int
-	packageManagerNotice         string
-	packageManagerRefreshing     bool
-	packageManagerPendingID      string
-	packageManagerPendingAction  packageManagerActionID
-	packageDeleteAutoConfirm     bool
-	registrationRepairs          []relaybaseclient.RegistrationRepairOption
-	registrationRepairApp        string
-	registrationRepairRow        int
-	paneReopenVisible            bool
-	paneReopenSelected           int
-	paneReopenSelectedID         string
-	paneReopenOffset             int
-	paneReopenAppID              string
-	paneReopenNotice             string
-	usage                        usagecomponent.Model
-	usageRequestGeneration       uint64
-	threadSwitcherVisible        bool
-	threadSwitcherLoading        bool
-	threadSwitcherSelected       int
-	codePickerVisible            bool
-	codePickerSelected           int
-	commandPalette               commandpalette.Model
-	startCompletion              appcompletion.Model
-	clipboardWriteReady          bool
-	appPackages                  []relaybaseclient.AppPackageDefinition
-	appPackagesKnown             bool
-	activePackageRun             *relaybaseclient.AppPackageRun
-	packageListRequested         bool
-	packageRunProgress           string
-	packageRunPolling            map[string]bool
-	packageRunPollFailures       map[string]int
-	packageRunReported           map[string]bool
-	logFetchPending              map[string]string
-	diagnosticsExpanded          bool
-	width                        int
-	height                       int
-	layoutComposerRows           int
-	bodyScrollOffset             int
-	daemonRetryAttempt           int
-	eventRetryAttempt            int
-	lastBootstrapResult          *bootstrap.DaemonResult
-	assistantPrompt              string
-	localThreadGeneration        uint64
-	composerHistoryID            uint64
-	now                          func() time.Time
+	cfg                               config.Config
+	client                            *relaybaseclient.Client
+	bootstrapClient                   *bootstrap.Client
+	ctx                               context.Context
+	cancel                            context.CancelFunc
+	state                             *relaybaseclient.RelaybaseState
+	stateGeneratedAt                  string
+	stateFetchGeneration              uint64
+	stream                            *relaybaseclient.EventStream
+	connectionStatus                  string
+	eventStatus                       string
+	eventCount                        int
+	diagnostics                       []Diagnostic
+	theme                             styles.Theme
+	styles                            styles.Styles
+	keymap                            keymap.KeyMap
+	paneManager                       panes.Manager
+	appInventory                      inventory.Manager
+	contextMenu                       contextmenu.Menu
+	preferences                       preferences.Preferences
+	preferenceStore                   preferences.Store
+	commandInput                      string
+	commandActive                     bool
+	composer                          composer.Model
+	paste                             *pendingPaste
+	pasteGeneration                   uint64
+	interaction                       interaction.State
+	agentPreviousFocus                interaction.PrimaryFocus
+	responseOffset                    int
+	responseFollow                    bool
+	responseNewOutput                 int
+	agentFullResponseOffset           int
+	agentFullResponseFollow           bool
+	agentFullResponseNewOutput        int
+	agentChatFull                     bool
+	agentChatRestoreDetails           bool
+	assistantHistory                  []string
+	assistantTimeline                 []string
+	naturalHistory                    []assistant.HistoryEntry
+	agentDelta                        string
+	lastAssistantLine                 string
+	historyExpanded                   bool
+	setupSession                      setupwizard.State
+	registrationPreview               *relaybaseclient.RegistrationSetupResult
+	regRepairPreview                  *relaybaseclient.RegistrationRepairPreviewResult
+	regVerifyAppID                    string
+	pendingConfirm                    *confirmationRequest
+	quitConfirmation                  bool
+	agentConfig                       *relaybaseclient.AgentConfig
+	agentStatus                       string
+	agentDiagnostics                  []relaybaseclient.AgentDiagnostic
+	agentSession                      *relaybaseclient.AgentSession
+	agentSessions                     []relaybaseclient.AgentSession
+	threadDrafts                      map[string]threadDraftState
+	threadResponses                   map[string]threadResponseState
+	agentStream                       *relaybaseclient.AgentEventStream
+	agentStreamSessionID              string
+	agentStreamGeneration             uint64
+	agentStreamReconnecting           bool
+	agentInitialReplay                bool
+	agentReplayStatus                 string
+	agentTranscript                   []views.AgentTranscriptItem
+	agentTranscriptExpanded           map[string]bool
+	agentTranscriptSelected           string
+	agentTranscriptRenderCache        *views.AgentTranscriptRenderCache
+	agentActivityFrame                int
+	agentActivityTicking              bool
+	agentActivityASCII                bool
+	agentActivityAnimations           bool
+	agentPendingInput                 string
+	agentPendingGeneration            uint64
+	agentMessageGeneration            uint64
+	pendingSubmissionDraft            *submissionDraftState
+	authorizedProjectRoots            []string
+	pendingAgentApproval              *relaybaseclient.AgentApproval
+	lastNaturalAction                 string
+	helpVisible                       bool
+	helpSearch                        textinput.Model
+	helpMatches                       []slash.CommandMatch
+	helpSelected                      int
+	helpDetailOffset                  int
+	settingsVisible                   bool
+	settingsPage                      string
+	settingsSelected                  int
+	settingsOffset                    int
+	settingsEditing                   bool
+	settingsEditField                 string
+	settingsInput                     textinput.Model
+	settingsNotice                    string
+	settingsSaving                    bool
+	settingsAgentDraft                *relaybaseclient.AgentConfig
+	settingsAgentDirty                bool
+	settingsConfirmAction             string
+	agentProviderStatus               *relaybaseclient.AgentProviderStatus
+	agentLegacyRemovalPreview         *relaybaseclient.AgentLegacyCredentialRemovalPreview
+	agentSecurityStatus               *relaybaseclient.AgentSecurityStatus
+	agentSecurityRepairPreview        *relaybaseclient.AgentSecurityRepairPreview
+	agentSecurityRepairOperation      *relaybaseclient.AgentSecurityRepairOperation
+	agentSecurityIdempotencyKey       string
+	agentSecurityIdempotencyPreviewID string
+	appManagerVisible                 bool
+	appManagerMode                    appManagerMode
+	appManagerSurface                 appManagerSurface
+	appManagerOffset                  int
+	appManagerActionOffset            int
+	appManagerSelectedActionID        appManagerActionID
+	appManagerRenameInput             textinput.Model
+	appManagerPackageNameInput        textinput.Model
+	appManagerRenameAppID             string
+	appManagerRenameCurrentName       string
+	appManagerRefreshing              bool
+	appManagerNotice                  string
+	appManagerPaneRefreshID           string
+	appManagerPendingAppID            string
+	appManagerPendingAction           appManagerActionID
+	appManagerPackageSelectedID       string
+	appManagerPackageOffset           int
+	appManagerPendingPackageID        string
+	packageManagerVisible             bool
+	packageManagerSurface             packageManagerSurface
+	packageManagerSelectedID          string
+	packageManagerOffset              int
+	packageManagerActionOffset        int
+	packageManagerSelectedAction      packageManagerActionID
+	packageManagerNameInput           textinput.Model
+	packageManagerCreating            bool
+	packageManagerMembers             []string
+	packageManagerMemberSelected      int
+	packageManagerMemberOffset        int
+	packageManagerRunOffset           int
+	packageManagerNotice              string
+	packageManagerRefreshing          bool
+	packageManagerPendingID           string
+	packageManagerPendingAction       packageManagerActionID
+	packageDeleteAutoConfirm          bool
+	registrationRepairs               []relaybaseclient.RegistrationRepairOption
+	registrationRepairApp             string
+	registrationRepairRow             int
+	paneReopenVisible                 bool
+	paneReopenSelected                int
+	paneReopenSelectedID              string
+	paneReopenOffset                  int
+	paneReopenAppID                   string
+	paneReopenNotice                  string
+	usage                             usagecomponent.Model
+	usageRequestGeneration            uint64
+	threadSwitcherVisible             bool
+	threadSwitcherLoading             bool
+	threadSwitcherSelected            int
+	codePickerVisible                 bool
+	codePickerSelected                int
+	commandPalette                    commandpalette.Model
+	startCompletion                   appcompletion.Model
+	clipboardWriteReady               bool
+	appPackages                       []relaybaseclient.AppPackageDefinition
+	appPackagesKnown                  bool
+	activePackageRun                  *relaybaseclient.AppPackageRun
+	packageListRequested              bool
+	packageRunProgress                string
+	packageRunPolling                 map[string]bool
+	packageRunPollFailures            map[string]int
+	packageRunReported                map[string]bool
+	logFetchPending                   map[string]string
+	diagnosticsExpanded               bool
+	width                             int
+	height                            int
+	layoutComposerRows                int
+	bodyScrollOffset                  int
+	daemonRetryAttempt                int
+	eventRetryAttempt                 int
+	lastBootstrapResult               *bootstrap.DaemonResult
+	assistantPrompt                   string
+	localThreadGeneration             uint64
+	composerHistoryID                 uint64
+	now                               func() time.Time
 }
 
 type confirmationRequest struct {
@@ -243,6 +279,7 @@ type confirmationRequest struct {
 	SetupCommand         *slash.ParsedCommand
 	AssistantInput       string
 	DaemonRepair         bool
+	DaemonRestart        bool
 	PackageAction        string
 	PackageID            string
 	PackageRunID         string
@@ -263,15 +300,21 @@ type threadDraftState struct {
 // composer drafts, and prevents a late replay or thread switch from blending
 // two operator conversations in the same panel.
 type threadResponseState struct {
-	AssistantHistory  []string
-	AssistantTimeline []string
-	NaturalHistory    []assistant.HistoryEntry
-	AgentDelta        string
-	LastAssistantLine string
-	HistoryExpanded   bool
-	ResponseOffset    int
-	ResponseFollow    bool
-	ResponseNewOutput int
+	AssistantHistory      []string
+	AssistantTimeline     []string
+	NaturalHistory        []assistant.HistoryEntry
+	AgentDelta            string
+	LastAssistantLine     string
+	HistoryExpanded       bool
+	ResponseOffset        int
+	ResponseFollow        bool
+	ResponseNewOutput     int
+	AgentTranscript       []views.AgentTranscriptItem
+	TranscriptExpanded    map[string]bool
+	TranscriptSelected    string
+	FullResponseOffset    int
+	FullResponseFollow    bool
+	FullResponseNewOutput int
 }
 
 type pendingPaste struct {
@@ -388,6 +431,12 @@ func NewRoot(cfg config.Config, client *relaybaseclient.Client) RootModel {
 	appPackageNameInput.CharLimit = 128
 	appPackageNameInput.SetWidth(48)
 	applyTextInputTheme(&appPackageNameInput, theme)
+	settingsInput := textinput.New()
+	settingsInput.Prompt = ""
+	settingsInput.Placeholder = "setting value"
+	settingsInput.CharLimit = 512
+	settingsInput.SetWidth(48)
+	applyTextInputTheme(&settingsInput, theme)
 	composerModel := composer.New(76)
 	composerModel.ApplyTheme(theme, loadedPreferences.Assistant.BarColor)
 	composerModel.SetHistoryScope("local:1")
@@ -415,6 +464,7 @@ func NewRoot(cfg config.Config, client *relaybaseclient.Client) RootModel {
 		lastBootstrapResult:        bootstrapReport,
 		assistantPrompt:            assistant.PromptPlaceholder(),
 		helpSearch:                 helpSearch,
+		settingsInput:              settingsInput,
 		appManagerRenameInput:      renameInput,
 		appManagerPackageNameInput: appPackageNameInput,
 		packageManagerNameInput:    packageNameInput,
@@ -425,6 +475,9 @@ func NewRoot(cfg config.Config, client *relaybaseclient.Client) RootModel {
 		interaction:                interaction.New(),
 		agentPreviousFocus:         interaction.FocusPanes,
 		responseFollow:             true,
+		agentFullResponseFollow:    true,
+		agentTranscriptExpanded:    map[string]bool{},
+		agentTranscriptRenderCache: views.NewAgentTranscriptRenderCache(),
 		localThreadGeneration:      1,
 		threadDrafts:               map[string]threadDraftState{},
 		threadResponses:            map[string]threadResponseState{},
@@ -434,6 +487,8 @@ func NewRoot(cfg config.Config, client *relaybaseclient.Client) RootModel {
 		packageRunReported:         map[string]bool{},
 		logFetchPending:            map[string]string{},
 		now:                        time.Now,
+		agentActivityASCII:         terminalActivityASCII(),
+		agentActivityAnimations:    !terminalReducedMotion(),
 	}
 }
 
@@ -505,6 +560,13 @@ func (m *RootModel) recoverPackageRunPoll(runID string, attempt int, err error) 
 
 func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
+	case agentActivityTickMsg:
+		m.agentActivityTicking = false
+		if !m.agentActivityAuthoritative() || !m.agentActivityVisible() {
+			return m, nil
+		}
+		m.agentActivityFrame = (m.agentActivityFrame + 1) % 6
+		return m, m.scheduleAgentActivityTick()
 	case daemonRetryMsg:
 		if m.connectionStatus != "offline" && m.connectionStatus != "auth_needed" {
 			return m, nil
@@ -520,6 +582,11 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, commands.FetchStateCmd(m.ctx, m.client)
 	case tea.WindowSizeMsg:
 		previousMetrics := m.operatorMetrics()
+		transcriptAnchor := views.AgentTranscriptAnchor{}
+		hasTranscriptAnchor := false
+		if !m.currentResponseFollow() {
+			transcriptAnchor, hasTranscriptAnchor = views.ResponseTranscriptAnchor(m.styles, m.shellData())
+		}
 		m.width = msg.Width
 		m.height = msg.Height
 		// Width can reflow a multiline draft and therefore change DynamicHeight.
@@ -531,11 +598,16 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.appManagerRenameInput.SetWidth(maxInt(12, minInt(64, msg.Width-24)))
 		m.appManagerPackageNameInput.SetWidth(maxInt(12, minInt(64, msg.Width-24)))
 		m.packageManagerNameInput.SetWidth(maxInt(12, minInt(64, msg.Width-24)))
+		m.settingsInput.SetWidth(maxInt(12, minInt(64, msg.Width-24)))
 		m.commandPalette.SetMaxRows(commandPaletteRows(msg.Height))
 		m.clampAppManagerOffset()
 		m.followPackageManagerSelection()
 		m.followPaneReopenSelection()
+		m.followSettingsSelection(len(m.settingsRows()))
 		m.clampBodyScroll()
+		if hasTranscriptAnchor {
+			m.setCurrentResponseOffset(views.ResponseOffsetForTranscriptAnchor(m.styles, m.shellData(), transcriptAnchor))
+		}
 		if persistAgentPreference {
 			return m, m.persistPreferencesCmd()
 		}
@@ -560,8 +632,22 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.registrationRepairs) > 0 {
 			return m, nil
 		}
+		if m.settingsVisible {
+			if region, ok := frame.HitMap.Hit(mouse.X, mouse.Y); ok && (region.Kind == components.HitSettingsRow || region.Kind == components.HitModal) {
+				switch mouse.Button {
+				case tea.MouseWheelUp:
+					m.settingsSelected -= 3
+				case tea.MouseWheelDown:
+					m.settingsSelected += 3
+				}
+				total := len(m.settingsRows())
+				m.settingsSelected = clampInt(m.settingsSelected, 0, maxInt(0, total-1))
+				m.followSettingsSelection(total)
+			}
+			return m, nil
+		}
 		if m.responseDetailsVisible() {
-			if region, ok := frame.HitMap.Hit(mouse.X, mouse.Y); ok && region.Kind == components.HitResponse {
+			if region, ok := frame.HitMap.Hit(mouse.X, mouse.Y); ok && (region.Kind == components.HitResponse || region.Kind == components.HitAgentTranscript) {
 				switch mouse.Button {
 				case tea.MouseWheelUp:
 					m.scrollResponse(-3)
@@ -687,6 +773,15 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.scrollResponse(3)
 				}
 				return m, nil
+			case components.HitAgentTranscript:
+				m.setPrimaryFocus(interaction.FocusResponse)
+				switch mouse.Button {
+				case tea.MouseWheelUp:
+					m.scrollResponse(-3)
+				case tea.MouseWheelDown:
+					m.scrollResponse(3)
+				}
+				return m, nil
 			case components.HitComposer:
 				m.setPrimaryFocus(interaction.FocusComposer)
 				return m, nil
@@ -718,7 +813,20 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		frame := views.BuildShell(m.styles, m.shellData())
 		region, ok := frame.HitMap.Hit(mouse.X, mouse.Y)
+		if m.settingsVisible {
+			if ok && region.Kind == components.HitSettingsRow {
+				if region.Index == m.settingsSelected {
+					return m.activateSettingsSelection()
+				}
+				m.settingsSelected = region.Index
+				m.followSettingsSelection(len(m.settingsRows()))
+			}
+			return m, nil
+		}
 		if m.responseDetailsVisible() {
+			if ok && region.Kind == components.HitAgentTranscript {
+				m.toggleAgentTranscriptItem(region.ItemID)
+			}
 			return m, nil
 		}
 		if m.codePickerVisible {
@@ -843,6 +951,10 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case components.HitResponse:
 			m.setPrimaryFocus(interaction.FocusResponse)
 			return m, nil
+		case components.HitAgentTranscript:
+			m.setPrimaryFocus(interaction.FocusResponse)
+			m.toggleAgentTranscriptItem(region.ItemID)
+			return m, nil
 		case components.HitComposer:
 			m.setPrimaryFocus(interaction.FocusComposer)
 			return m, nil
@@ -868,6 +980,14 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if (m.appManagerVisible && m.appManagerSurface == appManagerSurfacePackageCreate) || (m.packageManagerVisible && m.packageManagerSurface == packageManagerSurfaceName) {
 			return m.updatePackageNamePaste(msg.Content)
 		}
+		if m.settingsVisible {
+			if m.settingsEditing {
+				updated, cmd := m.settingsInput.Update(msg)
+				m.settingsInput = updated
+				return m, cmd
+			}
+			return m, nil
+		}
 		if m.threadSwitcherVisible || m.codePickerVisible || m.appManagerVisible || m.packageManagerVisible || m.paneReopenVisible {
 			return m, nil
 		}
@@ -883,7 +1003,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.beginPaste(msg.Content)
 	case pasteReadyMsg:
-		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() || m.threadSwitcherVisible || m.codePickerVisible || m.appManagerVisible || m.packageManagerVisible || m.paneReopenVisible || m.helpVisible {
+		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() || m.threadSwitcherVisible || m.codePickerVisible || m.appManagerVisible || m.packageManagerVisible || m.paneReopenVisible || m.helpVisible || m.settingsVisible {
 			return m.cancelPendingPaste(), nil
 		}
 		return m.completePaste(msg), nil
@@ -906,7 +1026,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.updatePackageNamePaste(msg.Text)
 		}
-		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() || m.threadSwitcherVisible || m.codePickerVisible || m.appManagerVisible || m.packageManagerVisible || m.paneReopenVisible || m.helpVisible {
+		if m.pendingConfirm != nil || m.pendingAgentApproval != nil || m.quitConfirmation || m.usage.IsOpen() || m.contextMenu.IsOpen() || m.threadSwitcherVisible || m.codePickerVisible || m.appManagerVisible || m.packageManagerVisible || m.paneReopenVisible || m.helpVisible || m.settingsVisible {
 			return m, nil
 		}
 		if msg.Err != nil {
@@ -955,6 +1075,9 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.usage.IsOpen() {
 			return m.handleUsageKey(msg)
+		}
+		if m.settingsVisible {
+			return m.handleSettingsKey(msg)
 		}
 		if m.codePickerVisible {
 			return m.handleCodePickerKey(msg)
@@ -1005,7 +1128,10 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if keymap.Matches(msg, m.keymap.AgentPane) {
 			return m.toggleAgentSurface()
 		}
-		if m.responseDetailsVisible() || m.interaction.Owner() == interaction.OwnerResponse {
+		if keymap.Matches(msg, m.keymap.AgentChat) {
+			return m.toggleAgentChat()
+		}
+		if m.agentChatFull || m.responseDetailsVisible() || m.interaction.Owner() == interaction.OwnerResponse {
 			return m.handleAgentSurfaceKey(msg, m.responseDetailsVisible())
 		}
 		if m.commandActive {
@@ -1148,9 +1274,21 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case commands.StateLoadedMsg:
+		if msg.Generation > 0 && msg.Generation < m.stateFetchGeneration {
+			return m, nil
+		}
+		if msg.State != nil && msg.State.GeneratedAt != "" && m.stateGeneratedAt != "" && msg.State.GeneratedAt < m.stateGeneratedAt {
+			return m, nil
+		}
+		if msg.Generation > 0 {
+			m.stateFetchGeneration = msg.Generation
+		}
 		wasOffline := m.connectionStatus != "connected"
 		paneRefreshID := m.appManagerPaneRefreshID
 		m.state = msg.State
+		if msg.State != nil && msg.State.GeneratedAt != "" {
+			m.stateGeneratedAt = msg.State.GeneratedAt
+		}
 		m.connectionStatus = "connected"
 		m.daemonRetryAttempt = 0
 		m.clearDiagnostics(
@@ -1219,6 +1357,12 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, batchCommands(cmds...)
 	case commands.StateFailedMsg:
+		if msg.Generation > 0 && msg.Generation < m.stateFetchGeneration {
+			return m, nil
+		}
+		if msg.Generation > 0 {
+			m.stateFetchGeneration = msg.Generation
+		}
 		if isAuthAPIError(msg.Err) {
 			m.appManagerRefreshing = false
 			m.appManagerPaneRefreshID = ""
@@ -1589,6 +1733,26 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, commands.FetchStateCmd(m.ctx, m.client)
 		}
 		return m, nil
+	case commands.DaemonBootstrapRestartMsg:
+		if msg.Result == nil || !msg.Result.Restarted {
+			if msg.Result != nil {
+				m.lastBootstrapResult = msg.Result
+				m.addOrReplaceDiagnostic("daemon_restart_"+valueOr(msg.Result.Code, "failed"), "error", bootstrapResultMessage(msg.Result))
+			}
+			m.addAssistantMessage("Daemon restart: " + bootstrapResultMessage(msg.Result))
+			return m, nil
+		}
+		if m.stream != nil {
+			_ = m.stream.Close()
+			m.stream = nil
+		}
+		m.closeAgentStream()
+		m.reloadTokenFromDisk()
+		m.applyDaemonBootstrapResult(msg.Result)
+		m.addAssistantMessage("Daemon restart: " + daemonRestartResultMessage(msg.Result))
+		m.eventStatus = "connecting"
+		m.connectionStatus = "connecting"
+		return m, commands.FetchStateCmd(m.ctx, m.client)
 	case commands.DaemonBootstrapFailedMsg:
 		m.addOrReplaceDiagnostic("daemon_bootstrap_failed", "error", fmt.Sprintf("%s failed: %v", msg.Action, msg.Err))
 		m.addAssistantMessage(fmt.Sprintf("%s failed: %v", msg.Action, msg.Err))
@@ -1955,15 +2119,202 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case commands.AgentConfigLoadedMsg:
 		m.agentConfig = msg.Config
+		if m.settingsVisible && !m.settingsAgentDirty {
+			m.resetAgentSettingsDraft()
+		}
 		m.agentStatus = agentStatusFromConfig(msg.Config)
 		m.clearDiagnostics(agentGatewayUnavailableCode)
 		m.clearAgentConfigDiagnostics()
 		for _, diagnostic := range agentConfigDiagnostics(msg.Config) {
 			m.addDiagnostic(diagnostic.Code, diagnostic.Severity, diagnostic.Message)
 		}
+		if m.settingsVisible && strings.HasPrefix(m.settingsPage, "agent") {
+			m.settingsNotice = "Agent configuration loaded."
+		}
 		if m.agentThreadGatewayAvailable() {
 			return m, commands.FetchActiveAgentSessionCmd(m.ctx, m.client)
 		}
+		return m, nil
+	case commands.AgentConfigUpdatedMsg:
+		m.agentConfig = msg.Config
+		m.resetAgentSettingsDraft()
+		m.agentStatus = agentStatusFromConfig(msg.Config)
+		m.settingsSaving = false
+		m.settingsNotice = "Agent settings saved atomically."
+		m.clearAgentConfigDiagnostics()
+		for _, diagnostic := range agentConfigDiagnostics(msg.Config) {
+			m.addDiagnostic(diagnostic.Code, diagnostic.Severity, diagnostic.Message)
+		}
+		return m, commands.FetchAgentDiagnosticsCmd(m.ctx, m.client)
+	case commands.AgentConfigUpdateFailedMsg:
+		m.settingsSaving = false
+		m.settingsNotice = "No Agent changes were applied: " + assistant.SanitizeText(fmt.Sprint(msg.Err))
+		m.addOrReplaceDiagnostic("agent_config_update_failed", "error", m.settingsNotice)
+		return m, nil
+	case commands.AgentConfigReloadedMsg:
+		m.settingsSaving = false
+		if msg.Result != nil && msg.Result.Status == "applied" {
+			m.settingsNotice = "Agent configuration reloaded. Refreshing active revision..."
+		} else {
+			m.settingsNotice = "Agent configuration checked. Refreshing active revision..."
+		}
+		return m, commands.FetchAgentConfigCmd(m.ctx, m.client)
+	case commands.AgentConfigReloadFailedMsg:
+		m.settingsSaving = false
+		m.settingsNotice = "Reload failed; the last-known-good revision remains active: " + assistant.SanitizeText(fmt.Sprint(msg.Err))
+		m.addOrReplaceDiagnostic("agent_config_reload_failed", "error", m.settingsNotice)
+		return m, nil
+	case commands.AgentProviderStatusLoadedMsg:
+		m.settingsSaving = false
+		m.agentProviderStatus = msg.Status
+		if msg.Status != nil {
+			m.agentConfig = &msg.Status.Config
+			if !m.settingsAgentDirty {
+				m.resetAgentSettingsDraft()
+			}
+			if msg.Status.Attempt != nil {
+				switch msg.Status.Attempt.Status {
+				case "waiting_for_browser", "exchanging", "validating":
+					m.settingsNotice = "OpenRouter connection is " + strings.ReplaceAll(msg.Status.Attempt.Status, "_", " ") + "."
+					return m, pollAgentProviderStatus(msg.Status.Attempt.AttemptID)
+				case "connected":
+					m.settingsNotice = "OpenRouter connected. The credential is protected by Windows DPAPI."
+				case "connected_unverified":
+					m.settingsNotice = "Credential stored but provider validation is incomplete; Agent runs remain blocked."
+				case "failed", "expired":
+					m.settingsNotice = "OpenRouter connection " + msg.Status.Attempt.Status + "."
+				}
+			}
+		}
+		return m, nil
+	case commands.AgentProviderStatusFailedMsg:
+		m.settingsSaving = false
+		m.settingsNotice = "Could not refresh provider status: " + assistant.SanitizeText(fmt.Sprint(msg.Err))
+		return m, nil
+	case commands.AgentProviderConnectionStartedMsg:
+		m.settingsSaving = false
+		if msg.Attempt == nil {
+			m.settingsNotice = "OpenRouter authorization did not start."
+			return m, nil
+		}
+		m.agentProviderStatus = &relaybaseclient.AgentProviderStatus{Attempt: msg.Attempt}
+		if msg.Attempt.BrowserOpen == "opened" {
+			m.settingsNotice = "OpenRouter authorization opened in your browser. Complete it, then return here."
+		} else {
+			m.settingsNotice = "Browser launch was unavailable. Run `relaybase agent provider connect` in another terminal to open this same active attempt."
+		}
+		return m, pollAgentProviderStatus(msg.Attempt.AttemptID)
+	case agentProviderStatusTickMsg:
+		if !m.settingsVisible || m.settingsPage != "agent_provider" || m.agentProviderStatus == nil ||
+			m.agentProviderStatus.Attempt == nil || m.agentProviderStatus.Attempt.AttemptID != msg.attemptID {
+			return m, nil
+		}
+		return m, commands.FetchAgentProviderStatusCmd(m.ctx, m.client)
+	case commands.AgentProviderActionCompletedMsg:
+		m.settingsSaving = false
+		if msg.Config != nil {
+			m.agentConfig = msg.Config
+			m.resetAgentSettingsDraft()
+		}
+		switch msg.Action {
+		case "disconnect":
+			m.settingsNotice = "Disconnected locally. The remote OpenRouter key may still be active."
+		case "migrate":
+			m.settingsNotice = "Credential moved to Windows DPAPI. Remove the old plaintext value from its source after verification."
+		case "validate":
+			m.settingsNotice = "OpenRouter credential validation succeeded."
+		default:
+			m.settingsNotice = "Provider action completed."
+		}
+		return m, commands.FetchAgentProviderStatusCmd(m.ctx, m.client)
+	case commands.AgentProviderActionFailedMsg:
+		m.settingsSaving = false
+		m.settingsNotice = titleCase(msg.Action) + " failed without changing the active credential: " + assistant.SanitizeText(fmt.Sprint(msg.Err))
+		return m, nil
+	case commands.AgentProviderRevokePreviewLoadedMsg:
+		m.settingsSaving = false
+		if msg.Preview == nil {
+			m.settingsNotice = "Remote revocation status is unavailable; the local credential was preserved."
+		} else if msg.Preview.RequiresExternalAction {
+			m.settingsNotice = "Relaybase cannot confirm remote revocation. Use OpenRouter key management, then disconnect locally: " + msg.Preview.ManagementURL
+		} else {
+			m.settingsNotice = "Remote revocation is supported by the provider management flow."
+		}
+		return m, nil
+	case commands.AgentLegacyCredentialRemovalPreviewLoadedMsg:
+		m.settingsSaving = false
+		if msg.Preview == nil {
+			m.settingsNotice = "An exact legacy credential removal preview was unavailable."
+			return m, nil
+		}
+		m.agentLegacyRemovalPreview = msg.Preview
+		m.settingsConfirmAction = "provider_cleanup_legacy"
+		m.settingsNotice = fmt.Sprintf(
+			"Preview: remove %s line %d from %s. Press Enter again to confirm; no plaintext backup will be created.",
+			msg.Preview.KeyName,
+			msg.Preview.LineNumber,
+			msg.Preview.SourceLabel,
+		)
+		return m, nil
+	case commands.AgentLegacyCredentialRemovalCompletedMsg:
+		m.settingsSaving = false
+		m.agentLegacyRemovalPreview = nil
+		m.settingsConfirmAction = ""
+		if msg.Result == nil {
+			m.settingsNotice = "Legacy credential removal did not return a result."
+			return m, nil
+		}
+		m.agentConfig = &msg.Result.Config
+		m.resetAgentSettingsDraft()
+		m.settingsNotice = "Removed the exact legacy external credential assignment. Managed DPAPI mode remains active."
+		return m, nil
+	case commands.AgentSecurityStatusLoadedMsg:
+		m.settingsSaving = false
+		if msg.Status == nil {
+			m.settingsNotice = "Agent security check returned no status."
+			return m, nil
+		}
+		m.agentSecurityStatus = msg.Status
+		m.settingsNotice = fmt.Sprintf(
+			"Agent security check complete: %d finding(s) need attention.",
+			agentSecurityIssueCount(msg.Status),
+		)
+		return m, nil
+	case commands.AgentSecurityRepairPreviewLoadedMsg:
+		m.settingsSaving = false
+		if msg.Preview == nil {
+			m.settingsNotice = "Agent security repair preview was unavailable."
+			return m, nil
+		}
+		m.agentSecurityRepairPreview = msg.Preview
+		m.agentSecurityIdempotencyKey = ""
+		m.agentSecurityIdempotencyPreviewID = ""
+		m.settingsPage = "agent_security_preview"
+		m.settingsSelected = 0
+		m.settingsOffset = 0
+		m.settingsNotice = "Review every change and preservation guarantee before applying."
+		return m, nil
+	case commands.AgentSecurityRepairOperationLoadedMsg:
+		m.settingsSaving = false
+		if msg.Operation == nil {
+			m.settingsNotice = "Agent security repair returned no durable receipt."
+			return m, nil
+		}
+		m.agentSecurityRepairOperation = msg.Operation
+		m.agentSecurityRepairPreview = nil
+		m.settingsPage = "agent_security_result"
+		m.settingsSelected = 0
+		m.settingsOffset = 0
+		m.settingsNotice = "Repair finished with verified outcome: " + valueOr(msg.Operation.Outcome, "unknown") + "."
+		return m, commands.DiagnoseAgentSecurityCmd(m.ctx, m.client, false)
+	case commands.AgentSecurityLatestOperationLoadedMsg:
+		if msg.Operation != nil {
+			m.agentSecurityRepairOperation = msg.Operation
+		}
+		return m, nil
+	case commands.AgentSecurityActionFailedMsg:
+		m.settingsSaving = false
+		m.settingsNotice = titleCase(msg.Action) + " failed without an unverified success claim: " + assistant.SanitizeText(fmt.Sprint(msg.Err))
 		return m, nil
 	case commands.AgentConfigFailedMsg:
 		if m.connectionStatus != "connected" {
@@ -2009,6 +2360,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.agentStatus = agentStatusFromSession(msg.Session)
 			}
 			m.restoreThreadResponse(msg.Session.ID)
+			m.rebuildAgentTranscript(msg.Session)
 			m.restoreThreadDraft(msg.Session.ID)
 			m.agentSessions = upsertAgentSession(m.agentSessions, *msg.Session)
 			m.addAssistantMessage("New Operator Agent thread active: " + agentSessionLabel(*msg.Session) + ".")
@@ -2068,6 +2420,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.agentStatus = agentStatusFromSession(msg.Session)
+		m.rebuildAgentTranscript(msg.Session)
 		m.agentSessions = upsertAgentSession(m.agentSessions, *msg.Session)
 		m.addAssistantMessage("Active Operator Agent thread: " + agentSessionLabel(*msg.Session) + ".")
 		return m, m.connectAgentEventsCmd(msg.Session.ID)
@@ -2098,6 +2451,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncComposerHistoryScope()
 		if msg.Session != nil {
 			m.restoreThreadResponse(msg.Session.ID)
+			m.rebuildAgentTranscript(msg.Session)
 			m.restoreThreadDraft(msg.Session.ID)
 			m.agentSessions = upsertAgentSession(m.agentSessions, *msg.Session)
 			m.addAssistantMessage("Switched Operator Agent thread to " + agentSessionLabel(*msg.Session) + ".")
@@ -2142,6 +2496,9 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.naturalHistory = nil
 		m.agentDelta = ""
 		m.lastAssistantLine = ""
+		m.agentTranscript = nil
+		m.agentTranscriptExpanded = map[string]bool{}
+		m.agentTranscriptSelected = ""
 		m.agentStatus = "ready_no_thread"
 		m.addAssistantMessage("Operator Agent thread cleared" + optionalThreadSuffix(clearedID) + ".")
 		return m, nil
@@ -2171,6 +2528,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.agentStream = msg.Stream
+		m.agentStreamReconnecting = false
 		m.agentInitialReplay = true
 		m.agentReplayStatus = ""
 		switch m.agentStatus {
@@ -2192,11 +2550,15 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.agentStream = msg.Stream
-		if msg.Event.Type != "stream.reconnecting" {
+		m.agentStreamReconnecting = msg.Event.Type == "stream.reconnecting"
+		if !m.agentStreamReconnecting {
 			m.clearDiagnostics(agentEventDisconnectedCode)
 		}
 		m.applyAgentRunEvent(msg.Event)
-		return m, commands.NextAgentEventCmd(m.ctx, msg.Stream, msg.SessionID, msg.Generation)
+		return m, batchCommands(
+			commands.NextAgentEventCmd(m.ctx, msg.Stream, msg.SessionID, msg.Generation),
+			m.scheduleAgentActivityTick(),
+		)
 	case commands.AgentEventsDisconnectedMsg:
 		if !m.agentEventLifecycleCurrent(msg.SessionID, msg.Generation) {
 			return m, nil
@@ -2204,6 +2566,8 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.agentStream = nil
 		m.agentStreamSessionID = ""
 		m.agentStreamGeneration++
+		m.agentStreamReconnecting = false
+		m.agentActivityTicking = false
 		m.agentInitialReplay = false
 		m.agentReplayStatus = ""
 		if m.agentSession != nil {
@@ -2222,6 +2586,7 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.authorizedProjectRoots = nil
 		m.pendingSubmissionDraft = nil
 		if msg.Result != nil {
+			m.applyAgentUserMessage(msg.Result.Message, msg.Result.Run)
 			if m.agentStatus == "sending" {
 				if status := agentStatusFromRunStatus(msg.Result.Run.Status); status != "" {
 					m.agentStatus = status
@@ -2462,6 +2827,7 @@ func (m RootModel) shellData() views.ShellData {
 		ShowHelp:            m.helpVisible,
 		Help:                m.helpDataForView(),
 		Usage:               m.usage.Snapshot(),
+		Settings:            m.settingsDataForView(),
 		ThreadSwitcher:      m.threadSwitcherDataForView(),
 		CodePicker:          m.codePickerDataForView(),
 		AppManager:          m.appManagerDataForView(),
@@ -2488,12 +2854,20 @@ func (m RootModel) shellData() views.ShellData {
 		ComposerPasting:     m.paste != nil,
 		ResponseSource:      responseSource,
 		ResponseState:       m.agentStatus,
-		ResponseFollow:      m.responseFollow,
-		ResponseNewOutput:   m.responseNewOutput,
-		ResponseOffset:      m.responseOffset,
+		ResponseFollow:      m.currentResponseFollow(),
+		ResponseNewOutput:   m.currentResponseNewOutput(),
+		ResponseOffset:      m.currentResponseOffset(),
 		AgentPaneExpanded:   !m.preferences.Layout.AgentPaneCollapsed,
+		AgentChatFull:       m.agentChatFull,
 		ResponseDetails:     m.responseDetailsVisible(),
 		PrimaryFocus:        string(m.interaction.Focus),
+		AgentTranscript:     append([]views.AgentTranscriptItem(nil), m.agentTranscript...),
+		TranscriptExpanded:  copyStringBoolMap(m.agentTranscriptExpanded),
+		TranscriptSelected:  m.agentTranscriptSelected,
+		TranscriptCache:     m.agentTranscriptRenderCache,
+		ActivityFrame:       m.agentActivityFrame,
+		ActivityASCII:       m.agentActivityASCII,
+		ActivityAnimations:  m.agentActivityAuthoritative(),
 	}
 	if data.ResponseDetails {
 		data.PrimaryFocus = string(interaction.FocusResponse)
@@ -3031,6 +3405,9 @@ func (m *RootModel) restoreAgentPreviousFocus() {
 }
 
 func (m *RootModel) transitionAgentSurfaceForResize(previous layout.Metrics) bool {
+	if m.agentChatFull {
+		return false
+	}
 	next := m.operatorMetrics()
 	if previous.AgentDocked && !next.AgentDockable && m.interaction.Transient == interaction.TransientNone && m.interaction.Modal == interaction.ModalNone {
 		if m.interaction.Focus == interaction.FocusResponse {
@@ -3600,6 +3977,24 @@ func (m RootModel) prepareConfirmation(command slash.ParsedCommand) (*confirmati
 			Command:      command,
 			DaemonRepair: true,
 		}, nil
+	case slash.KindDaemonRestart:
+		if !m.daemonBootstrapAvailable() {
+			return nil, errors.New(m.daemonBridgeUnavailableMessage("restart"))
+		}
+		details := []string{
+			"Active Agent runs, lifecycle operations, and package runs block the restart.",
+			"Only apps owned by this daemon are stopped and restored; externally managed processes are left alone.",
+			"The bridge verifies that the replacement daemon has a new instance identity.",
+		}
+		return &confirmationRequest{
+			Action:        "restart daemon",
+			Target:        slash.ResolvedTarget{Description: m.cfg.BaseURL},
+			Risk:          "Temporarily disconnects the TUI and stops Relaybase-owned app processes. A failed app restore is reported per app.",
+			Expected:      "The launch bridge quiesces the daemon, starts a distinct replacement, restores owned apps, and reconnects the TUI.",
+			Command:       command,
+			DaemonRestart: true,
+			Details:       details,
+		}, nil
 	case slash.KindAddApp, slash.KindConfigure, slash.KindRegister, slash.KindOpen, slash.KindProve, slash.KindHealthProve,
 		slash.KindManifestEdit, slash.KindHealthRoute, slash.KindPortPinned, slash.KindComponentRole, slash.KindComponentGroup, slash.KindComponentLabel:
 		target, risk, expected, err := m.setupConfirmationText(command)
@@ -3669,6 +4064,9 @@ func (m *RootModel) executePendingConfirmation() tea.Cmd {
 	}
 	if confirmation.DaemonRepair {
 		return commands.DaemonBootstrapEnsureCmd(m.ctx, m.bootstrapClient)
+	}
+	if confirmation.DaemonRestart {
+		return commands.DaemonBootstrapRestartCmd(m.ctx, m.bootstrapClient)
 	}
 	if confirmation.PackageAction != "" {
 		switch confirmation.Command.Kind {
@@ -3812,6 +4210,8 @@ func (m RootModel) executeSlashCommand(command slash.ParsedCommand) (RootModel, 
 		m.addAssistantMessage("Loading recorded model usage.")
 		generation := m.nextUsageRequestGeneration()
 		return m, commands.FetchAgentUsageCmd(m.ctx, m.client, generation)
+	case slash.KindSettings:
+		return m, m.openSettings(command.Target)
 	case slash.KindDaemonStatus:
 		if !m.daemonBootstrapAvailable() {
 			m.addAssistantMessage(m.daemonBridgeUnavailableMessage("status"))
@@ -3828,6 +4228,14 @@ func (m RootModel) executeSlashCommand(command slash.ParsedCommand) (RootModel, 
 		}
 		m.addAssistantMessage("Requesting Relaybase daemon repair through the local launch bridge.")
 		return m, commands.DaemonBootstrapEnsureCmd(m.ctx, m.bootstrapClient)
+	case slash.KindDaemonRestart:
+		if !m.daemonBootstrapAvailable() {
+			m.addAssistantMessage(m.daemonBridgeUnavailableMessage("restart"))
+			m.restorePendingSubmissionDraft()
+			return m, nil
+		}
+		m.addAssistantMessage("Requesting a safe Relaybase daemon restart through the local launch bridge.")
+		return m, commands.DaemonBootstrapRestartCmd(m.ctx, m.bootstrapClient)
 	case slash.KindThreadList:
 		if !m.agentThreadGatewayAvailable() {
 			m.addAssistantMessage(m.threadGatewayUnavailableMessage())
@@ -4682,7 +5090,11 @@ func (m *RootModel) reportAssistantProviderStatus() {
 		m.addAssistantMessage("Operator Agent is disabled in the daemon; deterministic mode remains active and slash commands remain available.")
 		return
 	}
-	m.addAssistantMessage("Operator Agent uses daemon Agent Gateway provider " + valueOr(m.agentConfig.Provider.Provider, "openrouter") + " with model " + valueOr(m.agentConfig.Provider.ModelSlug, "not configured") + ".")
+	message := "Operator Agent uses daemon Agent Gateway provider " + valueOr(m.agentConfig.Provider.Provider, "openrouter") + " with model " + valueOr(m.agentConfig.Provider.ModelSlug, "not configured") + " from " + valueOr(m.agentConfig.Provider.ModelSource.Label, "unknown source") + "."
+	if m.agentConfig.Provider.RestartRequired {
+		message += " Agent environment changed; restart Relaybase to apply it."
+	}
+	m.addAssistantMessage(message)
 	for _, diagnostic := range agentConfigDiagnostics(m.agentConfig) {
 		m.addDiagnostic(diagnostic.Code, diagnostic.Severity, diagnostic.Message)
 	}
@@ -4691,6 +5103,7 @@ func (m *RootModel) reportAssistantProviderStatus() {
 func (m RootModel) agentContext() *relaybaseclient.TuiAgentContext {
 	selected := m.paneManager.SelectedPane()
 	context := &relaybaseclient.TuiAgentContext{
+		CapturedAt:             time.Now().UTC().Format(time.RFC3339Nano),
 		CurrentPage:            m.paneManager.Page(),
 		CurrentCWD:             strings.TrimSpace(m.cfg.CurrentDirectory),
 		AuthorizedProjectRoots: append([]string(nil), m.authorizedProjectRoots...),
@@ -4699,7 +5112,7 @@ func (m RootModel) agentContext() *relaybaseclient.TuiAgentContext {
 		CurrentSetupPlanID:     currentSetupPlanID(m.setupSession),
 		Diagnostics:            m.agentDiagnosticsForContext(),
 		TerminalCapabilities: &relaybaseclient.TerminalCapabilities{
-			Clipboard:   "unavailable",
+			Clipboard:   map[bool]string{true: "available", false: "unavailable"}[m.clipboardWriteReady],
 			BrowserOpen: "unavailable",
 			ColorDepth:  "unknown",
 		},
@@ -4762,6 +5175,11 @@ func currentSetupPlanID(state setupwizard.State) string {
 }
 
 func (m *RootModel) applyAgentRunEvent(event relaybaseclient.AgentRunEvent) {
+	transcriptChanged := m.applyAgentTranscriptEvent(event)
+	m.reconcileTerminalAgentTranscript(event)
+	if transcriptChanged && !m.agentInitialReplay {
+		m.noteAgentTranscriptOutput()
+	}
 	switch event.Type {
 	case "stream.reconnecting":
 		if intField(event.Data, "attempt") < 2 {
@@ -4811,6 +5229,7 @@ func (m *RootModel) applyAgentRunEvent(event relaybaseclient.AgentRunEvent) {
 	case "clarification_needed":
 		m.addAssistantMessage(firstNonEmpty(stringField(event.Data, "content"), "Operator Agent needs clarification."))
 	case "tool.approval_required", "approval_required", "setup.file_write_approval_required", "setup.manifest_patch_approval_required":
+		m.setAgentRunStatus("waiting")
 		if approval, ok := agentApprovalFromData(event.Data); ok {
 			m.pendingAgentApproval = &approval
 			m.resetBodyScroll()
@@ -4833,9 +5252,9 @@ func (m *RootModel) applyAgentRunEvent(event relaybaseclient.AgentRunEvent) {
 		}
 		m.addAssistantMessage("Operator Agent tool approval rejected.")
 	case "tool.started":
-		m.addAssistantMessage("Operator Agent tool started: " + firstNonEmpty(stringField(event.Data, "toolName"), stringField(event.Data, "tool"), "tool") + ".")
+		m.setAgentRunStatus("running")
 	case "tool.completed", "tool.failed":
-		m.addAssistantMessage(agentToolStatusMessage(event))
+		// Dedicated activity rows replace noisy transcript status messages.
 	case "action_result":
 		if m.pendingAgentApproval != nil && stringField(event.Data, "approvalId") == m.pendingAgentApproval.ID {
 			m.pendingAgentApproval = nil
@@ -4870,11 +5289,50 @@ func (m *RootModel) applyAgentRunEvent(event relaybaseclient.AgentRunEvent) {
 		m.flushAgentDelta()
 		m.setAgentRunStatus("idle")
 	case "run.failed":
-		m.flushAgentDelta()
+		if !boolField(event.Data, "finalizationFollows") {
+			m.flushAgentDelta()
+		}
 		m.setAgentRunStatus("failed")
 		if message := diagnosticMessageFromData(event.Data); message != "" {
 			m.addAssistantMessage("Operator Agent run failed: " + message)
 		}
+	case "run.finalized":
+		var finalized struct {
+			Outcome   string `json:"outcome"`
+			Candidate struct {
+				Disposition string `json:"disposition"`
+				Inspectable bool   `json:"inspectable"`
+				Content     string `json:"content"`
+			} `json:"candidate"`
+		}
+		if unmarshalData(event.Data, &finalized) {
+			m.agentDelta = ""
+			if finalized.Outcome == "completed" {
+				m.setAgentRunStatus("idle")
+			} else {
+				m.setAgentRunStatus("failed")
+			}
+			if finalized.Candidate.Inspectable && finalized.Candidate.Content != "" {
+				m.recordAssistantInteraction(
+					assistant.ResponseBlocked,
+					"agent",
+					"Blocked candidate (redacted, not authoritative):\n"+finalized.Candidate.Content,
+				)
+			} else if finalized.Candidate.Disposition == "retained_redacted" {
+				m.addAssistantMessage("Blocked response retained as a redacted audit artifact; enable advanced redacted detail to inspect it.")
+			}
+			m.refreshAssistantPrompt()
+		}
+	}
+	_ = transcriptChanged
+}
+
+func (m *RootModel) noteAgentTranscriptOutput() {
+	if !m.responseFollow {
+		m.responseNewOutput++
+	}
+	if !m.agentFullResponseFollow {
+		m.agentFullResponseNewOutput++
 	}
 }
 
@@ -5233,19 +5691,26 @@ func (m *RootModel) captureThreadResponse() {
 		m.threadResponses = map[string]threadResponseState{}
 	}
 	m.threadResponses[threadID] = threadResponseState{
-		AssistantHistory:  append([]string(nil), m.assistantHistory...),
-		AssistantTimeline: append([]string(nil), m.assistantTimeline...),
-		NaturalHistory:    append([]assistant.HistoryEntry(nil), m.naturalHistory...),
-		AgentDelta:        m.agentDelta,
-		LastAssistantLine: m.lastAssistantLine,
-		HistoryExpanded:   m.historyExpanded,
-		ResponseOffset:    m.responseOffset,
-		ResponseFollow:    m.responseFollow,
-		ResponseNewOutput: m.responseNewOutput,
+		AssistantHistory:      append([]string(nil), m.assistantHistory...),
+		AssistantTimeline:     append([]string(nil), m.assistantTimeline...),
+		NaturalHistory:        append([]assistant.HistoryEntry(nil), m.naturalHistory...),
+		AgentDelta:            m.agentDelta,
+		LastAssistantLine:     m.lastAssistantLine,
+		HistoryExpanded:       m.historyExpanded,
+		ResponseOffset:        m.responseOffset,
+		ResponseFollow:        m.responseFollow,
+		ResponseNewOutput:     m.responseNewOutput,
+		AgentTranscript:       append([]views.AgentTranscriptItem(nil), m.agentTranscript...),
+		TranscriptExpanded:    copyStringBoolMap(m.agentTranscriptExpanded),
+		TranscriptSelected:    m.agentTranscriptSelected,
+		FullResponseOffset:    m.agentFullResponseOffset,
+		FullResponseFollow:    m.agentFullResponseFollow,
+		FullResponseNewOutput: m.agentFullResponseNewOutput,
 	}
 }
 
 func (m *RootModel) restoreThreadResponse(threadID string) {
+	m.agentTranscriptRenderCache.Reset()
 	state, ok := m.threadResponses[threadID]
 	if !ok {
 		m.assistantHistory = nil
@@ -5257,6 +5722,12 @@ func (m *RootModel) restoreThreadResponse(threadID string) {
 		m.responseOffset = 0
 		m.responseFollow = true
 		m.responseNewOutput = 0
+		m.agentTranscript = nil
+		m.agentTranscriptExpanded = map[string]bool{}
+		m.agentTranscriptSelected = ""
+		m.agentFullResponseOffset = 0
+		m.agentFullResponseFollow = true
+		m.agentFullResponseNewOutput = 0
 		m.refreshAssistantPrompt()
 		return
 	}
@@ -5269,6 +5740,12 @@ func (m *RootModel) restoreThreadResponse(threadID string) {
 	m.responseOffset = state.ResponseOffset
 	m.responseFollow = state.ResponseFollow
 	m.responseNewOutput = state.ResponseNewOutput
+	m.agentTranscript = append([]views.AgentTranscriptItem(nil), state.AgentTranscript...)
+	m.agentTranscriptExpanded = copyStringBoolMap(state.TranscriptExpanded)
+	m.agentTranscriptSelected = state.TranscriptSelected
+	m.agentFullResponseOffset = state.FullResponseOffset
+	m.agentFullResponseFollow = state.FullResponseFollow
+	m.agentFullResponseNewOutput = state.FullResponseNewOutput
 	m.refreshAssistantPrompt()
 }
 
@@ -5372,6 +5849,9 @@ func (m *RootModel) resetLocalAssistantThread() {
 	m.responseOffset = 0
 	m.responseFollow = true
 	m.responseNewOutput = 0
+	m.agentFullResponseOffset = 0
+	m.agentFullResponseFollow = true
+	m.agentFullResponseNewOutput = 0
 	m.refreshAssistantPrompt()
 }
 
@@ -5440,6 +5920,8 @@ func (m *RootModel) closeAgentStream() {
 	m.agentStream = nil
 	m.agentStreamSessionID = ""
 	m.agentStreamGeneration++
+	m.agentStreamReconnecting = false
+	m.agentActivityTicking = false
 	m.agentInitialReplay = false
 	m.agentReplayStatus = ""
 }
@@ -5598,27 +6080,32 @@ func (m RootModel) registeredAppCount() int { return len(m.appInventoryByID()) }
 
 // appInventoryByID is the single daemon-backed inventory used by both rail
 // counts. Duplicate app records and component projections collapse onto the
-// same stable app ID, while active is accumulated from any current daemon
-// lifecycle record for that ID.
+// same stable app ID. Component state is the canonical projection when it is
+// available; this prevents an older raw app row from overriding a newer
+// stopped/degraded component row for the same stable ID.
 func (m RootModel) appInventoryByID() map[string]bool {
 	inventory := map[string]bool{}
-	add := func(appID, status string, pid int) {
+	set := func(appID, status string, pid int) {
 		appID = strings.TrimSpace(appID)
 		if appID == "" {
 			return
 		}
-		inventory[appID] = inventory[appID] || daemonStatusIsActive(status, pid)
+		inventory[appID] = daemonStatusIsActive(status, pid)
 	}
 	for _, app := range m.apps() {
-		add(app.ID, app.RuntimeStatus, app.PID)
+		set(app.ID, app.RuntimeStatus, app.PID)
 	}
 	if m.state != nil {
+		componentIDs := map[string]bool{}
 		for _, component := range m.state.Components {
-			add(component.AppID, component.Status, component.PID)
+			set(component.AppID, component.Status, component.PID)
+			componentIDs[component.AppID] = true
 		}
 		for _, group := range m.state.Groups {
 			for _, component := range group.Components {
-				add(component.AppID, component.Status, component.PID)
+				if !componentIDs[component.AppID] {
+					set(component.AppID, component.Status, component.PID)
+				}
 			}
 		}
 	}
@@ -5627,8 +6114,10 @@ func (m RootModel) appInventoryByID() map[string]bool {
 
 func daemonStatusIsActive(status string, pid int) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "running", "starting", "restarting", "stopping", "degraded":
+	case "running", "starting", "restarting", "stopping":
 		return true
+	case "degraded":
+		return pid > 0
 	default:
 		// A daemon-reported PID is stronger evidence of an active process
 		// than a missing/older status label, but mere registration is not.
@@ -5819,6 +6308,7 @@ func shouldRefreshState(eventType string) bool {
 	case "app.registered",
 		"app.unregistered",
 		"app.state_changed",
+		"app.runtime_changed",
 		"app.lifecycle_operation_completed",
 		"app.lifecycle_operation_failed",
 		"route.health_changed":
@@ -5919,6 +6409,33 @@ func agentApprovalDetails(approval relaybaseclient.AgentApproval) []string {
 		details = append(details, "tool "+approval.ToolName)
 	}
 	if approval.Preview != nil {
+		if approval.Preview.Phase != "" {
+			details = append(details, "phase "+assistant.SanitizeText(approval.Preview.Phase))
+		}
+		if approval.Preview.WhyApproval != "" {
+			details = append(details, "why approval: "+assistant.SanitizeText(approval.Preview.WhyApproval))
+		}
+		for _, change := range approval.Preview.WillChange {
+			details = append(details, "will change: "+assistant.SanitizeText(change))
+		}
+		for _, preserved := range approval.Preview.WillPreserve {
+			details = append(details, "will preserve: "+assistant.SanitizeText(preserved))
+		}
+		for _, command := range approval.Preview.WillRun {
+			details = append(details, "will run: "+assistant.SanitizeText(command))
+		}
+		for _, proof := range approval.Preview.Proof {
+			details = append(details, "proof: "+assistant.SanitizeText(proof))
+		}
+		if approval.Preview.Revision != "" {
+			details = append(details, "revision "+assistant.SanitizeText(approval.Preview.Revision))
+		}
+		if approval.Preview.ExpiresAt != "" {
+			details = append(details, "expires "+assistant.SanitizeText(approval.Preview.ExpiresAt))
+		}
+		for _, blocker := range approval.Preview.BlockedReasons {
+			details = append(details, "blocked: "+assistant.SanitizeText(blocker))
+		}
 		if approval.Preview.CurrentStatus != "" {
 			details = append(details, "current status "+approval.Preview.CurrentStatus)
 		}
@@ -6505,34 +7022,33 @@ func agentConfigDiagnostics(config *relaybaseclient.AgentConfig) []Diagnostic {
 	if config == nil {
 		return nil
 	}
+	diagnostics := []Diagnostic{}
 	if !config.Enabled {
-		return []Diagnostic{{
+		diagnostics = append(diagnostics, Diagnostic{
 			Code:     "agent_disabled",
 			Severity: "info",
-			Message:  "Operator Agent is disabled in the daemon. Set RELAYBASE_AGENT_ENABLED=1 in .env, then restart the daemon; deterministic slash commands remain available.",
-		}}
+			Message:  "Operator Agent is disabled. Enable it under Settings > Agent > Configuration; deterministic commands remain available.",
+		})
 	}
-	diagnostics := []Diagnostic{}
 	if !config.Provider.RemoteModelEnabled {
 		diagnostics = append(diagnostics, Diagnostic{
 			Code:     "agent_remote_model_disabled",
 			Severity: "warning",
-			Message:  "Operator Agent remote model mode is disabled. Set RELAYBASE_AGENT_REMOTE_MODEL_ENABLED=1 in .env, then restart the daemon.",
+			Message:  "Remote model mode is disabled. Enable it under Settings > Agent > Configuration.",
 		})
 	}
 	if config.Provider.ModelSlug == "" {
 		diagnostics = append(diagnostics, Diagnostic{
 			Code:     "agent_model_missing",
 			Severity: "warning",
-			Message:  "Operator Agent is enabled but no OpenRouter model slug is configured. Set RELAYBASE_AGENT_MODEL in .env, then restart the daemon.",
+			Message:  "No OpenRouter model slug is configured. Choose an exact model under Settings > Agent > Configuration.",
 		})
 	}
 	if !config.Provider.APIKeySource.Configured {
-		envVar := valueOr(config.Provider.APIKeySource.EnvVar, "OPENROUTER_API_KEY")
 		diagnostics = append(diagnostics, Diagnostic{
 			Code:     "openrouter_api_key_missing",
 			Severity: "warning",
-			Message:  "Operator Agent is enabled but " + envVar + " is not set in the daemon environment.",
+			Message:  "No usable OpenRouter credential is connected. Open Settings > Agent > Provider to connect or migrate one.",
 		})
 	}
 	return diagnostics
@@ -7050,6 +7566,19 @@ func intField(data json.RawMessage, field string) int {
 	return int(int64Field(data, field))
 }
 
+func boolField(data json.RawMessage, field string) bool {
+	if len(data) == 0 {
+		return false
+	}
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal(data, &record); err != nil {
+		return false
+	}
+	var value bool
+	_ = json.Unmarshal(record[field], &value)
+	return value
+}
+
 func unmarshalData(data json.RawMessage, target any) bool {
 	if len(data) == 0 {
 		return false
@@ -7062,6 +7591,13 @@ func valueOr(value string, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func titleCase(value string) string {
+	if value == "" {
+		return value
+	}
+	return strings.ToUpper(value[:1]) + value[1:]
 }
 
 func dashboardHeight(height int) int {
@@ -7309,6 +7845,9 @@ func bootstrapResultMessage(result *bootstrap.DaemonResult) string {
 	if result.Started {
 		parts = append(parts, "started by bridge")
 	}
+	if result.Restarted {
+		parts = append(parts, "restarted by bridge")
+	}
 	if result.Error != "" {
 		parts = append(parts, "detail "+assistant.SanitizeText(result.Error))
 	}
@@ -7317,6 +7856,41 @@ func bootstrapResultMessage(result *bootstrap.DaemonResult) string {
 	}
 	if result.LogPath != "" {
 		parts = append(parts, "log "+result.LogPath)
+	}
+	return strings.Join(parts, "; ") + "."
+}
+
+func daemonRestartResultMessage(result *bootstrap.DaemonResult) string {
+	if result == nil {
+		return "No daemon restart result was returned."
+	}
+	if !result.Restarted {
+		return bootstrapResultMessage(result)
+	}
+	parts := []string{"Relaybase daemon restarted"}
+	if result.OldInstanceID != "" && result.NewInstanceID != "" {
+		parts = append(parts, "instance "+result.OldInstanceID+" replaced by "+result.NewInstanceID)
+	}
+	if len(result.AppResults) > 0 {
+		restored := 0
+		failed := make([]string, 0)
+		for _, app := range result.AppResults {
+			if app.Status == "restored" || app.Status == "running" {
+				restored++
+				continue
+			}
+			failed = append(failed, app.AppID+" ("+valueOr(app.Error, app.Status)+")")
+		}
+		parts = append(parts, fmt.Sprintf("%d/%d owned app(s) restored", restored, len(result.AppResults)))
+		if len(failed) > 0 {
+			parts = append(parts, "restore attention: "+strings.Join(failed, ", "))
+		}
+	}
+	if len(result.Warnings) > 0 {
+		parts = append(parts, "warnings: "+strings.Join(result.Warnings, ", "))
+	}
+	if result.ReportPath != "" {
+		parts = append(parts, "report "+result.ReportPath)
 	}
 	return strings.Join(parts, "; ") + "."
 }

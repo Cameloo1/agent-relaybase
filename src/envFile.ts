@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 
 export const RELAYBASE_ENV_FILE_ENV = "RELAYBASE_ENV_FILE";
@@ -16,23 +17,31 @@ export interface RelaybaseEnvFileLoadResult {
   appliedKeys: string[];
   skippedKeys: string[];
   diagnostics: RelaybaseEnvFileDiagnostic[];
+  sourceKind: "explicit_env_file" | "cwd_env_file";
+  fingerprint?: string;
 }
 
 export interface RelaybaseEnvFileLoadOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   override?: boolean;
+  filePath?: string;
 }
 
-interface EnvEntry {
+export interface EnvEntry {
   key: string;
   value: string;
+}
+
+export interface ParsedEnvFile {
+  entries: EnvEntry[];
+  diagnostics: RelaybaseEnvFileDiagnostic[];
 }
 
 export function loadRelaybaseEnvFile(options: RelaybaseEnvFileLoadOptions = {}): RelaybaseEnvFileLoadResult {
   const env = options.env ?? process.env;
   const cwd = options.cwd ?? process.cwd();
-  const configuredPath = env[RELAYBASE_ENV_FILE_ENV]?.trim();
+  const configuredPath = options.filePath?.trim() || env[RELAYBASE_ENV_FILE_ENV]?.trim();
   const envPath = configuredPath ? path.resolve(cwd, configuredPath) : path.join(cwd, ".env");
   const explicit = Boolean(configuredPath);
   const result: RelaybaseEnvFileLoadResult = {
@@ -40,7 +49,8 @@ export function loadRelaybaseEnvFile(options: RelaybaseEnvFileLoadOptions = {}):
     path: envPath,
     appliedKeys: [],
     skippedKeys: [],
-    diagnostics: []
+    diagnostics: [],
+    sourceKind: explicit ? "explicit_env_file" : "cwd_env_file"
   };
 
   if (!fs.existsSync(envPath)) {
@@ -82,7 +92,21 @@ export function loadRelaybaseEnvFile(options: RelaybaseEnvFileLoadOptions = {}):
   }
 
   result.loaded = true;
+  result.fingerprint = createHash("sha256").update(raw).digest("hex");
   return result;
+}
+
+export function relaybaseModelSource(result: RelaybaseEnvFileLoadResult, env: NodeJS.ProcessEnv = process.env) {
+  if (!env.RELAYBASE_AGENT_MODEL?.trim()) {
+    return { kind: "unconfigured" as const, label: "not configured" };
+  }
+  if (result.appliedKeys.includes("RELAYBASE_AGENT_MODEL")) {
+    return {
+      kind: result.sourceKind,
+      label: result.sourceKind === "explicit_env_file" ? "RELAYBASE_ENV_FILE" : ".env"
+    };
+  }
+  return { kind: "shell_environment" as const, label: "shell environment" };
 }
 
 export function formatRelaybaseEnvFileDiagnostics(result: RelaybaseEnvFileLoadResult): string {
@@ -96,7 +120,7 @@ export function formatRelaybaseEnvFileDiagnostics(result: RelaybaseEnvFileLoadRe
   return `Relaybase .env loading failed.\n${details}`;
 }
 
-function parseEnvFile(raw: string): { entries: EnvEntry[]; diagnostics: RelaybaseEnvFileDiagnostic[] } {
+export function parseEnvFile(raw: string): ParsedEnvFile {
   const entries: EnvEntry[] = [];
   const diagnostics: RelaybaseEnvFileDiagnostic[] = [];
   const lines = raw.replace(/^\uFEFF/, "").split(/\r?\n/);

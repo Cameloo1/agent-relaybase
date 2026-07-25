@@ -34,6 +34,7 @@ import type {
 import { DEFAULT_HOST, DEFAULT_PORT, getDefaultStateDir, getOrCreateSessionToken, isNodeErrno } from "./state.ts";
 import type { AppComponentRole, AppManifestInput, AppRecord, AppState } from "./types.ts";
 import { normalizeManifest } from "./validation.ts";
+import { withoutAgentCredentialEnvironment } from "./agent/childEnvironment.ts";
 
 export type { DaemonEnsureResult, RelaybaseCommandOptions } from "./daemonLauncher.ts";
 
@@ -100,6 +101,7 @@ export interface SetupComponentMetadata {
 export interface OpenProjectOptions extends RelaybaseCommandOptions {
   noBrowser?: boolean;
   startDaemon?: boolean;
+  sanitizeEnvironment?: (environment: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
 }
 
 export interface HealthProjectOptions extends RelaybaseCommandOptions {
@@ -1034,7 +1036,13 @@ export async function openProject(options: OpenProjectOptions): Promise<OpenProj
   const state = stateResponse.state;
   const url = humanUrl(app.id, options.port);
   const ready = Boolean(state?.readiness.state === "ready" || state?.routeReachable);
-  const openedBrowser = !options.noBrowser && ready ? await openBrowser(url) : false;
+  const openedBrowser =
+    !options.noBrowser && ready
+      ? await openBrowser(
+          url,
+          options.sanitizeEnvironment?.(process.env) ?? withoutAgentCredentialEnvironment(process.env)
+        )
+      : false;
   const recoveryHint = ready
     ? undefined
     : classifyLaunchFailure({
@@ -3058,11 +3066,11 @@ function humanUrl(appId: string, port: number): string {
   return `http://${appId}.localhost:${port}`;
 }
 
-async function openBrowser(url: string): Promise<boolean> {
+async function openBrowser(url: string, env: NodeJS.ProcessEnv): Promise<boolean> {
   const command = process.platform === "win32" ? "cmd" : process.platform === "darwin" ? "open" : "xdg-open";
   const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
   return new Promise((resolve) => {
-    const child = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true });
+    const child = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true, env });
     child.once("error", () => resolve(false));
     child.once("spawn", () => {
       child.unref();

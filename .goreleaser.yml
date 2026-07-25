@@ -11,6 +11,13 @@ builds:
       - CGO_ENABLED=0
     flags:
       - -trimpath
+    ldflags:
+      - >-
+        -s -w
+        -X=main.buildVersion={{ .Version }}
+        -X=main.buildCommit={{ .Commit }}
+        -X=main.buildTime={{ .Date }}
+        -X=main.buildSource=release
     goos:
       - windows
       - darwin

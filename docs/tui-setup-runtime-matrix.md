@@ -1,8 +1,8 @@
 # TUI Setup Runtime Matrix
 
-This document describes the RA012B daemon-side runtime adapter matrix for broadening Relaybase setup/onboarding beyond the earlier Node-oriented setup engine.
+This document describes the current daemon-side runtime adapter matrix used by Relaybase setup and onboarding.
 
-Current verified implementation after RA012C:
+Current verified implementation:
 
 - `src/setup.ts` detects Node/package-manager projects, static projects, MCP hints, Docker Compose files, existing setup artifacts, env port keys, and existing manifests.
 - `src/setup.ts` proposes managed dynamic port, framework port flag wrapper, pinned upstream port, Docker Compose service, static preview, and MCP-only plans.
@@ -29,7 +29,7 @@ The adapter matrix preserves the existing daemon-owned preview, apply, approval,
 
 ## Verified Boundary
 
-RA012B automated tests exercise disposable fixtures for every supported runtime in `tests/setup-runtime-matrix.test.ts`. RA012C adds Operator Agent and Go TUI tests for runtime-aware prompt instructions, tool schemas/output, setup panel rendering, and approval rendering. The tests verify detection, runtime-aware setup plans, read-only previews, Tier 1 apply confirmation gates, runtime-aware repair candidates, Docker Compose and Procfile ambiguity questions, secret redaction, and path traversal rejection through existing setup APIs.
+Automated tests exercise disposable fixtures for every supported runtime in `tests/setup-runtime-matrix.test.ts`. Operator Agent and Go TUI tests cover runtime-aware prompt instructions, tool schemas/output, setup panel rendering, and approval rendering. The tests verify detection, runtime-aware setup plans, read-only previews, apply confirmation gates, runtime-aware repair candidates, Docker Compose and Procfile ambiguity questions, secret redaction, and path traversal rejection through existing setup APIs.
 
 This is not a claim that every runtime fixture has been launched live. Live app proof still depends on an approved setup apply, daemon lifecycle start, app health behavior, and runtime tool availability on the host.
 
@@ -456,9 +456,9 @@ Tier 2 should follow after the adapter boundary is stable:
 - Confidence: high for single `web:` process; medium for `bin/dev`; low for several process types.
 - Unsupported diagnostic: ask for process type and command.
 
-## RA012B Test Plan
+## Test Coverage
 
-RA012B adds fixture-driven tests that do not touch real user state:
+Fixture-driven tests do not touch real user state:
 
 - detection fixture per runtime
 - plan fixture per runtime

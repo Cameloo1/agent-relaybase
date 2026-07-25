@@ -17,6 +17,25 @@ const stableGoTestBinDir = path.join(root, ".tmp", "go-test-bin");
 const viewsPackage = "./internal/tui/views";
 export const raceUnsupportedExitCode = 2;
 
+function sourceBuildLdflags(options = {}) {
+  const spawn = options.spawn ?? spawnSync;
+  const packageVersion = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).version ?? "dev";
+  const commitResult = spawn("git", ["rev-parse", "--short=12", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+    shell: false,
+    stdio: ["ignore", "pipe", "ignore"]
+  });
+  const commit = commitResult.status === 0 ? commitResult.stdout.trim() : "unknown";
+  const builtAt = new Date().toISOString();
+  return [
+    `-X=main.buildVersion=${packageVersion}`,
+    `-X=main.buildCommit=${commit}`,
+    `-X=main.buildTime=${builtAt}`,
+    "-X=main.buildSource=source-checkout"
+  ].join(" ");
+}
+
 export const targets = [
   { goos: "windows", goarch: "amd64", binary: "relaybase-tui-windows-amd64.exe" },
   { goos: "windows", goarch: "arm64", binary: "relaybase-tui-windows-arm64.exe" },
@@ -356,6 +375,7 @@ function runBuild(args, options = {}) {
   mkdirSync(outputDir, { recursive: true });
   mkdirSync(devOutputDir, { recursive: true });
   let windowsResources;
+  const ldflags = sourceBuildLdflags(options);
   try {
     const windowsArches = selectedTargets.filter((target) => target.goos === "windows").map((target) => target.goarch);
     if (windowsArches.length > 0) {
@@ -374,7 +394,7 @@ function runBuild(args, options = {}) {
         {
           action: "build",
           retryScript: args.includes("--all") ? "npm run tui:build:all" : "npm run tui:build",
-          args: ["build", "-trimpath", "-o", outputPath, "./cmd/relaybase-tui"],
+          args: ["build", "-trimpath", "-ldflags", ldflags, "-o", outputPath, "./cmd/relaybase-tui"],
           env: {
             CGO_ENABLED: "0",
             GOOS: target.goos,
@@ -393,7 +413,7 @@ function runBuild(args, options = {}) {
           {
             action: "build",
             retryScript: args.includes("--all") ? "npm run tui:build:all" : "npm run tui:build",
-            args: ["build", "-trimpath", "-o", devOutputPath, "./cmd/relaybase-tui"],
+            args: ["build", "-trimpath", "-ldflags", ldflags, "-o", devOutputPath, "./cmd/relaybase-tui"],
             env: {
               CGO_ENABLED: "0",
               GOOS: target.goos,

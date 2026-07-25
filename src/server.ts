@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
 import http from "node:http";
 import net from "node:net";
 import { enqueueLifecycleOperation, handleApiRequest } from "./api.ts";
 import { AgentGatewayService } from "./agent/gateway.ts";
+import { WindowsCredentialStore } from "./agent/windowsCredentialStore.ts";
 import { AppPackageService } from "./appPackageService.ts";
 import { recoverAppRenames } from "./appRename.ts";
 import {
@@ -13,6 +15,7 @@ import {
   logRotationEventData,
   routeHealthEventData
 } from "./daemonEvents.ts";
+import { DaemonRestartCoordinator } from "./daemonRestart.ts";
 import { getRelaybaseState } from "./appState.ts";
 import { dashboardHtml } from "./dashboard.ts";
 import { LogExportService } from "./logExport.ts";
@@ -37,6 +40,8 @@ import { maybeHandleTcpTunnel } from "./tcpTunnel.ts";
 import type { AppComponent, AppGroup, AppState, ServerOptions } from "./types.ts";
 
 export interface RelaybaseRuntime {
+  instanceId: string;
+  startedAt: string;
   host: string;
   port: number;
   stateDir: string;
@@ -51,6 +56,8 @@ export interface RelaybaseRuntime {
   registrationVerification: RegistrationVerificationService;
   events: DaemonEventBus;
   mcp: RelaybaseMcpService;
+  restart: DaemonRestartCoordinator;
+  requestShutdown(reason: "restart" | "signal"): void;
 }
 
 export interface RelaybaseServer {
@@ -63,6 +70,8 @@ export interface RelaybaseServer {
 }
 
 export async function createRelaybaseServer(options: ServerOptions = {}): Promise<RelaybaseServer> {
+  const instanceId = randomUUID();
+  const startedAt = new Date().toISOString();
   const host = options.host ?? DEFAULT_HOST;
   const port = options.port ?? Number(process.env.RELAYBASE_PORT ?? DEFAULT_PORT);
   const stateDir = options.stateDir ?? getDefaultStateDir();
@@ -70,7 +79,15 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
   await registry.load();
   const logStore = await LogStore.open(stateDir);
   const token = await getOrCreateSessionToken(stateDir);
+  const agentGateway = new AgentGatewayService({
+    stateDir,
+    environment: options.agentEnvironment,
+    agentRuntime: options.agentRuntime,
+    credentialStore: new WindowsCredentialStore({ stateDir })
+  });
   const runtime = {
+    instanceId,
+    startedAt,
     host,
     port,
     stateDir,
@@ -78,7 +95,7 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
     registry,
     logStore,
     exports: undefined as unknown as LogExportService,
-    agentGateway: new AgentGatewayService({ stateDir }),
+    agentGateway,
     packages: undefined as unknown as AppPackageService,
     operations: new OperationStore({ stateDir }),
     registrationVerification: undefined as unknown as RegistrationVerificationService,
@@ -89,8 +106,11 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
       portRangeStart: options.portRangeStart ?? DEFAULT_PORT_RANGE_START,
       portRangeEnd: options.portRangeEnd ?? DEFAULT_PORT_RANGE_END,
       logStore,
-      stopPortOpenProbe: options.stopPortOpenProbe
-    })
+      stopPortOpenProbe: options.stopPortOpenProbe,
+      sanitizeEnvironment: (environment) => agentGateway.sanitizeChildEnvironment(environment)
+    }),
+    restart: undefined as unknown as DaemonRestartCoordinator,
+    requestShutdown: undefined as unknown as RelaybaseRuntime["requestShutdown"]
   } as RelaybaseRuntime;
   runtime.packages = new AppPackageService({
     stateDir,
@@ -103,6 +123,7 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
   await recoverAppRenames(runtime);
   runtime.exports = new LogExportService(runtime);
   runtime.mcp = new RelaybaseMcpService(runtime);
+  runtime.restart = new DaemonRestartCoordinator(runtime, instanceId, startedAt);
   wireDaemonEvents(runtime);
 
   const sockets = new Set<net.Socket>();
@@ -146,6 +167,20 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
     socket.once("close", () => sockets.delete(socket));
   });
 
+  let closePromise: Promise<void> | undefined;
+  const closeServer = () => {
+    closePromise ??= close(runtime, netServer, httpServer, sockets);
+    return closePromise;
+  };
+  runtime.requestShutdown = () => {
+    setImmediate(() => {
+      void closeServer().catch(() => {
+        process.exitCode = 1;
+        console.error("Relaybase daemon shutdown failed; inspect the daemon log.");
+      });
+    });
+  };
+
   return {
     runtime,
     httpServer,
@@ -153,7 +188,7 @@ export async function createRelaybaseServer(options: ServerOptions = {}): Promis
     listen: async () => {
       runtime.port = await listen(netServer, host, port);
     },
-    close: () => close(runtime, netServer, httpServer, sockets),
+    close: closeServer,
     address: () => {
       const address = netServer.address();
       if (typeof address === "object" && address) {
@@ -213,6 +248,24 @@ function wireDaemonEvents(runtime: RelaybaseRuntime): void {
       type: "log.stream_rotated",
       appId: rotation.appId,
       data: logRotationEventData(rotation)
+    });
+  });
+
+  runtime.processes.subscribeRuntimeChanges((change) => {
+    runtime.events.publish({
+      type: "app.runtime_changed",
+      appId: change.appId,
+      data: {
+        runtime: {
+          status: change.status,
+          health: change.health,
+          phase: change.phase,
+          ...(change.pid ? { pid: change.pid } : {}),
+          ...(change.assignedPort ? { assignedPort: change.assignedPort } : {})
+        },
+        reason: change.reason,
+        observedAt: change.at
+      }
     });
   });
 }
@@ -411,13 +464,29 @@ async function close(
   httpServer: http.Server,
   sockets: Set<net.Socket>
 ): Promise<void> {
-  runtime.packages.requestAbortAll();
-  await runtime.operations.shutdown();
-  await runtime.packages.shutdown();
-  await runtime.mcp.close();
-  await runtime.logStore.close();
+  let closeError: unknown;
+  try {
+    if (!runtime.restart.prepared) {
+      await runtime.agentGateway.close();
+      runtime.packages.requestAbortAll();
+      await runtime.operations.shutdown();
+      await runtime.packages.shutdown();
+      const processShutdown = await runtime.processes.shutdownOwnedApps();
+      if (processShutdown.failed.length > 0) {
+        throw new Error(
+          `Relaybase could not safely stop daemon-owned apps during shutdown: ${processShutdown.failed
+            .map((failure) => failure.appId)
+            .join(", ")}`
+        );
+      }
+    }
+    await runtime.mcp.close();
+    await runtime.logStore.close();
+  } catch (error) {
+    closeError = error;
+  }
 
-  return new Promise((resolve) => {
+  await new Promise<void>((resolve) => {
     for (const socket of sockets) {
       socket.destroy();
     }
@@ -426,4 +495,7 @@ async function close(
     httpServer.closeIdleConnections?.();
     netServer.close(() => resolve());
   });
+  if (closeError) {
+    throw closeError;
+  }
 }

@@ -46,6 +46,9 @@ export interface DaemonDiscoveryResult {
   code: DaemonDiscoveryCode;
   clientStateDir: string;
   daemonStateDir?: string;
+  instanceId?: string;
+  pid?: number;
+  startedAt?: string;
   body?: Record<string, unknown>;
   statusCode?: number;
   authStatusCode?: number;
@@ -399,6 +402,7 @@ export async function discovery(options: RelaybaseCommandOptions): Promise<Daemo
   }
 
   const daemonStateDir = discoveryStateDir(body);
+  const daemonIdentity = discoveryDaemonIdentity(body);
   const stateDirMatches = Boolean(daemonStateDir && sameStateDirectory(options.stateDir, daemonStateDir));
   if (!stateDirMatches) {
     return {
@@ -418,7 +422,7 @@ export async function discovery(options: RelaybaseCommandOptions): Promise<Daemo
     };
   }
 
-  const token = await readExistingSessionToken(options.stateDir);
+  const token = await readDaemonSessionToken(options.stateDir);
   if (!token) {
     return {
       transportReachable: true,
@@ -465,6 +469,7 @@ export async function discovery(options: RelaybaseCommandOptions): Promise<Daemo
     code: "daemon_ready",
     clientStateDir: options.stateDir,
     ...(daemonStateDir ? { daemonStateDir } : {}),
+    ...daemonIdentity,
     statusCode: response.statusCode,
     authStatusCode: session.statusCode,
     body
@@ -476,7 +481,8 @@ export function daemonHttpRequest(
   method: string,
   requestPath: string,
   body?: unknown,
-  token?: string
+  token?: string,
+  timeoutMs = 2000
 ): Promise<{ ok: boolean; statusCode: number; body: string }> {
   const payload = body === undefined ? undefined : JSON.stringify(body);
   return new Promise((resolve) => {
@@ -487,7 +493,7 @@ export function daemonHttpRequest(
         port: options.port,
         path: requestPath,
         method,
-        timeout: 2000,
+        timeout: timeoutMs,
         headers: {
           host: "localhost",
           ...(payload ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } : {}),
@@ -574,6 +580,23 @@ function discoveryStateDir(body: Record<string, unknown>): string | undefined {
   return typeof stateDir === "string" && stateDir.trim() ? stateDir.trim() : undefined;
 }
 
+function discoveryDaemonIdentity(body: Record<string, unknown>): {
+  instanceId?: string;
+  pid?: number;
+  startedAt?: string;
+} {
+  const daemon = body.daemon;
+  if (!daemon || typeof daemon !== "object" || Array.isArray(daemon)) {
+    return {};
+  }
+  const value = daemon as Record<string, unknown>;
+  return {
+    ...(typeof value.instanceId === "string" && value.instanceId.trim() ? { instanceId: value.instanceId.trim() } : {}),
+    ...(typeof value.pid === "number" && Number.isInteger(value.pid) && value.pid > 0 ? { pid: value.pid } : {}),
+    ...(typeof value.startedAt === "string" && value.startedAt.trim() ? { startedAt: value.startedAt.trim() } : {})
+  };
+}
+
 export function sameStateDirectory(left: string, right: string): boolean {
   return stateDirectoryKey(left) === stateDirectoryKey(right);
 }
@@ -587,7 +610,7 @@ function stateDirectoryKey(value: string): string {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
-async function readExistingSessionToken(stateDir: string): Promise<string | undefined> {
+export async function readDaemonSessionToken(stateDir: string): Promise<string | undefined> {
   try {
     const token = (await fs.readFile(path.join(stateDir, "session-token"), "utf8")).trim();
     return token || undefined;

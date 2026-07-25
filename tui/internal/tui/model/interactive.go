@@ -442,7 +442,7 @@ func (m RootModel) openRunningAppPane(appID string) (RootModel, tea.Cmd) {
 		m.paneManager.FocusSelected()
 		m.closeAppManager()
 		m.addAssistantMessage("Opened monitoring pane for " + appID + ".")
-		return m, m.persistPreferencesCmd()
+		return m, batchCommands(m.persistPreferencesCmd(), m.scheduleAgentActivityTick())
 	default:
 		m.closeAppManager()
 		if m.openPaneReopen(appID) {
@@ -641,7 +641,7 @@ func (m RootModel) handlePaneReopenKey(msg tea.KeyPressMsg) (RootModel, tea.Cmd)
 	m.paneReopenNotice = ""
 	m.clampPaneReopenSelection()
 	m.followPaneReopenSelection()
-	return m, nil
+	return m, m.scheduleAgentActivityTick()
 }
 
 func (m RootModel) paneReopenPageSize() int {
@@ -812,26 +812,75 @@ func (m *RootModel) scrollResponse(delta int) {
 	data := m.shellData()
 	current := data.ResponseOffset
 	maximum := views.ResponseScrollMax(m.styles, data)
-	m.responseOffset = minInt(maxInt(0, current+delta), maximum)
-	m.responseFollow = m.responseOffset >= maximum
-	if m.responseFollow {
-		m.responseNewOutput = 0
+	next := minInt(maxInt(0, current+delta), maximum)
+	m.setCurrentResponseOffset(next)
+	m.setCurrentResponseFollow(next >= maximum)
+	if m.currentResponseFollow() {
+		m.setCurrentResponseNewOutput(0)
 	}
 }
 
 func (m *RootModel) gotoResponseTop() {
-	m.responseOffset = 0
-	m.responseFollow = false
+	m.setCurrentResponseOffset(0)
+	m.setCurrentResponseFollow(false)
 }
 
 func (m *RootModel) gotoResponseBottom() {
 	data := m.shellData()
-	m.responseOffset = views.ResponseBottomOffset(m.styles, data)
-	m.responseFollow = true
-	m.responseNewOutput = 0
+	m.setCurrentResponseOffset(views.ResponseBottomOffset(m.styles, data))
+	m.setCurrentResponseFollow(true)
+	m.setCurrentResponseNewOutput(0)
+}
+
+func (m RootModel) currentResponseOffset() int {
+	if m.agentChatFull {
+		return m.agentFullResponseOffset
+	}
+	return m.responseOffset
+}
+
+func (m *RootModel) setCurrentResponseOffset(value int) {
+	if m.agentChatFull {
+		m.agentFullResponseOffset = value
+	} else {
+		m.responseOffset = value
+	}
+}
+
+func (m RootModel) currentResponseFollow() bool {
+	if m.agentChatFull {
+		return m.agentFullResponseFollow
+	}
+	return m.responseFollow
+}
+
+func (m *RootModel) setCurrentResponseFollow(value bool) {
+	if m.agentChatFull {
+		m.agentFullResponseFollow = value
+	} else {
+		m.responseFollow = value
+	}
+}
+
+func (m RootModel) currentResponseNewOutput() int {
+	if m.agentChatFull {
+		return m.agentFullResponseNewOutput
+	}
+	return m.responseNewOutput
+}
+
+func (m *RootModel) setCurrentResponseNewOutput(value int) {
+	if m.agentChatFull {
+		m.agentFullResponseNewOutput = value
+	} else {
+		m.responseNewOutput = value
+	}
 }
 
 func (m RootModel) toggleAgentSurface() (RootModel, tea.Cmd) {
+	if m.agentChatFull {
+		return m.toggleAgentChat()
+	}
 	metrics := m.operatorMetrics()
 	if metrics.AgentDockable {
 		if metrics.AgentDocked {
@@ -853,6 +902,33 @@ func (m RootModel) toggleAgentSurface() (RootModel, tea.Cmd) {
 	}
 	if m.interaction.Transient == interaction.TransientNone && m.interaction.Modal == interaction.ModalNone {
 		m.interaction.OpenTransient(interaction.TransientResponseDetails)
+	}
+	return m, nil
+}
+
+func (m RootModel) toggleAgentChat() (RootModel, tea.Cmd) {
+	if m.agentChatFull {
+		m.agentChatFull = false
+		if m.agentChatRestoreDetails {
+			m.interaction.OpenTransient(interaction.TransientResponseDetails)
+			m.agentChatRestoreDetails = false
+		} else {
+			m.restoreAgentPreviousFocus()
+		}
+		return m, nil
+	}
+	if m.interaction.Modal != interaction.ModalNone || (m.interaction.Transient != interaction.TransientNone && !m.responseDetailsVisible()) {
+		return m, nil
+	}
+	m.agentPreviousFocus = valueOrFocus(m.interaction.Focus, interaction.FocusPanes)
+	m.agentChatRestoreDetails = m.responseDetailsVisible()
+	if m.agentChatRestoreDetails {
+		m.interaction.CloseTransient()
+	}
+	m.agentChatFull = true
+	m.setPrimaryFocus(interaction.FocusResponse)
+	if m.agentFullResponseFollow {
+		m.gotoResponseBottom()
 	}
 	return m, nil
 }
@@ -892,8 +968,15 @@ func (m RootModel) handleAgentSurfaceKey(msg tea.KeyPressMsg, modal bool) (RootM
 		}
 		return m.openCodePicker()
 	}
+	if msg.Keystroke() == "ctrl+e" {
+		m.toggleAllAgentTranscriptItems()
+		return m, nil
+	}
 	if isCopyShortcut(msg) || keymap.Matches(msg, m.keymap.CopyLogs) {
-		payload := response.SanitizeTerminalText(strings.Join(m.assistantHistoryForView(), "\n\n"))
+		payload := m.agentTranscriptCopyText()
+		if strings.TrimSpace(payload) == "" {
+			payload = response.SanitizeTerminalText(strings.Join(m.assistantHistoryForView(), "\n\n"))
+		}
 		if strings.TrimSpace(payload) == "" {
 			m.addDiagnostic("response_copy_empty", "info", "There is no Agent response to copy.")
 			return m, nil
@@ -902,9 +985,15 @@ func (m RootModel) handleAgentSurfaceKey(msg tea.KeyPressMsg, modal bool) (RootM
 	}
 	switch {
 	case keymap.Matches(msg, m.keymap.Up):
-		m.scrollResponse(-1)
+		if !m.moveAgentTranscriptSelection(-1) {
+			m.scrollResponse(-1)
+		}
 	case keymap.Matches(msg, m.keymap.Down):
-		m.scrollResponse(1)
+		if !m.moveAgentTranscriptSelection(1) {
+			m.scrollResponse(1)
+		}
+	case keymap.Matches(msg, m.keymap.Enter), msg.Code == tea.KeySpace:
+		m.toggleAgentTranscriptItem(m.agentTranscriptSelected)
 	case keymap.Matches(msg, m.keymap.PageUp):
 		m.scrollResponse(-maxInt(1, m.height/4))
 	case keymap.Matches(msg, m.keymap.PageDown):
@@ -914,7 +1003,9 @@ func (m RootModel) handleAgentSurfaceKey(msg tea.KeyPressMsg, modal bool) (RootM
 	case keymap.Matches(msg, m.keymap.End), keymap.Matches(msg, m.keymap.Follow):
 		m.gotoResponseBottom()
 	case keymap.Matches(msg, m.keymap.Escape):
-		if modal {
+		if m.agentChatFull {
+			return m.toggleAgentChat()
+		} else if modal {
 			m.interaction.CloseTransient()
 		} else {
 			m.restoreAgentPreviousFocus()

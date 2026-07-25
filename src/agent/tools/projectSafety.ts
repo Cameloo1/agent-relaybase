@@ -52,7 +52,8 @@ const PROJECT_SCOPED_AGENT_TOOLS = new Set([
   "open_project_or_app",
   "setup_and_start_project",
   "prove_app_health",
-  "repair_app_setup"
+  "repair_app_setup",
+  "discover_project_roots"
 ]);
 
 const CURRENT_CWD_DEFAULT_TOOLS = new Set([
@@ -61,7 +62,8 @@ const CURRENT_CWD_DEFAULT_TOOLS = new Set([
   "preview_setup_writes",
   "apply_setup_plan",
   "validate_manifest",
-  "repair_app_setup"
+  "repair_app_setup",
+  "discover_project_roots"
 ]);
 
 export async function authorizeAgentToolProjectScope(

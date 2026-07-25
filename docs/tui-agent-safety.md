@@ -1,23 +1,29 @@
 # TUI Operator Agent Safety
 
-This document defines safety requirements for Relaybase's own in-TUI Operator Agent. As of RA010, the daemon Agent Gateway exposes config, sessions, session event streams, diagnostics, approval ID validation, a daemon-side OpenAI Agents SDK runtime through OpenRouter, a daemon-owned Relaybase tool registry, state-dir backed session/audit storage, redacted chat/session export, and Go TUI integration for session messages, streamed events, setup previews, and approval decisions. Read-only tools can inspect safe state, diagnostics, bounded redacted logs, manifests, setup plans, and repair previews. Mutating tools exist only as approval-gated daemon contracts for lifecycle, export, setup apply, manifest patch, registration, open/prove, and env override behavior.
+This document defines the implemented safety boundary for Relaybase's in-TUI Operator Agent. The daemon Agent Gateway owns provider execution, registered tools, canonical project grants, policy, spend and execution limits, approvals, SQLite threads/audits, redacted exports, run recovery, and activity projection. The Go TUI sends requests, presents previews, and returns approval decisions; it does not perform lifecycle or setup mutations itself.
 
 ## Default State
 
 Remote model mode is disabled by default. The deterministic local assistant remains available without OpenRouter, OpenAI Agents SDK execution, or network calls.
 
-For local development, remote Operator Agent execution is enabled from the daemon environment, typically `.env`, only when both flags are explicit:
+The normal Windows provider path is `/settings` → **Agent → Provider → Connect OpenRouter**. OAuth PKCE returns the credential directly to the daemon, which validates it and stores it with current-user DPAPI. Silent operation is the default; the unavailable high-security switch is not silently downgraded.
+
+Ongoing credential controls live under **Agent → Security and credentials** and use one daemon-owned doctor, preview binder, repair service, and SQLite receipt journal. The TUI and CLI do not independently inspect, decrypt, or mutate credentials. Local checks do not contact OpenRouter; online validation is explicit. Every mutation is revision/source/credential-bound, idempotent, audited with redacted fields, and followed by diagnosis before Relaybase reports a verified outcome.
+
+Remote execution still requires both explicit enablement flags, whether they come from managed configuration or a selected external source:
 
 ```env
 RELAYBASE_AGENT_ENABLED=1
 RELAYBASE_AGENT_REMOTE_MODEL_ENABLED=1
 ```
 
-`OPENROUTER_API_KEY` and `RELAYBASE_AGENT_MODEL` by themselves do not enable remote calls. Restart the daemon/TUI launch path after changing `.env` so the daemon process reads the new environment.
+`OPENROUTER_API_KEY` and `RELAYBASE_AGENT_MODEL` by themselves do not enable remote calls. Selected external files are validated at each new run boundary and can be explicitly reloaded from Agent Recovery. Values owned by the daemon's parent shell remain startup-only and require a daemon restart.
 
-When remote mode is missing, disabled, misconfigured, out of budget, or unsupported, Relaybase must show a clear diagnostic and continue to offer deterministic local commands where possible.
+When remote mode is missing, disabled, misconfigured, out of budget, or unsupported, Relaybase shows a clear failed/blocked diagnostic and continues to offer deterministic local commands where possible.
 
-Disabled agent config, disabled remote model mode, missing `OPENROUTER_API_KEY`, missing model slug, budget exhaustion, runtime timeout, and provider failures produce diagnostics and failed runs. The gateway must not synthesize assistant/model text.
+Disabled Agent config, disabled remote model mode, disconnected/unverified credentials, missing model slug, invalid external configuration, budget exhaustion, runtime timeout, and provider failures produce independent diagnostics and failed runs. The gateway must not synthesize assistant/model text.
+
+Current-user DPAPI reduces offline, cross-user, and accidental plaintext exposure. It does not defeat malware already running as the same Windows user. Use a dedicated key with a conservative provider-side spending limit and expiration.
 
 ## Approval Gates
 
@@ -31,7 +37,7 @@ Approval is required before:
 - creating or updating `relaybase.app.json`
 - creating or updating `.relaybase/launch.cjs`
 - creating or updating `.relaybase/setup-profile.json` or current setup profile equivalents
-- editing env values or env files
+- applying an exact preview-bound legacy credential assignment removal
 - registering or re-registering a manifest
 - changing `upstreamPort`, `healthUrl`, command, cwd, or component metadata
 - sending logs or diagnostics to a remote model
@@ -82,7 +88,7 @@ Project setup must not guess when detection is ambiguous. The daemon should retu
 
 Docker Compose service selection, target port, health path, pinned port, and env write strategy require explicit input when Relaybase cannot infer them safely.
 
-RA012C extends this rule across the runtime matrix. The Operator Agent must not assume `npm run dev`; it must call `detect_project` before planning folder/current-directory setup, show detected runtime/language/framework confidence, and ask when the runtime, command, module, Docker service, Procfile process, port strategy, or component role is ambiguous.
+This rule applies across the runtime matrix. The Operator Agent must not assume `npm run dev`; it must call `detect_project` before planning folder/current-directory setup, show detected runtime/language/framework confidence, and ask when the runtime, command, module, Docker service, Procfile process, port strategy, or component role is ambiguous.
 
 Approval previews for setup apply must show the runtime/language summary, selected command argv or preview string, selected port strategy, generated wrapper/profile/file diffs, and env keys with values hidden. Preview-only flows must never be described as written or applied.
 
@@ -118,7 +124,7 @@ Recovered approvals after daemon restart are treated as pending recovered approv
 
 JSON and Markdown chat/session exports are redacted exports. They may include thread metadata, safe messages, safe summaries, audit counts, approval/action summaries, and redaction reports. They must not include raw OpenRouter keys, Relaybase auth tokens, bearer tokens, secret-like env values, raw app log bodies, or raw file diffs containing secrets.
 
-## Missing Implementation Diagnostics
+## Availability Diagnostics
 
 Browser open execution, clipboard copy execution, and release tooling must report unavailable or disabled state honestly until implemented and verified. Approval continuation, redacted chat/session export, and durable agent session/audit storage exist through the daemon Agent Gateway. OpenRouter/OpenAI Agents SDK execution is available only through the daemon runtime when explicitly enabled and configured.
 

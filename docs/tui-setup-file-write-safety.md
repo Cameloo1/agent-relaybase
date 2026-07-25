@@ -32,7 +32,7 @@ The daemon setup API produces a setup plan preview with:
 - recovery steps
 - write plan
 
-Dry-run previews must not mutate files or registry state. RA001 contract tests verify that `/__hub/api/setup/preview` does not create `relaybase.app.json` or `.relaybase/setup-profile.json`.
+Dry-run previews must not mutate files or registry state. Contract tests verify that `/__hub/api/setup/preview` does not create `relaybase.app.json` or `.relaybase/setup-profile.json`.
 
 The Operator Agent's `apply_setup_plan` and composed `setup_and_start_project` `apply_setup` approvals include an immutable versioned SHA-256 binding to the exact preview and its write revision. Approved execution regenerates the preview immediately before apply and verifies the selected plan, full preview digest, and write revision. A missing binding fails with `SETUP_PREVIEW_BINDING_REQUIRED`; any drift fails with `SETUP_PREVIEW_STALE`. Neither path performs a mutation. The user must review and approve a newly generated preview.
 
@@ -103,7 +103,7 @@ Confirmation is required before:
 
 The approval prompt must show action, target files, risk, expected result, and how to cancel.
 
-As of RA003, the TUI confirmation path is implemented for:
+The TUI confirmation path is implemented for:
 
 - `/add <path>`
 - `/add <path> using <command>`

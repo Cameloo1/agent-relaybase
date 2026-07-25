@@ -45,6 +45,9 @@ func TestNaturalPhraseParser(t *testing.T) {
 		{name: "daemon repair", input: "fix daemon", intent: IntentCommand, kind: slash.KindDaemonRepair},
 		{name: "daemon retry", input: "retry daemon", intent: IntentCommand, kind: slash.KindDaemonRepair},
 		{name: "start relaybase daemon", input: "start relaybase daemon", intent: IntentCommand, kind: slash.KindDaemonRepair},
+		{name: "restart relaybase daemon", input: "restart relaybase daemon", intent: IntentCommand, kind: slash.KindDaemonRestart},
+		{name: "settings", input: "open settings", intent: IntentCommand, kind: slash.KindSettings},
+		{name: "agent settings", input: "agent settings", intent: IntentCommand, kind: slash.KindSettings, target: "agent"},
 		{name: "help", input: "help", intent: IntentCommand, kind: slash.KindHelp},
 	}
 

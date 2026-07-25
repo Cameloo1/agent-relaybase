@@ -2,7 +2,7 @@
 
 This document describes the current architecture of Relaybase's own in-TUI Operator Agent. It is separate from the AI-app-builder docs, which teach users how to build their own AI apps or external agents that connect to Relaybase.
 
-As of RA010, the repository implements the daemon-side Agent Gateway API contract for Relaybase's own Operator Agent, an isolated OpenRouter compatibility adapter for OpenAI Agents SDK TypeScript, a daemon-side runtime foundation, a daemon-owned Relaybase tool registry, durable redacted session/audit storage, and Go TUI client integration with the gateway. The gateway exposes safe provider config metadata, creates/lists/reads/clears/exports sessions, accepts TUI-context messages, streams typed session events, returns missing/disabled/runtime diagnostics, validates approval IDs, and invokes the Operator Agent runtime when remote mode, model slug, and key source are configured. Tools can read app/group/component state, diagnostics, bounded redacted logs, and setup previews; mutating lifecycle, export, setup apply, manifest patch, registration, open/prove, and env override tools are approval-gated and delegate to existing daemon services. The Go TUI remains a daemon client and approval/display surface; it never calls OpenRouter directly, writes setup files directly, or manages app processes.
+The implemented system includes a daemon Agent Gateway, an OpenRouter compatibility adapter for the OpenAI Agents SDK TypeScript runtime, a daemon-owned tool registry, bounded multi-segment execution, durable redacted SQLite threads/audits, approval recovery, run polling and cancellation, public activity projections, and Go TUI integration. Read-only tools inspect Relaybase and explicitly granted projects. Mutating lifecycle, export, setup, manifest, registration, open/prove, env, browser, and clipboard-adjacent work remains approval-gated and delegates to existing daemon services.
 
 ## Goal
 
@@ -36,15 +36,28 @@ The TUI does not directly write manifests, wrappers, env files, setup profiles, 
 
 ### TypeScript Daemon Agent Gateway
 
-The daemon owns the Agent Gateway. As of RA010, the implemented contract surface is:
+The daemon owns the Agent Gateway. Principal implemented routes include:
 
 - `GET /__hub/api/agent/config`
 - `PUT /__hub/api/agent/config`
+- `POST /__hub/api/agent/config/reload`
+- `GET /__hub/api/agent/provider/openrouter/status`
+- `POST /__hub/api/agent/provider/openrouter/connect`
+- `POST /__hub/api/agent/provider/openrouter/replace`
+- `POST /__hub/api/agent/provider/openrouter/migrate`
+- `POST /__hub/api/agent/provider/openrouter/disconnect`
+- `POST /__hub/api/agent/provider/openrouter/revoke/preview`
 - `POST /__hub/api/agent/sessions`
 - `GET /__hub/api/agent/sessions`
 - `GET /__hub/api/agent/sessions/:sessionId`
 - `DELETE /__hub/api/agent/sessions/:sessionId`
 - `GET /__hub/api/agent/sessions/:sessionId/export`
+- `GET /__hub/api/agent/sessions/:sessionId/context-preview`
+- `GET /__hub/api/agent/sessions/:sessionId/runs`
+- `GET /__hub/api/agent/sessions/:sessionId/runs/active`
+- `GET /__hub/api/agent/sessions/:sessionId/runs/:runId`
+- `POST /__hub/api/agent/sessions/:sessionId/runs/:runId/cancel`
+- `POST /__hub/api/agent/sessions/:sessionId/runs/:runId/retry`
 - `POST /__hub/api/agent/sessions/:sessionId/messages`
 - `GET /__hub/api/agent/sessions/:sessionId/events`
 - `POST /__hub/api/agent/approvals/:approvalId/approve`
@@ -63,15 +76,22 @@ The gateway currently:
 - refuses raw API keys in config updates
 - exposes the Relaybase tool registry described in `docs/tui-agent-tools.md`
 
-The RA005 provider adapter currently:
+The provider and credential boundary:
 
-- reads `OPENROUTER_API_KEY` from the daemon/CLI environment
+- connects through a daemon-owned one-use OpenRouter OAuth PKCE callback;
+- protects the dedicated key with current-user Windows DPAPI and ACL-restricted storage;
+- gives each new run an immutable config revision and short-lived daemon-only credential lease;
+- keeps legacy `OPENROUTER_API_KEY` resolution only for compatibility and explicit migration;
 - requires an explicit `RELAYBASE_AGENT_MODEL` for live smoke verification
 - constructs an OpenAI client with `baseURL=https://openrouter.ai/api/v1`
 - creates an SDK Chat Completions model/provider without forking the SDK
 - supports optional `OPENROUTER_HTTP_REFERER` and `OPENROUTER_TITLE` attribution values
 
 The gateway currently enforces policy, tool allowlists, approvals, budgets, and redaction before model and tool execution. Approved tool continuations run through Relaybase daemon services, not direct shell execution. Session and audit files are state-dir backed; approval records remain in process while their safe summaries are persisted in sessions/audit.
+
+Configured execution uses bounded continuation rather than treating the SDK's per-call turn ceiling as task completion. A run resumes the same SDK `RunState` in segments, emits `run.continuing` at each segment boundary, and stops only at completion, approval wait, cancellation, no-progress detection, inactivity timeout, hard duration, or the cumulative turn ceiling. Defaults are 8 turns per segment, 32 cumulative turns, 120 seconds without observable progress, a 15-minute hard duration, 4096 output tokens, medium reasoning effort, and three equivalent no-progress tool repetitions. Every value is bounded and configurable through `PUT /__hub/api/agent/config` or `/settings agent`.
+
+Project inspection tools accept a canonical `projectRootGrantId`. The Agent prompt directs later inspection calls to reuse that grant instead of turning `relaybase.app.json` into a project root. A manifest path is corrected to its parent only when that parent exactly matches an existing canonical grant; stale grants and paths outside a grant fail closed with an actionable diagnostic.
 
 The gateway must not return fake model output. When remote mode is disabled or provider configuration is missing, it returns diagnostics and `run.failed` events. When configured, model output must come from the daemon runtime and OpenRouter provider path.
 
@@ -83,11 +103,13 @@ OpenRouter is the remote model provider for the Operator Agent path. It must rem
 
 Raw OpenRouter keys must never be stored in TUI preferences, logs, exports, setup plans, chat history, audit logs, traces, or reports.
 
-The current verified adapter path is upstream `@openai/agents` plus the OpenAI client pointed at OpenRouter's Chat Completions-compatible API. No fork is needed for RA005.
+Managed credentials also never enter `process.env` or Relaybase-created child app, hook, setup, repair, browser-helper, or child MCP environments. Current-user DPAPI does not defend against same-user malware or a compromised daemon.
+
+The implemented adapter uses upstream `@openai/agents` plus the OpenAI client pointed at OpenRouter's Chat Completions-compatible API. No SDK fork is required by this path.
 
 ### OpenAI Agents SDK TS Runtime
 
-The OpenAI Agents SDK TypeScript runtime is the daemon orchestration layer for model sessions and tool proposals. Relaybase wraps the upstream SDK and the RA005 OpenRouter Chat Completions-compatible provider path; no fork is currently required. A fork is allowed only when a specific technical blocker is proven, documented, isolated, and test-backed.
+The OpenAI Agents SDK TypeScript runtime is the daemon orchestration layer for model sessions and tool proposals. Relaybase wraps the upstream SDK and the OpenRouter Chat Completions-compatible provider path; no fork is currently required. A fork is allowed only when a specific technical blocker is proven, documented, isolated, and test-backed.
 
 The SDK runtime must not execute shell commands directly. It may propose Relaybase tool calls, but every tool call still passes through Relaybase's allowlist and approval engine.
 
@@ -147,17 +169,20 @@ Recovered approvals are shown as recovered approvals and require explicit user c
 
 Implemented today:
 
-- Go Bubble Tea TUI client shell, pane dashboard, menus, slash commands, deterministic local assistant, optional LLM configuration shell, preferences, logs, and evidence smoke.
-- Go TUI Agent Gateway client methods, config/diagnostic fetch, session/message/event commands, approval approve/reject commands, and event rendering for answers, diagnostics, setup previews, file-write previews, repair choices, prove results, and TUI proposed actions.
+- Go Bubble Tea operator console with panes, managers, help, settings, command palette, deterministic local commands, Agent dock/full page, transcript virtualization, preferences, logs, and smoke coverage.
+- Go TUI Agent Gateway client methods for config, diagnostics, threads, runs, messages, SSE replay, cancellation/retry, approvals, usage, setup previews, repair choices, prove results, activity, and TUI-proposed actions.
 - Node/TypeScript daemon lifecycle APIs, operations, events, grouped state, logs, exports, setup CLI functions, and registration APIs.
-- Node/TypeScript daemon Agent Gateway API contract for config, sessions, messages, session SSE events, diagnostics, approvals, session clearing, and redacted session export.
-- Node/TypeScript daemon Operator Agent runtime using OpenAI Agents SDK TS through OpenRouter, with bounded/redacted TUI context, state-dir backed safe session/audit storage, budget diagnostics, streamed model/tool/setup events, timeout diagnostics, and the daemon-owned tool registry.
+- Node/TypeScript daemon Agent Gateway API contract for config, threads, queued/persisted runs, messages, SSE events/replay, diagnostics, approvals, cancellation/retry, usage, clearing, and redacted export.
+- Node/TypeScript Operator Agent runtime using OpenAI Agents SDK TS through OpenRouter, with bounded/redacted context, canonical project grants, SQLite state, spend and execution guards, public activity projections, operation polling, streamed model/tool/setup events, timeout/no-progress diagnostics, and the daemon-owned tool registry.
+- Daemon-owned config revisions, run-boundary external reload, OAuth PKCE, DPAPI storage, safe provider status, migration/replacement/disconnect recovery, and child-environment scrubbing.
 
-Still deferred:
+Not established by local/offline implementation alone:
 
-- live OpenRouter proof unless `OPENROUTER_API_KEY` and `RELAYBASE_AGENT_MODEL` are configured and `npm run agent:smoke:openrouter` passes
-- platform-specific release packages and GoReleaser/checksum dry-runs when those tools are not installed locally
+- live compatibility of a selected OpenRouter model unless an explicit budgeted live check passes with that model
+- public npm installability and trusted Windows package execution until the separate release/signing gates pass
 - native manifest `components[]`; current grouping remains component-as-app metadata
+- optional Windows-verification prompts; the control remains visibly unavailable until secure prompt ownership is proven
+- a remote backend-held credential broker with short-lived client access
 
 ## Non-Negotiable Boundary
 

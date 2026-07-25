@@ -164,6 +164,7 @@ export type DaemonEventType =
   | "package.updated"
   | "package.deleted"
   | "app.state_changed"
+  | "app.runtime_changed"
   | "app.lifecycle_operation_started"
   | "app.lifecycle_operation_progress"
   | "app.lifecycle_operation_completed"

@@ -6,6 +6,7 @@ import type { AgentMessageRequest, AgentRunEvent } from "./types.ts";
 
 type RequireToken = (options?: { code?: string; message?: string; userAction?: string }) => void;
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
+const MAX_AGENT_CONTROL_BODY_BYTES = 64 * 1024;
 const MAX_REPLAY_DELTA_CHARS = 4096;
 
 export async function handleAgentApiRequest(input: {
@@ -25,6 +26,8 @@ export async function handleAgentApiRequest(input: {
     message: "Unauthorized Relaybase Agent Gateway access.",
     userAction: "Use the session token from this daemon state directory before using the Agent Gateway."
   });
+  response.setHeader("cache-control", "no-store");
+  response.setHeader("pragma", "no-cache");
 
   const route = parts.slice(3);
 
@@ -47,8 +50,318 @@ export async function handleAgentApiRequest(input: {
   }
 
   if (request.method === "PUT" && route.length === 1 && route[0] === "config") {
-    const body = await readJsonBody(request);
+    const body = await readJsonBody(request, MAX_AGENT_CONTROL_BODY_BYTES);
     sendJson(response, 200, { agent: { config: runtime.agentGateway.updateConfig(body) } });
+    return true;
+  }
+
+  if (request.method === "POST" && route.length === 2 && route[0] === "config" && route[1] === "reload") {
+    sendJson(response, 200, { agent: { reload: await runtime.agentGateway.reloadConfig() } });
+    return true;
+  }
+
+  if (request.method === "GET" && route.length === 2 && route[0] === "security" && route[1] === "status") {
+    sendJson(response, 200, { agent: { security: await runtime.agentGateway.agentSecurityStatus() } });
+    return true;
+  }
+
+  if (request.method === "POST" && route.length === 2 && route[0] === "security" && route[1] === "diagnose") {
+    const body = await readJsonBody(request, MAX_AGENT_CONTROL_BODY_BYTES);
+    requireAllowedFields(body, ["online"]);
+    sendJson(response, 200, {
+      agent: { security: await runtime.agentGateway.agentSecurityStatus({ online: body.online === true }) }
+    });
+    return true;
+  }
+
+  if (
+    request.method === "GET" &&
+    route.length === 4 &&
+    route[0] === "security" &&
+    route[1] === "repair" &&
+    route[2] === "operations" &&
+    route[3] === "latest"
+  ) {
+    sendJson(response, 200, {
+      agent: {
+        security: {
+          repair: { operation: runtime.agentGateway.latestAgentSecurityRepairOperation() }
+        }
+      }
+    });
+    return true;
+  }
+
+  if (
+    request.method === "GET" &&
+    route.length === 4 &&
+    route[0] === "security" &&
+    route[1] === "repair" &&
+    route[2] === "previews"
+  ) {
+    sendJson(response, 200, {
+      agent: {
+        security: {
+          repair: { preview: runtime.agentGateway.agentSecurityRepairPreview(route[3]!) }
+        }
+      }
+    });
+    return true;
+  }
+
+  if (
+    request.method === "POST" &&
+    route.length === 3 &&
+    route[0] === "security" &&
+    route[1] === "repair" &&
+    route[2] === "preview"
+  ) {
+    const body = await readJsonBody(request, MAX_AGENT_CONTROL_BODY_BYTES);
+    requireAllowedFields(body, ["actionIds", "issueCodes", "safe", "online"]);
+    rejectSecretRepairInput(body);
+    sendJson(response, 200, {
+      agent: {
+        security: {
+          repair: {
+            preview: await runtime.agentGateway.previewAgentSecurityRepair({
+              actionIds: stringArray(body.actionIds) as Parameters<
+                typeof runtime.agentGateway.previewAgentSecurityRepair
+              >[0]["actionIds"],
+              issueCodes: stringArray(body.issueCodes),
+              safe: body.safe === true,
+              online: body.online === true
+            })
+          }
+        }
+      }
+    });
+    return true;
+  }
+
+  if (
+    request.method === "POST" &&
+    route.length === 3 &&
+    route[0] === "security" &&
+    route[1] === "repair" &&
+    route[2] === "apply"
+  ) {
+    const body = await readJsonBody(request, MAX_AGENT_CONTROL_BODY_BYTES);
+    requireAllowedFields(body, ["previewId", "idempotencyKey", "confirmation"]);
+    rejectSecretRepairInput(body);
+    sendJson(response, 200, {
+      agent: {
+        security: {
+          repair: {
+            operation: await runtime.agentGateway.applyAgentSecurityRepair({
+              previewId: requiredBodyString(body, "previewId"),
+              idempotencyKey: requiredBodyString(body, "idempotencyKey"),
+              confirmation: requiredBodyString(body, "confirmation")
+            })
+          }
+        }
+      }
+    });
+    return true;
+  }
+
+  if (
+    request.method === "GET" &&
+    route.length === 4 &&
+    route[0] === "security" &&
+    route[1] === "repair" &&
+    route[2] === "operations"
+  ) {
+    sendJson(response, 200, {
+      agent: {
+        security: {
+          repair: { operation: runtime.agentGateway.agentSecurityRepairOperation(route[3]!) }
+        }
+      }
+    });
+    return true;
+  }
+
+  if (
+    request.method === "POST" &&
+    route.length === 5 &&
+    route[0] === "security" &&
+    route[1] === "repair" &&
+    route[2] === "operations" &&
+    route[4] === "cancel"
+  ) {
+    const body = await readJsonBody(request, MAX_AGENT_CONTROL_BODY_BYTES);
+    requireAllowedFields(body, []);
+    sendJson(response, 200, {
+      agent: {
+        security: {
+          repair: { operation: runtime.agentGateway.cancelAgentSecurityRepair(route[3]!) }
+        }
+      }
+    });
+    return true;
+  }
+
+  if (
+    request.method === "GET" &&
+    route.length === 3 &&
+    route[0] === "provider" &&
+    route[1] === "openrouter" &&
+    route[2] === "status"
+  ) {
+    const url = new URL(request.url ?? "/", "http://localhost");
+    sendJson(response, 200, {
+      agent: { provider: await runtime.agentGateway.providerStatus(url.searchParams.get("attemptId") ?? undefined) }
+    });
+    return true;
+  }
+
+  if (
+    request.method === "POST" &&
+    route.length === 3 &&
+    route[0] === "provider" &&
+    route[1] === "openrouter" &&
+    (route[2] === "connect" || route[2] === "replace")
+  ) {
+    const body = await readJsonBody(request, MAX_AGENT_CONTROL_BODY_BYTES);
+    sendJson(response, 202, {
+      agent: {
+        provider: {
+          attempt: await runtime.agentGateway.connectOpenRouter(route[2] === "replace" ? "replace" : "connect", {
+            openBrowser: body.openBrowser === true
+          })
+        }
+      }
+    });
+    return true;
+  }
+
+  if (
+    request.method === "POST" &&
+    route.length === 4 &&
+    route[0] === "provider" &&
+    route[1] === "openrouter" &&
+    route[2] === "legacy-removal" &&
+    route[3] === "preview"
+  ) {
+    sendJson(response, 200, {
+      agent: { provider: { legacyRemoval: await runtime.agentGateway.previewLegacyCredentialRemoval() } }
+    });
+    return true;
+  }
+
+  if (
+    request.method === "POST" &&
+    route.length === 4 &&
+    route[0] === "provider" &&
+    route[1] === "openrouter" &&
+    route[2] === "legacy-removal" &&
+    route[3] === "apply"
+  ) {
+    const body = await readJsonBody(request, MAX_AGENT_CONTROL_BODY_BYTES);
+    requireControlConfirmation(body, "remove_legacy_external_credential");
+    const previewId = typeof body.previewId === "string" ? body.previewId : "";
+    if (!previewId) {
+      throw new AgentGatewayRequestError(
+        400,
+        "AGENT_LEGACY_CREDENTIAL_REMOVAL_PREVIEW_REQUIRED",
+        "A bound legacy credential removal preview is required.",
+        { retryable: false, userAction: "Create a fresh removal preview and confirm it." }
+      );
+    }
+    sendJson(response, 200, {
+      agent: { provider: { legacyRemoval: await runtime.agentGateway.applyLegacyCredentialRemoval(previewId) } }
+    });
+    return true;
+  }
+
+  if (
+    request.method === "POST" &&
+    route.length === 3 &&
+    route[0] === "provider" &&
+    route[1] === "openrouter" &&
+    route[2] === "validate"
+  ) {
+    await readJsonBody(request, MAX_AGENT_CONTROL_BODY_BYTES);
+    sendJson(response, 200, { agent: { provider: await runtime.agentGateway.validateOpenRouterCredential() } });
+    return true;
+  }
+
+  if (
+    request.method === "POST" &&
+    route.length === 3 &&
+    route[0] === "provider" &&
+    route[1] === "openrouter" &&
+    route[2] === "disconnect"
+  ) {
+    const body = await readJsonBody(request, MAX_AGENT_CONTROL_BODY_BYTES);
+    requireControlConfirmation(body, "disconnect_local_only");
+    sendJson(response, 200, { agent: { provider: await runtime.agentGateway.disconnectOpenRouter() } });
+    return true;
+  }
+
+  if (
+    request.method === "POST" &&
+    route.length === 3 &&
+    route[0] === "provider" &&
+    route[1] === "openrouter" &&
+    route[2] === "migrate"
+  ) {
+    const body = await readJsonBody(request, MAX_AGENT_CONTROL_BODY_BYTES);
+    requireControlConfirmation(body, "migrate_to_windows_dpapi");
+    sendJson(response, 200, { agent: { provider: await runtime.agentGateway.migrateOpenRouterCredential() } });
+    return true;
+  }
+
+  if (
+    request.method === "POST" &&
+    route.length === 4 &&
+    route[0] === "provider" &&
+    route[1] === "openrouter" &&
+    route[2] === "revoke" &&
+    route[3] === "preview"
+  ) {
+    sendJson(response, 200, {
+      agent: {
+        provider: runtime.agentGateway.previewOpenRouterRevocation()
+      }
+    });
+    return true;
+  }
+
+  if (
+    request.method === "POST" &&
+    route.length === 3 &&
+    route[0] === "provider" &&
+    route[1] === "openrouter" &&
+    route[2] === "revoke"
+  ) {
+    const body = await readJsonBody(request, MAX_AGENT_CONTROL_BODY_BYTES);
+    requireControlConfirmation(body, "open_provider_key_management");
+    runtime.agentGateway.recordOpenRouterRevocationUnconfirmed();
+    sendJson(response, 409, {
+      code: "AGENT_PROVIDER_REVOCATION_UNCONFIRMED",
+      message: "Relaybase cannot revoke this key without an OpenRouter management credential.",
+      retryable: false,
+      userAction: "Revoke the key in OpenRouter, then disconnect it locally.",
+      detail: {
+        managementUrl: "https://openrouter.ai/settings/keys",
+        localCredentialPreserved: true
+      }
+    });
+    return true;
+  }
+
+  if (
+    request.method === "PUT" &&
+    route.length === 3 &&
+    route[0] === "provider" &&
+    route[1] === "openrouter" &&
+    route[2] === "security-mode"
+  ) {
+    const body = await readJsonBody(request, MAX_AGENT_CONTROL_BODY_BYTES);
+    sendJson(response, 200, {
+      agent: { provider: runtime.agentGateway.setWindowsVerificationMode(body.mode) }
+    });
     return true;
   }
 
@@ -355,15 +668,18 @@ function requestIdempotencyKey(request: http.IncomingMessage, body: Record<strin
   return headerKey || bodyKey || undefined;
 }
 
-async function readJsonBody(request: http.IncomingMessage): Promise<Record<string, unknown>> {
+async function readJsonBody(
+  request: http.IncomingMessage,
+  maximumBytes = MAX_JSON_BODY_BYTES
+): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let totalBytes = 0;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     totalBytes += buffer.byteLength;
-    if (totalBytes > MAX_JSON_BODY_BYTES) {
+    if (totalBytes > maximumBytes) {
       request.destroy();
-      throw new AgentGatewayRequestError(413, "REQUEST_BODY_TOO_LARGE", "Request body exceeds the 1 MB limit.", {
+      throw new AgentGatewayRequestError(413, "REQUEST_BODY_TOO_LARGE", "Request body exceeds the route limit.", {
         retryable: false
       });
     }
@@ -375,4 +691,94 @@ async function readJsonBody(request: http.IncomingMessage): Promise<Record<strin
   }
 
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+}
+
+function requireControlConfirmation(body: Record<string, unknown>, expected: string): void {
+  if (body.confirm !== expected) {
+    throw new AgentGatewayRequestError(
+      400,
+      "AGENT_PROVIDER_CONFIRMATION_REQUIRED",
+      "This provider action requires an exact confirmation binding.",
+      {
+        retryable: false,
+        userAction: `Retry with confirm=${expected}.`
+      }
+    );
+  }
+}
+
+function requireAllowedFields(body: Record<string, unknown>, allowed: string[]): void {
+  const unexpected = Object.keys(body).filter((key) => !allowed.includes(key));
+  if (unexpected.length > 0) {
+    throw new AgentGatewayRequestError(
+      400,
+      "AGENT_SECURITY_REPAIR_REQUEST_INVALID",
+      "Agent security repair request contains unsupported fields.",
+      {
+        retryable: false,
+        detail: { unexpectedFields: unexpected.sort() },
+        userAction: "Use the documented repair request."
+      }
+    );
+  }
+}
+
+function rejectSecretRepairInput(value: unknown, depth = 0): void {
+  if (depth > 6 || value === null || value === undefined) {
+    return;
+  }
+  if (typeof value === "string") {
+    if (/\bsk-(?:or-)?[A-Za-z0-9._-]{8,}/i.test(value)) {
+      throw new AgentGatewayRequestError(
+        400,
+        "AGENT_RAW_API_KEY_NOT_ALLOWED",
+        "Agent security repair requests must not contain a raw provider key.",
+        { retryable: false, userAction: "Use the daemon-owned Provider connection flow." }
+      );
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) rejectSecretRepairInput(item, depth + 1);
+    return;
+  }
+  if (typeof value === "object") {
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      if (/^(?:apiKey|credential|secret|token|ciphertext|environmentValue)$/i.test(key)) {
+        throw new AgentGatewayRequestError(
+          400,
+          "AGENT_RAW_API_KEY_NOT_ALLOWED",
+          "Agent security repair requests must not contain credential material.",
+          { retryable: false, userAction: "Use the daemon-owned Provider connection flow." }
+        );
+      }
+      rejectSecretRepairInput(nested, depth + 1);
+    }
+  }
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
+    throw new AgentGatewayRequestError(
+      400,
+      "AGENT_SECURITY_REPAIR_REQUEST_INVALID",
+      "Agent security repair list fields must contain non-empty strings.",
+      { retryable: false, userAction: "Use action and issue identifiers returned by diagnosis." }
+    );
+  }
+  return value.map((item) => String(item).trim());
+}
+
+function requiredBodyString(body: Record<string, unknown>, field: string): string {
+  const value = body[field];
+  if (typeof value !== "string" || !value.trim() || value.length > 512) {
+    throw new AgentGatewayRequestError(
+      400,
+      "AGENT_SECURITY_REPAIR_REQUEST_INVALID",
+      `Agent security repair field ${field} is required and must be bounded text.`,
+      { retryable: false, userAction: "Use the exact values returned by the repair preview." }
+    );
+  }
+  return value.trim();
 }

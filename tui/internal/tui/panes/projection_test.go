@@ -195,7 +195,7 @@ func TestSanitizeLogDisplayLineMessageFallbackAndControls(t *testing.T) {
 	}
 }
 
-func TestClassifyLogToneUsesOnlyTypedMetadata(t *testing.T) {
+func TestClassifyLogToneUsesTypedMetadataAndTrustedLegacyRecords(t *testing.T) {
 	tests := []struct {
 		name  string
 		event relaybaseclient.LogEvent
@@ -212,13 +212,22 @@ func TestClassifyLogToneUsesOnlyTypedMetadata(t *testing.T) {
 		{name: "debug", event: relaybaseclient.LogEvent{Level: "debug"}, want: LogToneMuted},
 		{name: "trace", event: relaybaseclient.LogEvent{Level: "trace"}, want: LogToneMuted},
 		{name: "daemon pre-start hook", event: relaybaseclient.LogEvent{Source: "preStart", Level: "info"}, want: LogToneStart},
-		{name: "daemon process start output", event: relaybaseclient.LogEvent{Source: "start", Level: "info"}, want: LogToneStart},
+		{name: "daemon lifecycle start", event: relaybaseclient.LogEvent{Source: "lifecycle_starting", Level: "info"}, want: LogToneStart},
+		{name: "ordinary process output", event: relaybaseclient.LogEvent{Source: "process", Stream: "stdout", Level: "info"}, want: LogToneNeutral},
+		{name: "historical process output", event: relaybaseclient.LogEvent{Source: "start", Stream: "stdout", Level: "info"}, want: LogToneNeutral},
 		{name: "daemon stop hook", event: relaybaseclient.LogEvent{Source: "stop", Level: "info"}, want: LogToneStop},
 		{name: "daemon stop verification hook", event: relaybaseclient.LogEvent{Source: "verifyStopped", Level: "info"}, want: LogToneStop},
+		{name: "daemon lifecycle stopping", event: relaybaseclient.LogEvent{Source: "lifecycle_stopping", Level: "info"}, want: LogToneStop},
+		{name: "daemon lifecycle stopped", event: relaybaseclient.LogEvent{Source: "lifecycle_stopped", Level: "info"}, want: LogToneStop},
+		{name: "daemon lifecycle stop failed", event: relaybaseclient.LogEvent{Source: "lifecycle_stop_failed", Level: "info"}, want: LogToneError},
 		{name: "start error keeps error precedence", event: relaybaseclient.LogEvent{Source: "start", Stream: "stderr", Level: "error"}, want: LogToneError},
 		{name: "stop warning keeps warning precedence", event: relaybaseclient.LogEvent{Source: "stop", Stream: "stderr", Level: "warning"}, want: LogToneWarning},
-		{name: "untyped start-looking message", event: relaybaseclient.LogEvent{Source: "system", Level: "info", Message: "[relaybase] starting notes on 127.0.0.1:17000"}, want: LogToneNeutral},
-		{name: "untyped stop-looking message", event: relaybaseclient.LogEvent{Source: "system", Level: "info", Message: "[relaybase] stopping"}, want: LogToneNeutral},
+		{name: "trusted historical start", event: relaybaseclient.LogEvent{Source: "system", Stream: "system", Level: "info", Message: "[relaybase] starting notes on 127.0.0.1:17000"}, want: LogToneStart},
+		{name: "trusted historical stopping", event: relaybaseclient.LogEvent{Source: "system", Stream: "system", Level: "info", Message: "[relaybase] stopping"}, want: LogToneStop},
+		{name: "trusted historical stopped", event: relaybaseclient.LogEvent{Source: "system", Stream: "system", Level: "info", Message: "[relaybase] stopped"}, want: LogToneStop},
+		{name: "trusted historical stop failure", event: relaybaseclient.LogEvent{Source: "system", Stream: "system", Level: "info", Message: "[relaybase] stop failed: port remains open"}, want: LogToneError},
+		{name: "app cannot spoof historical start", event: relaybaseclient.LogEvent{Source: "system", Stream: "stdout", Level: "info", Message: "[relaybase] starting notes on 127.0.0.1:17000"}, want: LogToneNeutral},
+		{name: "similar system text is neutral", event: relaybaseclient.LogEvent{Source: "system", Stream: "system", Level: "info", Message: "user says [relaybase] stopping"}, want: LogToneNeutral},
 		{name: "structured start command", event: relaybaseclient.LogEvent{Source: "lifecycle_start_command", Level: "info", Message: "npm run dev"}, want: LogToneStart},
 		{name: "structured stop command", event: relaybaseclient.LogEvent{Source: "lifecycle_stop_command", Level: "info", Message: "npm run stop"}, want: LogToneStop},
 		{name: "raw error word", event: relaybaseclient.LogEvent{Stream: "stdout", Level: "info", Message: "error success stop start"}, want: LogToneNeutral},

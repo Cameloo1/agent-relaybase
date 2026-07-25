@@ -13,6 +13,34 @@ permissions:
   contents: read
 
 jobs:
+  windows-native:
+    name: Windows Credential Modules
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build x64 and ARM64 DPAPI modules
+        run: npm run native:build:all
+
+      - name: Upload Windows credential modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: relaybase-windows-native-${{ github.run_id }}
+          path: dist-runtime/native/relaybase_windows-win32-*.node
+          if-no-files-found: error
+          retention-days: 1
+
   node:
     name: Node Verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -144,6 +172,7 @@ jobs:
       - node
       - go-tui
       - tui-build
+      - windows-native
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -164,6 +193,12 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Download Windows credential modules
+        uses: actions/download-artifact@v4
+        with:
+          name: relaybase-windows-native-${{ github.run_id }}
+          path: dist-runtime/native
 
       - name: Build all platform TUI binaries
         run: npm run tui:build:all
@@ -188,6 +223,7 @@ jobs:
     needs:
       - go-tui
       - tui-build
+      - windows-native
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -214,6 +250,12 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Download Windows credential modules
+        uses: actions/download-artifact@v4
+        with:
+          name: relaybase-windows-native-${{ github.run_id }}
+          path: dist-runtime/native
 
       - name: Set up GoReleaser
         uses: goreleaser/goreleaser-action@v6

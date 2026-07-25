@@ -58,17 +58,20 @@ const (
 	HitPackageMember      HitKind = "package_manager.member"
 	HitPaneReopenRow      HitKind = "pane_reopen.row"
 	HitResponse           HitKind = "response"
+	HitAgentTranscript    HitKind = "agent_transcript.item"
 	HitComposer           HitKind = "composer"
 	HitModal              HitKind = "modal"
 	HitTransient          HitKind = "transient"
 	HitThreadSwitcherRow  HitKind = "thread_switcher.row"
 	HitCodePickerRow      HitKind = "code_picker.row"
+	HitSettingsRow        HitKind = "settings.row"
 )
 
 type HitRegion struct {
 	Rect   Rect
 	Kind   HitKind
 	PaneID string
+	ItemID string
 	Index  int
 }
 

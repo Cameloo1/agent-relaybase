@@ -6,6 +6,7 @@ import type { AgentDiagnostic, AgentThreadContextPreview, TuiAgentContext } from
 
 export interface OperatorPromptContext {
   generatedAt: string;
+  tuiCapturedAt?: string;
   selected: {
     paneId?: string;
     appId?: string;
@@ -59,6 +60,7 @@ export async function buildOperatorPromptContext(
   const state = await safeRelaybaseState(runtime);
   const promptContext: OperatorPromptContext = {
     generatedAt: new Date().toISOString(),
+    ...(context.capturedAt ? { tuiCapturedAt: context.capturedAt } : {}),
     selected: {
       ...(context.selectedPaneId ? { paneId: context.selectedPaneId } : {}),
       ...(context.selectedAppId ? { appId: context.selectedAppId } : {}),

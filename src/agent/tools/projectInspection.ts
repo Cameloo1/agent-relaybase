@@ -35,6 +35,7 @@ const DEFAULT_EXCLUDED_DIRS = new Set([
 ]);
 
 const rootFields = {
+  projectRootGrantId: z.string().min(1).optional(),
   projectRoot: z.string().optional(),
   cwd: z.string().optional(),
   currentDirectory: z.string().optional()
@@ -74,6 +75,7 @@ const detectParameters = z
   .strict();
 
 type ProjectRootInput = {
+  projectRootGrantId?: string;
   projectRoot?: string;
   cwd?: string;
   currentDirectory?: string;
@@ -442,7 +444,41 @@ async function resolveProjectRoot(
   input: ProjectRootInput,
   context: AgentToolExecutionContext
 ): Promise<ProjectRoot | AgentToolStructuredResult> {
+  const selectedGrant = input.projectRootGrantId
+    ? context.projectRootGrants?.find((grant) => grant.grantId === input.projectRootGrantId)
+    : undefined;
+  if (input.projectRootGrantId && !selectedGrant) {
+    return diagnosticResult(tool, "PROJECT_ROOT_GRANT_NOT_FOUND", "The selected project-root grant is unavailable.", {
+      severity: "warning",
+      userAction: "Refresh Agent context and choose one of the currently authorized project roots.",
+      detail: {
+        requestedGrantId: input.projectRootGrantId,
+        availableGrantIds: (context.projectRootGrants ?? []).map((entry) => entry.grantId)
+      }
+    });
+  }
   const requested = input.projectRoot ?? input.cwd ?? input.currentDirectory ?? context.tuiContext.currentCwd;
+  if (selectedGrant && (!requested || !requested.trim())) {
+    try {
+      const canonicalRoot = await fs.realpath(selectedGrant.canonicalRoot);
+      const verifiedGrant = await findCanonicalProjectRootGrant(canonicalRoot, [selectedGrant]);
+      if (verifiedGrant) {
+        return {
+          requested: selectedGrant.grantId,
+          root: canonicalRoot,
+          grantId: verifiedGrant.grantId,
+          grantSource: verifiedGrant.source
+        };
+      }
+    } catch {
+      // The structured stale-grant diagnostic below is safer than using an unavailable path.
+    }
+    return diagnosticResult(tool, "PROJECT_ROOT_GRANT_STALE", "The selected project-root grant is no longer valid.", {
+      severity: "error",
+      userAction: "Refresh Agent context and select the project folder again.",
+      detail: { requestedGrantId: selectedGrant.grantId }
+    });
+  }
   if (!requested || !requested.trim()) {
     return diagnosticResult(tool, "PROJECT_ROOT_REQUIRED", "A project root is required for project inspection.", {
       severity: "warning",
@@ -464,15 +500,30 @@ async function resolveProjectRoot(
     });
   }
   if (!stat.isDirectory()) {
+    if (stat.isFile()) {
+      const parent = await fs.realpath(path.dirname(resolved));
+      const parentGrant = await findCanonicalProjectRootGrant(parent, context.projectRootGrants);
+      if (parentGrant && (!selectedGrant || parentGrant.grantId === selectedGrant.grantId)) {
+        return {
+          requested,
+          root: parent,
+          grantId: parentGrant.grantId,
+          grantSource: parentGrant.source
+        };
+      }
+    }
     return diagnosticResult(tool, "PROJECT_ROOT_NOT_DIRECTORY", "Project root must be a directory.", {
       severity: "warning",
-      userAction: "Choose the project folder instead of a file.",
-      detail: { requestedRootName: path.basename(resolved) }
+      userAction: "Use projectRootGrantId or choose the granted project folder instead of a file.",
+      detail: {
+        requestedRootName: path.basename(resolved),
+        availableGrantIds: (context.projectRootGrants ?? []).map((entry) => entry.grantId)
+      }
     });
   }
   const root = await fs.realpath(resolved);
   const grant = await findCanonicalProjectRootGrant(root, context.projectRootGrants);
-  if (!grant) {
+  if (!grant || (selectedGrant && grant.grantId !== selectedGrant.grantId)) {
     return diagnosticResult(
       tool,
       "PROJECT_ROOT_NOT_GRANTED",

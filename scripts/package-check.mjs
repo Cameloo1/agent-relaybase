@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { parseNpmPackJson } from "./npm-pack-json.mjs";
 import { currentPlatformBinaryPath, targetForPlatform } from "./tui-go.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -12,6 +13,8 @@ const temporaryNpmCachePrefix = path.join(os.tmpdir(), "relaybase-package-check-
 
 export function runPackageCheck(args = process.argv.slice(2), options = {}) {
   const requireTuiBinary = args.includes("--require-tui-binary") || process.env.RELAYBASE_REQUIRE_TUI_BINARY === "1";
+  const requireWindowsNativeAll =
+    args.includes("--require-windows-native-all") || process.env.RELAYBASE_REQUIRE_WINDOWS_NATIVE_ALL === "1";
   const spawn = options.spawn ?? spawnSync;
   const exists = options.exists ?? existsSync;
   const platform = options.platform ?? process.platform;
@@ -36,6 +39,30 @@ export function runPackageCheck(args = process.argv.slice(2), options = {}) {
   if (!files.has("dist-runtime/daemonLauncher.js")) {
     console.error(
       "Relaybase package check: compiled runtime dist-runtime/daemonLauncher.js is missing from the npm tarball."
+    );
+    return 1;
+  }
+  if (platform === "win32" || requireWindowsNativeAll) {
+    const requiredNativeArches = requireWindowsNativeAll ? ["x64", "arm64"] : [arch];
+    for (const nativeArch of requiredNativeArches) {
+      const nativeFile = `dist-runtime/native/relaybase_windows-win32-${nativeArch}.node`;
+      if (!files.has(nativeFile)) {
+        console.error(`Relaybase package check: Windows credential module is missing: ${nativeFile}.`);
+        return 1;
+      }
+    }
+  }
+  const credentialFixtureLeak = [...files].find((file) => {
+    if (!/\.(?:js|json|md)$/i.test(file)) return false;
+    try {
+      return containsCredentialFixtureLiteral(readFileSync(path.join(root, file), "utf8"));
+    } catch {
+      return false;
+    }
+  });
+  if (credentialFixtureLeak) {
+    console.error(
+      `Relaybase package check: credential-shaped fixture material entered the npm tarball: ${credentialFixtureLeak}.`
     );
     return 1;
   }
@@ -127,28 +154,24 @@ function runNpmPackDryRun(spawn) {
 }
 
 function packFiles(stdout) {
-  try {
-    const parsed = JSON.parse(stdout);
-    const entry = Array.isArray(parsed) ? parsed[0] : parsed;
-    const files = Array.isArray(entry?.files) ? entry.files : [];
-    return new Set(files.map((file) => posixPath(String(file.path))).filter(Boolean));
-  } catch {
-    return new Set();
-  }
+  const parsed = parseNpmPackJson(stdout);
+  const entry = Array.isArray(parsed) ? parsed[0] : parsed;
+  const files = Array.isArray(entry?.files) ? entry.files : [];
+  return new Set(files.map((file) => posixPath(String(file.path))).filter(Boolean));
 }
 
 function packFilename(stdout) {
-  try {
-    const parsed = JSON.parse(stdout);
-    const entry = Array.isArray(parsed) ? parsed[0] : parsed;
-    return typeof entry?.filename === "string" ? entry.filename : undefined;
-  } catch {
-    return undefined;
-  }
+  const parsed = parseNpmPackJson(stdout);
+  const entry = Array.isArray(parsed) ? parsed[0] : parsed;
+  return typeof entry?.filename === "string" ? entry.filename : undefined;
 }
 
 function posixPath(value) {
   return value.split(path.sep).join("/");
+}
+
+export function containsCredentialFixtureLiteral(value) {
+  return /["'`]sk-or-[A-Za-z0-9._-]*(?:fixture|secret)[A-Za-z0-9._-]*["'`]/i.test(String(value));
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

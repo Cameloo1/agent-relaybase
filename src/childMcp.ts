@@ -72,6 +72,11 @@ interface AppMcpRuntime {
 export class ChildMcpSupervisor {
   #apps = new Map<string, AppMcpRuntime>();
   #listeners = new Set<(event: ChildMcpEvent) => void>();
+  #sanitizeEnvironment: (environment: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
+
+  constructor(options: { sanitizeEnvironment?: (environment: NodeJS.ProcessEnv) => NodeJS.ProcessEnv } = {}) {
+    this.#sanitizeEnvironment = options.sanitizeEnvironment ?? ((environment) => ({ ...environment }));
+  }
 
   onEvent(listener: (event: ChildMcpEvent) => void): () => void {
     this.#listeners.add(listener);
@@ -334,12 +339,16 @@ export class ChildMcpSupervisor {
         command: config.command!,
         args: config.args,
         cwd: config.cwd,
-        env: {
-          ...process.env,
-          ...config.env,
-          RELAYBASE_APP_ID: child.app.id,
-          RELAYBASE_CHILD_MCP_ID: config.id
-        },
+        env: Object.fromEntries(
+          Object.entries(
+            this.#sanitizeEnvironment({
+              ...process.env,
+              ...config.env,
+              RELAYBASE_APP_ID: child.app.id,
+              RELAYBASE_CHILD_MCP_ID: config.id
+            })
+          ).filter((entry): entry is [string, string] => typeof entry[1] === "string")
+        ),
         stderr: "pipe"
       });
       transport.stderr?.on("data", (chunk) => {

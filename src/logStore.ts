@@ -6,6 +6,14 @@ import type { AppComponentRole, LifecycleHookName } from "./types.ts";
 
 export type LogStream = "stdout" | "stderr" | "system";
 export type LogLevel = "debug" | "info" | "warn" | "error";
+export type LogSource =
+  | "system"
+  | "process"
+  | "lifecycle_starting"
+  | "lifecycle_stopping"
+  | "lifecycle_stopped"
+  | "lifecycle_stop_failed"
+  | LifecycleHookName;
 
 export interface LogSegmentRef {
   id: string;
@@ -21,7 +29,7 @@ export interface DurableLogEvent {
   groupId: string;
   componentRole: AppComponentRole;
   stream: LogStream;
-  source: "system" | LifecycleHookName;
+  source: LogSource;
   level: LogLevel;
   message: string;
   line: string;
@@ -37,7 +45,7 @@ export interface LogStoreAppendInput {
   groupId?: string;
   componentRole?: AppComponentRole;
   stream: LogStream;
-  source?: "system" | LifecycleHookName;
+  source?: LogSource;
   level?: LogLevel;
   message?: string;
   line?: string;
@@ -592,7 +600,16 @@ function detectLogLevel(message: string, stream: LogStream): LogLevel {
 
 function isLifecycleLogSource(value: unknown): value is DurableLogEvent["source"] {
   return (
-    value === "system" || value === "preStart" || value === "start" || value === "stop" || value === "verifyStopped"
+    value === "system" ||
+    value === "process" ||
+    value === "lifecycle_starting" ||
+    value === "lifecycle_stopping" ||
+    value === "lifecycle_stopped" ||
+    value === "lifecycle_stop_failed" ||
+    value === "preStart" ||
+    value === "start" ||
+    value === "stop" ||
+    value === "verifyStopped"
   );
 }
 

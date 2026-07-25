@@ -573,7 +573,9 @@ test("verification cleanup failure blocks retries and reports the remaining port
       .find((candidate) => candidate.operationType === "registration_verification");
     assert.equal(operation?.canRetry, false);
   } finally {
-    await hub.close();
+    await hub.close().catch((error) => {
+      assert.match(String(error), /safely stop.*cleanup-failure/);
+    });
   }
 });
 
@@ -691,7 +693,21 @@ test("registration verification classifies command, dependency, port, exit, time
         assert.equal(typeof applied.json.setup.verification.failure.recommendedAction, "string");
         assert.equal(applied.json.setup.started, false);
       } finally {
-        await hub.close();
+        if (scenario.stopCommand) {
+          const runtime = (await hub.runtime.processes.listStatuses()).find((item) => item.id === scenario.id)?.runtime;
+          await hub.close().catch((error) => {
+            assert.match(String(error), new RegExp(`safely stop.*${scenario.id}`));
+          });
+          if (runtime?.pid) {
+            try {
+              process.kill(runtime.pid);
+            } catch {
+              // The child may exit while the shutdown failure is being reported.
+            }
+          }
+        } else {
+          await hub.close();
+        }
       }
     });
   }

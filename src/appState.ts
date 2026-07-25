@@ -245,6 +245,10 @@ function readinessState(input: {
     return "failed";
   }
 
+  if (input.runtime.status === "degraded") {
+    return "unhealthy";
+  }
+
   if (
     input.runtime.status === "running" &&
     input.runtime.health === "healthy" &&
@@ -279,6 +283,10 @@ function readinessFailureReason(input: {
     return "App is stopped.";
   }
 
+  if (input.runtime.status === "degraded") {
+    return "Relaybase can see the configured backend port, but cannot prove that it belongs to this app.";
+  }
+
   if (!input.backendPortOpen) {
     return "Backend port is not open.";
   }
@@ -310,7 +318,7 @@ function primaryAction(
     return "stop";
   }
 
-  if (runtime.status === "errored" || runtime.status === "conflict") {
+  if (runtime.status === "errored" || runtime.status === "conflict" || runtime.status === "degraded") {
     return "repair";
   }
 

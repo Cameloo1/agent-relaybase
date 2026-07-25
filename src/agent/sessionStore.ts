@@ -315,6 +315,10 @@ export class AgentSessionStore {
     return this.#threadStore;
   }
 
+  close(): void {
+    this.#threadStore?.close();
+  }
+
   #pruneExpired(now = Date.now()): void {
     let changed = false;
     for (const [sessionId, session] of this.#sessions) {

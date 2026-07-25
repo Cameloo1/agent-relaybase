@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/cameloo/relaybase/tui/internal/preferences"
 	"github.com/cameloo/relaybase/tui/internal/relaybaseclient"
@@ -104,7 +105,8 @@ func TestOperatorPointerFocusHasOneAuthoritativeOwner(t *testing.T) {
 		t.Fatalf("pane click did not reclaim primary focus: owner=%s active=%v focused=%v", root.interaction.Owner(), root.commandActive, root.composer.Focused())
 	}
 	renderedPaneFocus := root.Render()
-	if !strings.Contains(renderedPaneFocus, "status running | focused") || strings.Contains(renderedPaneFocus, "[focused]") {
+	plainPaneFocus := ansi.Strip(renderedPaneFocus)
+	if !strings.Contains(plainPaneFocus, "status running | focused") || strings.Contains(plainPaneFocus, "[focused]") {
 		t.Fatalf("pane focus did not render one pane-local textual indicator:\n%s", renderedPaneFocus)
 	}
 

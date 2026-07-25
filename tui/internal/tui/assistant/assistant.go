@@ -103,6 +103,12 @@ func ParseInput(input string) (ParsedInput, error) {
 	if normalized == "help" || normalized == "show help" || normalized == "command help" {
 		return naturalCommand(input, normalized, slash.ParsedCommand{Kind: slash.KindHelp}, ResponseActionResult), nil
 	}
+	if normalized == "settings" || normalized == "open settings" {
+		return naturalCommand(input, normalized, slash.ParsedCommand{Kind: slash.KindSettings}, ResponseActionResult), nil
+	}
+	if normalized == "agent settings" || normalized == "open agent settings" {
+		return naturalCommand(input, normalized, slash.ParsedCommand{Kind: slash.KindSettings, Target: "agent"}, ResponseActionResult), nil
+	}
 	if normalized == "daemon status" || normalized == "relaybase status" || normalized == "why is relaybase offline" || normalized == "why is relaybase offline?" {
 		return naturalCommand(input, normalized, slash.ParsedCommand{Kind: slash.KindDaemonStatus}, ResponseDiagnostic), nil
 	}
@@ -110,6 +116,9 @@ func ParseInput(input string) (ParsedInput, error) {
 		normalized == "start relaybase" || normalized == "start relaybase daemon" || normalized == "fix relaybase" ||
 		normalized == "retry connection" {
 		return naturalCommand(input, normalized, slash.ParsedCommand{Kind: slash.KindDaemonRepair}, ResponseActionPreview), nil
+	}
+	if normalized == "restart daemon" || normalized == "restart relaybase" || normalized == "restart relaybase daemon" {
+		return naturalCommand(input, normalized, slash.ParsedCommand{Kind: slash.KindDaemonRestart}, ResponseActionPreview), nil
 	}
 	if normalized == "go to next page" || normalized == "next page" {
 		return naturalCommand(input, normalized, slash.ParsedCommand{Kind: slash.KindPage, Page: "next"}, ResponseActionResult), nil

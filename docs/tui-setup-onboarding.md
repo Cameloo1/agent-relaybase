@@ -1,6 +1,6 @@
-# TUI Setup And Onboarding Plan
+# TUI Setup And Onboarding
 
-This document defines the Relaybase TUI setup workflow for adding, registering, configuring, opening, proving, and repairing apps. As of RA012B, the Node/TypeScript daemon exposes setup/onboarding API contracts backed by the shared setup engine facade in `src/setupEngine.ts`, and the Go TUI has daemon-client setup methods, slash commands, no-apps onboarding, setup preview rendering, repair rendering, and confirmation-gated setup mutations.
+This document describes the current Relaybase TUI setup workflow for adding, registering, configuring, opening, proving, and repairing apps. The Node/TypeScript daemon exposes setup/onboarding APIs backed by the shared setup engine facade in `src/setupEngine.ts`; the Go TUI supplies commands, no-apps onboarding, preview/repair rendering, and confirmation surfaces without owning file writes or lifecycle.
 
 ## Current Source Primitives
 
@@ -24,7 +24,7 @@ Current implemented setup primitives:
 - `src/setupApi.ts` daemon setup/onboarding API routes
 - `src/setupApiTypes.ts` exported setup/onboarding API types
 
-Runtime breadth note: RA012B adds verified fixture coverage for runtime adapters covering JavaScript/TypeScript, Python, Go, Java, Kotlin/JVM, C#/.NET, Ruby, PHP, Docker Compose, Rust, Elixir, Scala, Clojure, Dart, native/C/C++, and Procfile projects. These adapters expose runtime-aware detection, command candidates, port strategies, health candidates, setup questions, and repair candidates. Live launch/proof still depends on the host having the relevant runtime tools and the user approving setup/lifecycle actions.
+Disposable fixtures cover runtime adapters for JavaScript/TypeScript, Python, Go, Java, Kotlin/JVM, C#/.NET, Ruby, PHP, Docker Compose, Rust, Elixir, Scala, Clojure, Dart, native/C/C++, and Procfile projects. These adapters expose runtime-aware detection, command candidates, port strategies, health candidates, setup questions, and repair candidates. Live launch/proof still depends on the host having the relevant runtime tools and the user approving setup/lifecycle actions.
 
 Current TUI setup behavior:
 
@@ -38,7 +38,7 @@ The TUI still does not write files, run package managers, spawn app commands, pr
 
 ## Implemented Daemon Setup API
 
-RA001/RA002 expose these daemon-owned setup routes:
+Implemented daemon-owned setup routes:
 
 - `POST /__hub/api/setup/detect`
 - `POST /__hub/api/setup/plans`
@@ -79,7 +79,7 @@ Event payloads contain safe summaries such as cwd, choice count, selected plan i
 
 ## Agent Gateway Setup Context
 
-As of RA010, the daemon Agent Gateway can receive TUI context for setup/onboarding messages, include bounded/redacted setup context in Operator Agent prompts, expose daemon-owned setup/onboarding tools, and stream setup/approval events back to the Go TUI. `TuiAgentContext` includes:
+The daemon Agent Gateway receives bounded TUI context for setup/onboarding messages, exposes daemon-owned setup tools, and streams setup/approval events back to the Go TUI. `TuiAgentContext` includes:
 
 - selected pane id
 - selected app id
@@ -103,11 +103,11 @@ The Agent Gateway event contract represents setup-related event shapes that the 
 - `setup.repair_choices`
 - `setup.prove_result`
 
-The daemon implements tools for project detection, setup planning, setup write preview, approved setup apply, manifest registration, manifest inspect/validate/patch, health route and pinned-port patches, component metadata patches, safe env override patches, open/prove flows, and repair previews. Mutating tools return `approval_required` unless executed through an approved daemon path. As of RA010, the Go TUI can render model-selected setup previews, file-write/manifest approval prompts, repair choices, and prove results, then approve or reject the pending daemon approval.
+The daemon implements tools for project detection, setup planning, setup write preview, approved setup apply, manifest registration, manifest inspect/validate/patch, health route and pinned-port patches, component metadata patches, safe env override patches, composed setup/start, open/prove flows, and repair previews. Mutating tools return `approval_required` unless executed through an approved daemon path. The Go TUI renders model-selected setup previews, file-write/manifest approval prompts, repair choices, and prove results, then approves or rejects the pending daemon approval.
 
 All path-bearing setup/manifest Agent tools are authorized only for a canonical trusted current directory or a canonical root selected through parsed `/add`, `/configure`, or folder `/register` input. Arbitrary model text cannot create a root grant. `apply_setup_plan` and the composed `setup_and_start_project` `apply_setup` phase are bound to the exact generated preview; preview drift fails closed before mutation and requires a fresh review. Manifest registration and safe manifest/env edits also bind their canonical target and file-content revision before approval.
 
-## Desired User Workflow
+## User Workflow
 
 Example natural-language flow:
 

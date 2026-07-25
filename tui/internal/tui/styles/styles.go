@@ -148,8 +148,8 @@ func NewWithOptions(theme Theme, options Options) Styles {
 		PaneLogError:   lipgloss.NewStyle().Foreground(theme.Error).Background(theme.Background),
 		PaneLogWarning: lipgloss.NewStyle().Foreground(theme.Warning).Background(theme.Background),
 		PaneLogMuted:   lipgloss.NewStyle().Foreground(theme.Muted).Background(theme.Background),
-		PaneLogStart:   lipgloss.NewStyle().Foreground(theme.Accent).Background(theme.Background),
-		PaneLogStop:    lipgloss.NewStyle().Foreground(theme.Accent).Background(theme.Background),
+		PaneLogStart:   lipgloss.NewStyle().Foreground(theme.Success).Background(theme.Background),
+		PaneLogStop:    lipgloss.NewStyle().Foreground(theme.Error).Background(theme.Background),
 		Control:        lipgloss.NewStyle().Foreground(theme.Accent).Background(theme.Background).Bold(true),
 		ControlMuted:   lipgloss.NewStyle().Foreground(theme.Muted).Background(theme.Background),
 		Palette: lipgloss.NewStyle().Foreground(theme.Text).Background(theme.Background).

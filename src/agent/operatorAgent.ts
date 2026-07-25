@@ -19,6 +19,7 @@ export function createOperatorAgent(input: {
   projectRootGrants?: readonly AgentProjectRootGrant[];
   config?: AgentConfig;
   reasoningEffort?: OperatorAgentReasoningEffort;
+  maxOutputTokens?: number;
   emit?: (event: { type: AgentRunEventType; data: unknown }) => void;
 }): {
   agent: unknown;
@@ -36,15 +37,18 @@ export function createOperatorAgent(input: {
     name: OPERATOR_AGENT_NAME,
     model: input.modelSlug,
     instructions: operatorAgentInstructions(),
-    modelSettings: operatorAgentModelSettings(input.reasoningEffort),
+    modelSettings: operatorAgentModelSettings(input.reasoningEffort, input.maxOutputTokens),
     tools: registry.sdkTools
   });
   return { agent, toolNames: registry.toolNames };
 }
 
-export function operatorAgentModelSettings(effort = DEFAULT_OPERATOR_AGENT_REASONING_EFFORT): Record<string, unknown> {
+export function operatorAgentModelSettings(
+  effort = DEFAULT_OPERATOR_AGENT_REASONING_EFFORT,
+  maxOutputTokens = 4096
+): Record<string, unknown> {
   return {
-    maxTokens: 4096,
+    maxTokens: maxOutputTokens,
     parallelToolCalls: false,
     providerData: {
       reasoning: {

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { promises as fsp } from "node:fs";
+import { randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -11,8 +12,9 @@ import {
   resolveOpenRouterProviderOptions
 } from "./openrouterProvider.ts";
 import type { AgentRunEvent, AgentSession } from "./types.ts";
+import { waitForAgentRunTerminal } from "./liveRunPolling.ts";
+import { OperatorAgentRuntime } from "./runtime.ts";
 
-const REQUIRED_MODEL = "google/gemini-3.1-flash-lite";
 const REASONING_EFFORT = "medium";
 const ARTIFACT_DIR = path.join(process.cwd(), "artifacts", "agent-folder-start");
 const REPORT_PATH = path.join(process.cwd(), "reports", "agent", "folder-start-live-report.md");
@@ -49,7 +51,7 @@ interface FolderStartSamples {
 export interface AgentFolderStartLiveResult {
   ok: boolean;
   status: "PASS" | "BLOCKED" | "FAIL";
-  modelSlug: typeof REQUIRED_MODEL;
+  modelSlug: string;
   reasoning: { enabled: true; effort: typeof REASONING_EFFORT };
   daemon?: { baseUrl: string; stateDir: string };
   workspace?: string;
@@ -84,18 +86,14 @@ export async function runAgentFolderStartLive(): Promise<AgentFolderStartLiveRes
   let samples: FolderStartSamples | undefined;
   let failure: unknown;
   let finalResult: AgentFolderStartLiveResult | undefined;
+  let modelSlug = process.env.RELAYBASE_AGENT_MODEL?.trim() || "unconfigured";
 
   await resetArtifactDir(ARTIFACT_DIR);
 
   try {
-    const provider = resolveOpenRouterProviderOptions({ modelSlug: REQUIRED_MODEL });
+    const provider = resolveOpenRouterProviderOptions();
+    modelSlug = provider.modelSlug;
     knownSecrets.push(provider.apiKey);
-    if (provider.modelSlug !== REQUIRED_MODEL) {
-      throw new AgentFolderStartLiveBlocked("BLOCKED_OPENROUTER_MODEL_MISMATCH", "Resolved model did not match.", {
-        requiredModel: REQUIRED_MODEL,
-        resolvedModel: provider.modelSlug
-      });
-    }
 
     const tuiBinary = resolveTuiBinary();
     if (!fs.existsSync(tuiBinary)) {
@@ -106,7 +104,7 @@ export async function runAgentFolderStartLive(): Promise<AgentFolderStartLiveRes
       );
     }
 
-    samples = await createSampleProjects();
+    samples = await createSampleProjects(knownSecrets);
     stateDir = path.join(samples.workspace, "state");
     assertDisposableWorkspace(samples.workspace);
     await writeJsonRedacted(
@@ -114,7 +112,7 @@ export async function runAgentFolderStartLive(): Promise<AgentFolderStartLiveRes
       {
         status: "running",
         provider: "openrouter",
-        modelSlug: REQUIRED_MODEL,
+        modelSlug,
         reasoning: { enabled: true, effort: REASONING_EFFORT },
         samples: redactSamplePaths(samples),
         outboundContextPolicy: "temp sample project paths only"
@@ -122,7 +120,12 @@ export async function runAgentFolderStartLive(): Promise<AgentFolderStartLiveRes
       knownSecrets
     );
 
-    server = await createRelaybaseServer({ host: "127.0.0.1", port: 0, stateDir });
+    server = await createRelaybaseServer({
+      host: "127.0.0.1",
+      port: 0,
+      stateDir,
+      agentRuntime: new OperatorAgentRuntime({ maxOutputTokens: 1024 })
+    });
     await server.listen();
     const address = server.address();
     const baseUrl = `http://${address.host}:${address.port}`;
@@ -136,10 +139,11 @@ export async function runAgentFolderStartLive(): Promise<AgentFolderStartLiveRes
       baseUrl,
       token,
       provider.apiKeyEnvVar,
+      modelSlug,
       provider.httpRefererEnvVar,
       provider.titleEnvVar
     );
-    daemonLog.push(`configured Agent Gateway for exact model ${REQUIRED_MODEL}`);
+    daemonLog.push(`configured Agent Gateway for selected model ${modelSlug}`);
 
     await appendText(
       artifacts.tuiTranscript,
@@ -216,7 +220,7 @@ export async function runAgentFolderStartLive(): Promise<AgentFolderStartLiveRes
     finalResult = {
       ok: true,
       status: "PASS",
-      modelSlug: REQUIRED_MODEL,
+      modelSlug,
       reasoning: { enabled: true, effort: REASONING_EFFORT },
       daemon: { baseUrl, stateDir },
       workspace: samples.workspace,
@@ -234,7 +238,7 @@ export async function runAgentFolderStartLive(): Promise<AgentFolderStartLiveRes
     finalResult = {
       ok: false,
       status,
-      modelSlug: REQUIRED_MODEL,
+      modelSlug,
       reasoning: { enabled: true, effort: REASONING_EFFORT },
       ...(server && stateDir ? { daemon: { baseUrl: serverBaseUrl(server), stateDir } } : {}),
       ...(samples ? { workspace: samples.workspace } : {}),
@@ -592,13 +596,14 @@ async function configureAgentGateway(
   baseUrl: string,
   token: string,
   apiKeyEnvVar: string,
+  modelSlug: string,
   httpRefererEnvVar?: string,
   titleEnvVar?: string
 ): Promise<void> {
   await apiRequest(baseUrl, token, "PUT", "/__hub/api/agent/config", {
     enabled: true,
     provider: {
-      modelSlug: REQUIRED_MODEL,
+      modelSlug,
       apiKeyEnvVar,
       remoteModelEnabled: true,
       httpRefererEnvVar,
@@ -607,7 +612,7 @@ async function configureAgentGateway(
   });
 }
 
-async function createSampleProjects(): Promise<FolderStartSamples> {
+async function createSampleProjects(knownSecrets: string[]): Promise<FolderStartSamples> {
   const workspace = await fsp.mkdtemp(path.join(os.tmpdir(), "relaybase-folder-start-live-"));
   const samples = {
     workspace,
@@ -620,7 +625,9 @@ async function createSampleProjects(): Promise<FolderStartSamples> {
   await createNodeSample(samples.noManifest, "folder-live-no-manifest");
   await createNodeSample(samples.unregistered, "folder-live-unregistered", { manifest: true });
   await createNodeSample(samples.registered, "folder-live-registered", { manifest: true });
-  await createIgnoredPortSample(samples.ignoredPort);
+  const fixtureCredential = ["sk", "or", "live", randomBytes(18).toString("base64url")].join("-");
+  knownSecrets.push(fixtureCredential);
+  await createIgnoredPortSample(samples.ignoredPort, fixtureCredential);
   await createNodeSample(samples.wrongHealth, "folder-live-wrong-health", { manifest: true, healthUrl: "/wrong" });
   return samples;
 }
@@ -658,14 +665,14 @@ async function createNodeSample(
   }
 }
 
-async function createIgnoredPortSample(project: string): Promise<void> {
+async function createIgnoredPortSample(project: string, fixtureCredential: string): Promise<void> {
   await fsp.mkdir(project, { recursive: true });
   await fsp.writeFile(
     path.join(project, "package.json"),
     JSON.stringify({ name: "folder-live-ignored-port", private: true, scripts: { dev: "node server.js" } }, null, 2),
     "utf8"
   );
-  await fsp.writeFile(path.join(project, ".env"), "PORT=31999\nOPENROUTER_API_KEY=sk-or-live-fixture-secret\n", "utf8");
+  await fsp.writeFile(path.join(project, ".env"), `PORT=31999\nOPENROUTER_API_KEY=${fixtureCredential}\n`, "utf8");
   await fsp.writeFile(
     path.join(project, "server.js"),
     [
@@ -741,10 +748,26 @@ async function sendAgentPrompt(
     `/__hub/api/agent/sessions/${sessionId}/messages`,
     { content: input.content, context: input.context }
   );
+  const runId = response.agent.run.id;
+  if (!runId) {
+    throw new Error(`AGENT_FOLDER_START_${input.label.replace(/\W+/g, "_").toUpperCase()}_RUN_ID_MISSING`);
+  }
+  await waitForAgentRunTerminal(
+    async () => {
+      const result = await apiRequest<{ agent: { run: AgentSession["runs"][number] } }>(
+        baseUrl,
+        token,
+        "GET",
+        `/__hub/api/agent/sessions/${sessionId}/runs/${runId}`
+      );
+      return result.agent.run;
+    },
+    { label: input.label }
+  );
   const session = await getSession(baseUrl, token, sessionId);
   return {
     label: input.label,
-    runId: response.agent.run.id,
+    runId,
     events: session.runs.flatMap((run) => run.events).filter((event) => !beforeSequences.has(event.sequence)),
     session
   };
@@ -1464,7 +1487,7 @@ async function writeReport(input: {
     "## Model",
     "",
     `- Provider: openrouter`,
-    `- Model: ${REQUIRED_MODEL}`,
+    `- Model: ${result?.modelSlug ?? "unconfigured"}`,
     `- Reasoning: enabled (${REASONING_EFFORT})`,
     "",
     "## Flows",

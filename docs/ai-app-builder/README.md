@@ -4,6 +4,13 @@ These docs are for users building AI apps or external agents that connect to Rel
 
 They are not the implementation docs for Relaybase's own in-TUI Operator Agent. Operator Agent architecture lives in `docs/tui-agent-architecture.md` and related `docs/tui-agent-*` files.
 
+## Guides
+
+| Goal                                                | Document                                                                     |
+| --------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Choose a connection surface and safe operating flow | [Connecting external agents to Relaybase](connecting-agents-to-relaybase.md) |
+| Review app, component, runtime, and read examples   | [AI app builder examples](examples.md)                                       |
+
 ## Audience
 
 Use these docs if you are:

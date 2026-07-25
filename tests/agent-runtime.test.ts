@@ -133,8 +133,8 @@ test("Agent Gateway key and model env values alone do not enable remote model ca
 
   assert.equal(config.enabled, false);
   assert.equal(config.provider.remoteModelEnabled, false);
-  assert.equal(config.provider.modelSlug, undefined);
-  assert.equal(config.provider.apiKeySource.configured, false);
+  assert.equal(config.provider.modelSlug, "google/gemini-3.1-flash-lite");
+  assert.equal(config.provider.apiKeySource.configured, true);
 });
 
 test("Agent Gateway reports remote model disabled separately from agent disabled", async () => {
@@ -179,7 +179,7 @@ test("Agent Gateway returns diagnostic when OpenRouter key is missing", async ()
     const result = await gateway.addMessage(relaybase, session.id, { content: "status" });
 
     assert.equal(result.run.status, "failed");
-    assert.equal(result.diagnostics[0]?.code, "OPENROUTER_API_KEY_MISSING");
+    assert.equal(result.diagnostics[0]?.code, "AGENT_CREDENTIAL_MISSING");
   } finally {
     if (previous === undefined) {
       delete process.env.RELAYBASE_TEST_OPENROUTER_KEY_MISSING;
@@ -227,12 +227,16 @@ test("Agent Gateway streams runtime events through session event model", async (
       const eventTypes = streamed.map((event) => event.type);
       assert.equal(fakeRunner.runOptions[0]?.maxTurns, 8);
       assert.deepEqual(eventTypes, [
+        "message.user",
         "run.started",
         "model.request_started",
+        "model.processing_started",
+        "model.processing_completed",
         "model.delta",
         "model.completed",
         "answer",
-        "run.completed"
+        "run.completed",
+        "run.finalized"
       ]);
       assert.equal(
         streamed
@@ -246,6 +250,106 @@ test("Agent Gateway streams runtime events through session event model", async (
     } finally {
       unsubscribe();
     }
+  });
+});
+
+test("Operator Agent continues the same SDK run state across bounded turn segments", async () => {
+  await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-continuation-secret", async () => {
+    const runner = new SegmentedContinuationRunner(2);
+    const runtime = new OperatorAgentRuntime({
+      runnerFactory: () => runner,
+      segmentMaxTurns: 2,
+      totalMaxTurns: 6
+    });
+    const session = makeSession();
+    const run = makeRun(session.id);
+    const events: Array<{ type: AgentRunEvent["type"]; data: unknown }> = [];
+
+    const result = await runtime.execute({
+      relaybase: fakeRelaybaseRuntime(),
+      config: validAgentConfig(),
+      credential: "sk-or-explicit-runtime-fixture",
+      session,
+      message: makeMessage(session.id, run.id, "complete the longer task"),
+      run,
+      context: minimalTuiContext(),
+      emit: (event) => events.push(event)
+    });
+
+    assert.equal(result.status, "completed");
+    assert.equal(result.assistantContent, "Long task completed.");
+    assert.deepEqual(
+      runner.runOptions.map((options) => options.maxTurns),
+      [2, 4, 6]
+    );
+    assert.equal(typeof runner.inputs[0], "string");
+    assert.equal(runner.inputs[1], runner.states[0]);
+    assert.equal(runner.inputs[2], runner.states[1]);
+    assert.deepEqual(
+      events.filter((event) => event.type === "run.continuing").map((event) => event.data),
+      [
+        { segment: 2, turnsUsed: 2, nextTurnCeiling: 4, totalMaxTurns: 6 },
+        { segment: 3, turnsUsed: 4, nextTurnCeiling: 6, totalMaxTurns: 6 }
+      ]
+    );
+  });
+});
+
+test("Operator Agent reports the hard turn limit precisely instead of a provider configuration error", async () => {
+  await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-turn-limit-secret", async () => {
+    const runner = new SegmentedContinuationRunner(Number.POSITIVE_INFINITY);
+    const runtime = new OperatorAgentRuntime({
+      runnerFactory: () => runner,
+      segmentMaxTurns: 2,
+      totalMaxTurns: 4
+    });
+    const session = makeSession();
+    const run = makeRun(session.id);
+
+    const result = await runtime.execute({
+      relaybase: fakeRelaybaseRuntime(),
+      config: validAgentConfig(),
+      credential: "sk-or-explicit-runtime-fixture",
+      session,
+      message: makeMessage(session.id, run.id, "complete the bounded task"),
+      run,
+      context: minimalTuiContext(),
+      emit: () => undefined
+    });
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.diagnostics[0]?.code, "AGENT_TURN_LIMIT_REACHED");
+    assert.match(result.diagnostics[0]?.userAction ?? "", /partial result/i);
+    assert.deepEqual(
+      runner.runOptions.map((options) => options.maxTurns),
+      [2, 4]
+    );
+  });
+});
+
+test("Operator Agent stops repeated identical tool results with a no-progress diagnostic", async () => {
+  await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-no-progress-secret", async () => {
+    const runtime = new OperatorAgentRuntime({
+      runnerFactory: () => new RepeatedToolResultRunner(),
+      noProgressRepeatLimit: 3
+    });
+    const session = makeSession();
+    const run = makeRun(session.id);
+
+    const result = await runtime.execute({
+      relaybase: fakeRelaybaseRuntime(),
+      config: validAgentConfig(),
+      credential: "sk-or-explicit-runtime-fixture",
+      session,
+      message: makeMessage(session.id, run.id, "inspect without looping"),
+      run,
+      context: minimalTuiContext(),
+      emit: () => undefined
+    });
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.diagnostics[0]?.code, "AGENT_NO_PROGRESS");
+    assert.match(result.diagnostics[0]?.message ?? "", /3 times/);
   });
 });
 
@@ -333,6 +437,48 @@ test("Agent Gateway queues promptly, enforces one active run, and supports idemp
   });
 });
 
+test("disabling the Agent live aborts active model work and emits no later tool activity", async () => {
+  await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-live-disable-secret", async () => {
+    const gateway = new AgentGatewayService({
+      agentRuntime: new OperatorAgentRuntime({
+        runnerFactory: () => ({
+          async run() {
+            return new Promise(() => undefined);
+          }
+        })
+      })
+    });
+    try {
+      gateway.updateConfig({
+        enabled: true,
+        provider: {
+          modelSlug: "openrouter/test-model",
+          remoteModelEnabled: true,
+          apiKeyEnvVar: "RELAYBASE_TEST_OPENROUTER_KEY"
+        }
+      });
+      const relaybase = fakeRelaybaseRuntime();
+      const session = await gateway.createSession(relaybase, {});
+      const accepted = await gateway.addMessage(relaybase, session.id, { content: "keep inspecting" });
+      await waitFor(() => gateway.getRun(session.id, accepted.run.id).status === "running");
+
+      gateway.updateConfig({ enabled: false });
+      await waitFor(() => gateway.getRun(session.id, accepted.run.id).status === "cancelled");
+
+      const events = gateway.sessionEvents(session.id);
+      assert.equal(
+        events.some((event) => event.type === "tool.started"),
+        false
+      );
+      assert.equal(events.filter((event) => event.type === "run.failed").length, 1);
+      assert.equal(gateway.getRun(session.id, accepted.run.id).diagnostic?.code, "AGENT_RUN_CANCELLED");
+      assert.ok(gateway.auditEvents().some((event) => event.type === "agent.run_stopped_by_live_safety"));
+    } finally {
+      await gateway.close();
+    }
+  });
+});
+
 test("Agent Gateway includes only active thread recall in model prompt context", async () => {
   await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-thread-recall-secret", async () => {
     const fakeRunner = new FakeRunner("Thread context noted.");
@@ -402,6 +548,29 @@ test("Agent Gateway emits read-only tool lifecycle events from SDK stream", asyn
         false
       );
       assert.equal((streamed.find((event) => event.type === "tool.completed")?.data as any).toolName, "list_apps");
+      const startedActivity = (streamed.find((event) => event.type === "tool.started")?.data as any).activity;
+      const completedActivity = (streamed.find((event) => event.type === "tool.completed")?.data as any).activity;
+      assert.equal(startedActivity.label, "Listing registered apps");
+      assert.equal(startedActivity.state, "active");
+      assert.equal(completedActivity.id, startedActivity.id);
+      assert.equal(completedActivity.label, "Listed registered apps");
+      assert.equal(completedActivity.state, "completed");
+      const processing = streamed.filter((event) => event.type.startsWith("model.processing_"));
+      assert.deepEqual(
+        processing.map((event) => event.type),
+        [
+          "model.processing_started",
+          "model.processing_completed",
+          "model.processing_started",
+          "model.processing_completed"
+        ]
+      );
+      assert.equal((processing[0]?.data as any).activity.label, "Thinking");
+      assert.equal((processing[2]?.data as any).activity.label, "Reviewing tool result");
+      assert.deepEqual(
+        gateway.sessionEvents(session.id).find((event) => event.type === "tool.completed")?.data,
+        streamed.find((event) => event.type === "tool.completed")?.data
+      );
     } finally {
       unsubscribe();
     }
@@ -420,6 +589,7 @@ test("Operator Agent runtime does not emit started for approval-gated SDK tool c
     const result = await runtime.execute({
       relaybase: fakeApprovalRelaybaseRuntime().runtime,
       config: validAgentConfig(),
+      credential: "sk-or-explicit-runtime-fixture",
       session,
       message: makeMessage(session.id, run.id, "start notes"),
       run,
@@ -446,12 +616,14 @@ test("Operator Agent config filters offered tools and blocks read-only policy mu
     const runtime = new OperatorAgentRuntime({ runnerFactory: () => new FakeRunner("ok") });
     const allowedConfig: AgentConfig = {
       ...validAgentConfig(),
-      toolAllowlist: ["list_apps", "tail_logs"]
+      toolAllowlist: ["list_apps", "tail_logs"],
+      toolAllowlistMode: "explicit_allowlist"
     };
 
     const filtered = await runtime.execute({
       relaybase: fakeRelaybaseRuntime(),
       config: allowedConfig,
+      credential: "sk-or-explicit-runtime-fixture",
       session,
       message: makeMessage(session.id, run.id, "list apps"),
       run,
@@ -466,6 +638,7 @@ test("Operator Agent config filters offered tools and blocks read-only policy mu
     const blocked = await blockedRuntime.execute({
       relaybase: fakeApprovalRelaybaseRuntime().runtime,
       config: { ...validAgentConfig(), approvalPolicy: "read_only_only" },
+      credential: "sk-or-explicit-runtime-fixture",
       session,
       message: makeMessage(session.id, blockedRun.id, "start notes"),
       run: blockedRun,
@@ -496,6 +669,7 @@ test("Operator Agent model tools receive only canonical roots granted by trusted
     await trustedRuntime.execute({
       relaybase: fakeRelaybaseRuntime(),
       config: validAgentConfig(),
+      credential: "sk-or-explicit-runtime-fixture",
       session: trustedSession,
       message: makeMessage(trustedSession.id, trustedRun.id, "inspect the selected project"),
       run: trustedRun,
@@ -512,6 +686,7 @@ test("Operator Agent model tools receive only canonical roots granted by trusted
     await unauthorizedRuntime.execute({
       relaybase: fakeRelaybaseRuntime(),
       config: validAgentConfig(),
+      credential: "sk-or-explicit-runtime-fixture",
       session: unauthorizedSession,
       message: makeMessage(unauthorizedSession.id, unauthorizedRun.id, "inspect a different project"),
       run: unauthorizedRun,
@@ -1140,7 +1315,7 @@ test("Agent Gateway persists an exact setup preview binding and drift performs z
   });
 });
 
-test("Operator Agent runtime reports provider timeout without fake output", async () => {
+test("Operator Agent runtime reports inactivity timeout without fake output", async () => {
   await withEnvAsync("RELAYBASE_TEST_OPENROUTER_KEY", "sk-or-timeout-secret", async () => {
     const runtime = new OperatorAgentRuntime({
       timeoutMs: 5,
@@ -1157,6 +1332,7 @@ test("Operator Agent runtime reports provider timeout without fake output", asyn
     const result = await runtime.execute({
       relaybase,
       config: validAgentConfig(),
+      credential: "sk-or-explicit-runtime-fixture",
       session,
       message,
       run,
@@ -1165,8 +1341,14 @@ test("Operator Agent runtime reports provider timeout without fake output", asyn
     });
 
     assert.equal(result.status, "failed");
-    assert.equal(result.diagnostics[0]?.code, "AGENT_PROVIDER_TIMEOUT");
-    assert.deepEqual(events, ["model.request_started", "diagnostic", "blocked"]);
+    assert.equal(result.diagnostics[0]?.code, "AGENT_INACTIVITY_TIMEOUT");
+    assert.deepEqual(events, [
+      "model.request_started",
+      "model.processing_started",
+      "model.processing_failed",
+      "diagnostic",
+      "blocked"
+    ]);
   });
 });
 
@@ -1239,6 +1421,7 @@ test("Operator Agent enables OpenRouter reasoning provider data by default", () 
       }
     }
   });
+  assert.equal(operatorAgentModelSettings("low", 1024).maxTokens, 1024);
 });
 
 test("RA007 mutating tools exist but default model execution path is approval gated", async () => {
@@ -1340,6 +1523,90 @@ class FakeRunner implements OperatorAgentRunner {
   }
 }
 
+class SegmentedContinuationRunner implements OperatorAgentRunner {
+  readonly failSegments: number;
+  readonly inputs: unknown[] = [];
+  readonly runOptions: Record<string, unknown>[] = [];
+  readonly states: object[] = [];
+
+  constructor(failSegments: number) {
+    this.failSegments = failSegments;
+  }
+
+  async run(_agent: unknown, input: unknown, options?: Record<string, unknown>): Promise<any> {
+    this.inputs.push(input);
+    this.runOptions.push(options ?? {});
+    if (this.inputs.length <= this.failSegments) {
+      const state = { checkpoint: this.inputs.length };
+      this.states.push(state);
+      const error = Object.assign(new Error(`Max turns (${String(options?.maxTurns)}) exceeded`), {
+        name: "MaxTurnsExceededError",
+        state
+      });
+      return {
+        finalOutput: "",
+        completed: Promise.resolve(),
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              throw error;
+            }
+          };
+        }
+      };
+    }
+    return {
+      finalOutput: "Long task completed.",
+      usage: { inputTokens: 30, outputTokens: 10 },
+      completed: Promise.resolve(),
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            return { done: true as const, value: undefined };
+          }
+        };
+      }
+    };
+  }
+}
+
+class RepeatedToolResultRunner implements OperatorAgentRunner {
+  async run(): Promise<any> {
+    return {
+      finalOutput: "",
+      completed: Promise.resolve(),
+      async *[Symbol.asyncIterator]() {
+        for (let index = 1; index <= 3; index += 1) {
+          yield {
+            type: "run_item_stream_event",
+            name: "tool_called",
+            item: {
+              rawItem: {
+                type: "function_call",
+                callId: `repeat-${index}`,
+                name: "list_apps",
+                arguments: "{}"
+              }
+            }
+          };
+          yield {
+            type: "run_item_stream_event",
+            name: "tool_output",
+            item: {
+              rawItem: {
+                type: "function_call_result",
+                callId: `repeat-${index}`,
+                name: "list_apps",
+                output: JSON.stringify({ tool: "list_apps", status: "succeeded", data: { apps: [] } })
+              }
+            }
+          };
+        }
+      }
+    };
+  }
+}
+
 class ReadOnlyToolRunner implements OperatorAgentRunner {
   async run(): Promise<any> {
     const result = {
@@ -1355,6 +1622,7 @@ class ReadOnlyToolRunner implements OperatorAgentRunner {
       newItems: [{ type: "tool_call_output_item" }],
       completed: Promise.resolve(),
       async *[Symbol.asyncIterator]() {
+        yield { type: "raw_model_stream_event", data: { type: "response.created", response: { id: "response-1" } } };
         yield {
           type: "run_item_stream_event",
           name: "tool_called",
@@ -1379,6 +1647,7 @@ class ReadOnlyToolRunner implements OperatorAgentRunner {
             }
           }
         };
+        yield { type: "raw_model_stream_event", data: { type: "response.created", response: { id: "response-2" } } };
         yield { data: { delta: "Sample App" } };
       }
     };

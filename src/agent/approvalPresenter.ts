@@ -27,8 +27,15 @@ export async function buildApprovalPreview(input: {
   const changedFields = manifestFieldsChanged(input.arguments);
   const envKeys = envKeysChanged(input.arguments);
   const runtime = runtimeSummary(input.previewData, input.arguments);
+  const consequences = approvalConsequences(input.policy, {
+    fileWrites: fileWrites.length,
+    manifestFields: changedFields,
+    envKeys,
+    selectedCommand: runtime.selectedCommand?.preview
+  });
 
   return {
+    phase: "approval",
     action: input.policy.name,
     ...(target ? { target } : {}),
     ...(currentStatus ? { currentStatus } : {}),
@@ -48,6 +55,16 @@ export async function buildApprovalPreview(input: {
     ...(runtime.portStrategyCandidates.length ? { portStrategyCandidates: runtime.portStrategyCandidates } : {}),
     ...(runtime.setupQuestions.length ? { setupQuestions: runtime.setupQuestions } : {}),
     ...(healthRouteChosen(input.arguments) ? { healthRoute: healthRouteChosen(input.arguments) } : {}),
+    whyApproval: consequences.whyApproval,
+    willChange: consequences.willChange,
+    willPreserve: consequences.willPreserve,
+    willRun: consequences.willRun,
+    proof: consequences.proof,
+    ...(text(input.arguments.expectedRevision) ? { revision: text(input.arguments.expectedRevision) } : {}),
+    ...(previewText(input.previewData, "expiresAt") ? { expiresAt: previewText(input.previewData, "expiresAt") } : {}),
+    ...(previewStringArray(input.previewData, "blockers").length
+      ? { blockedReasons: previewStringArray(input.previewData, "blockers") }
+      : {}),
     mayIncludeSensitiveData: input.policy.sensitiveData || fileWrites.length > 0 || envKeys.length > 0,
     confirmationOptions: {
       approveEndpoint: `/__hub/api/agent/approvals/${encodeURIComponent(input.approvalId)}/approve`,
@@ -55,6 +72,50 @@ export async function buildApprovalPreview(input: {
       rejectOnEsc: true
     }
   };
+}
+
+function approvalConsequences(
+  policy: ToolPolicy,
+  input: { fileWrites: number; manifestFields: string[]; envKeys: string[]; selectedCommand?: string }
+) {
+  const lifecycle = policy.category === "lifecycle" || ["start_app", "stop_app", "restart_app"].includes(policy.name);
+  const willChange = [
+    ...(lifecycle ? ["Managed runtime process state"] : []),
+    ...(input.fileWrites ? [`${input.fileWrites} approved file write(s)`] : []),
+    ...(input.manifestFields.length ? [`Manifest fields: ${input.manifestFields.join(", ")}`] : []),
+    ...(input.envKeys.length ? [`Environment references: ${input.envKeys.join(", ")}`] : []),
+    ...(policy.category === "export" ? ["A redacted log export artifact"] : [])
+  ];
+  return {
+    whyApproval:
+      policy.category === "read" || policy.category === "tui"
+        ? "This action is read-only."
+        : `This ${policy.category} action can change local files, managed processes, or durable Relaybase state.`,
+    willChange: willChange.length ? willChange : [policy.expectedResult],
+    willPreserve: ["Stable app and package IDs", "Unrelated project files", "Existing logs and operation history"],
+    willRun: [
+      ...(input.selectedCommand ? [input.selectedCommand] : []),
+      ...(lifecycle ? [`Daemon-owned ${policy.name.replaceAll("_", " ")} operation`] : [])
+    ],
+    proof: [policy.expectedResult, "Daemon returns a correlated terminal result or an inspectable failure."]
+  };
+}
+
+function previewText(value: unknown, key: string): string | undefined {
+  const record = objectRecord(value);
+  return text(record?.[key]) ?? text(objectRecord(record?.preview)?.[key]);
+}
+
+function previewStringArray(value: unknown, key: string): string[] {
+  const record = objectRecord(value);
+  const direct = record?.[key] ?? objectRecord(record?.preview)?.[key];
+  if (!Array.isArray(direct)) return [];
+  return direct.flatMap((entry) => {
+    if (typeof entry === "string") return entry.trim() ? [entry.trim()] : [];
+    const item = objectRecord(entry);
+    const message = text(item?.message) ?? text(item?.reason) ?? text(item?.code);
+    return message ? [message] : [];
+  });
 }
 
 async function targetSummary(

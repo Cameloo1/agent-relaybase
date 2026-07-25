@@ -30,7 +30,12 @@ test("RA007 registry exposes read and gated mutation tools", () => {
     "list_apps",
     "get_app_state",
     "get_app_group",
+    "get_current_context",
+    "get_agent_capabilities",
+    "explain_app_problem",
     "get_diagnostics",
+    "get_operation_status",
+    "list_operations",
     "tail_logs",
     "search_logs",
     "project_list_files",
@@ -38,6 +43,7 @@ test("RA007 registry exposes read and gated mutation tools", () => {
     "project_read_file",
     "project_detect_start_commands",
     "project_inspect_package_scripts",
+    "discover_project_roots",
     "start_app",
     "stop_app",
     "restart_app",
@@ -65,7 +71,12 @@ test("RA007 registry exposes read and gated mutation tools", () => {
     "list_apps",
     "get_app_state",
     "get_app_group",
+    "get_current_context",
+    "get_agent_capabilities",
+    "explain_app_problem",
     "get_diagnostics",
+    "get_operation_status",
+    "list_operations",
     "tail_logs",
     "search_logs",
     "project_list_files",
@@ -73,6 +84,7 @@ test("RA007 registry exposes read and gated mutation tools", () => {
     "project_read_file",
     "project_detect_start_commands",
     "project_inspect_package_scripts",
+    "discover_project_roots",
     "detect_project",
     "plan_app_setup",
     "preview_setup_writes",
@@ -173,7 +185,12 @@ test("AGENT-TUI-MATRIX-004 read-only tool matrix runs without approval or daemon
     { name: "list_apps", input: {} },
     { name: "get_app_state", input: { appId: "notes-web" } },
     { name: "get_app_group", input: { groupId: "notes" } },
+    { name: "get_current_context", input: {} },
+    { name: "get_agent_capabilities", input: {} },
+    { name: "explain_app_problem", input: { appId: "notes-web" } },
     { name: "get_diagnostics", input: { includeLogStore: true } },
+    { name: "get_operation_status", input: { operationId: "missing-operation" } },
+    { name: "list_operations", input: { limit: 10 } },
     { name: "tail_logs", input: { appId: "notes-web", limit: 10 } },
     { name: "search_logs", input: { appId: "notes-web", query: "ready", limit: 10 } },
     { name: "project_list_files", input: { projectRoot: project } },
@@ -181,6 +198,7 @@ test("AGENT-TUI-MATRIX-004 read-only tool matrix runs without approval or daemon
     { name: "project_read_file", input: { projectRoot: project, path: "package.json" } },
     { name: "project_detect_start_commands", input: { projectRoot: project } },
     { name: "project_inspect_package_scripts", input: { projectRoot: project } },
+    { name: "discover_project_roots", input: { projectRoot: project } },
     { name: "detect_project", input: { cwd: project } },
     { name: "plan_app_setup", input: { cwd: project } },
     { name: "preview_setup_writes", input: { cwd: project, commandHint: "npm.cmd run dev" } },
@@ -221,6 +239,14 @@ test("agent-managed project inspection tools are scoped, bounded, and redacted",
     "src/settings.json": JSON.stringify({ apiKey: "rk_custom_unrecognized", clientSecret: "custom-json-secret" }),
     "src/settings.yaml": "privateKey: custom-yaml-private\naccessKey: custom-yaml-access\n",
     "src/settings.toml": 'databaseUrl = "custom-toml-uri"\nsessionToken = "custom-toml-session"\n',
+    "relaybase.app.json": JSON.stringify({
+      schemaVersion: 1,
+      id: "project-inspect",
+      name: "Project Inspect",
+      command: "npm.cmd run dev",
+      protocol: "http",
+      healthUrl: "/"
+    }),
     ".env": "OPENROUTER_API_KEY=sk-project-secret\n",
     "node_modules/ignored/index.js": "console.log('ignored');"
   });
@@ -235,6 +261,31 @@ test("agent-managed project inspection tools are scoped, bounded, and redacted",
   assert.doesNotMatch(listedJson, /node_modules\/ignored/);
   assert.doesNotMatch(listedJson, /\.env/);
   assert.match(listedJson, /"environment":1/);
+
+  const grantId = context.projectRootGrants?.[0]?.grantId;
+  assert.ok(grantId);
+  const selectedByGrant = await executeRelaybaseAgentTool(
+    "project_list_files",
+    { projectRootGrantId: grantId },
+    context
+  );
+  assert.equal(selectedByGrant.status, "succeeded");
+
+  const manifestUsedAsRoot = await executeRelaybaseAgentTool(
+    "project_list_files",
+    { projectRoot: path.join(project, "relaybase.app.json") },
+    context
+  );
+  assert.equal(manifestUsedAsRoot.status, "succeeded");
+  assert.match(JSON.stringify(manifestUsedAsRoot), /relaybase\.app\.json/);
+
+  const staleGrant = await executeRelaybaseAgentTool(
+    "project_list_files",
+    { projectRootGrantId: "project_stale" },
+    context
+  );
+  assert.equal(staleGrant.status, "diagnostic");
+  assert.equal(staleGrant.diagnostic?.code, "PROJECT_ROOT_GRANT_NOT_FOUND");
 
   const searched = await executeRelaybaseAgentTool(
     "project_search_files",

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { targets } from "./tui-go.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const windowsNativeBinaries = ["x64", "arm64"].map((arch) => `relaybase_windows-win32-${arch}.node`);
 
 export function inspectAuthenticodeBuffer(input) {
   const data = Buffer.isBuffer(input) ? input : Buffer.from(input);
@@ -169,9 +170,12 @@ function unsigned(reason, certificates = []) {
 function cliPaths(args) {
   const explicit = args.filter((argument) => !argument.startsWith("--"));
   if (explicit.length > 0) return explicit.map((entry) => path.resolve(entry));
-  return targets
-    .filter((target) => target.goos === "windows")
-    .map((target) => path.join(root, "bin", "relaybase-tui", target.binary));
+  return [
+    ...targets
+      .filter((target) => target.goos === "windows")
+      .map((target) => path.join(root, "bin", "relaybase-tui", target.binary)),
+    ...windowsNativeBinaries.map((binary) => path.join(root, "dist-runtime", "native", binary))
+  ];
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

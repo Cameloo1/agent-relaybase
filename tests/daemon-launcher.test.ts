@@ -50,6 +50,9 @@ test("daemon discovery proves Relaybase identity, state directory, and authentic
   assert.equal(result.authenticated, true);
   assert.equal(result.stateDirMatches, true);
   assert.equal(result.daemonStateDir, stateDir);
+  assert.equal(result.instanceId, "daemon-fixture-instance");
+  assert.equal(result.pid, 4242);
+  assert.equal(result.startedAt, "2026-07-23T00:00:00.000Z");
 });
 
 test("daemon discovery reports a state mismatch without reading or copying the daemon token", async (t) => {
@@ -126,7 +129,12 @@ async function discoveryServer(
         JSON.stringify({
           product: "Relaybase",
           package: "@cameloo/relaybase",
-          auth: { stateDir, tokenPresent: true }
+          auth: { stateDir, tokenPresent: true },
+          daemon: {
+            instanceId: "daemon-fixture-instance",
+            pid: 4242,
+            startedAt: "2026-07-23T00:00:00.000Z"
+          }
         })
       );
       return;

@@ -28,6 +28,7 @@ import {
   type DaemonReachability
 } from "../src/tuiBridge.ts";
 import type { DaemonEnsureResult } from "../src/daemonLauncher.ts";
+import type { DaemonRestartResult } from "../src/daemonRestartClient.ts";
 import { arrowSelectCursorRows } from "../src/cliPrompt.ts";
 import { normalizeManifest, validateAppId } from "../src/validation.ts";
 import { compileLaunchPlan } from "../src/launchPlan.ts";
@@ -37,6 +38,8 @@ import {
   renderCleanWorktreeResult,
   runCleanWorktree
 } from "../scripts/check-worktree-clean.mjs";
+import { parseNpmPackJson } from "../scripts/npm-pack-json.mjs";
+import { containsCredentialFixtureLiteral } from "../scripts/package-check.mjs";
 import {
   buildDoctorReport,
   currentPlatformDevelopmentBinaryPath,
@@ -165,6 +168,8 @@ test("process manager passes assigned port and spaced arguments through structur
     }
   });
   const manager = new ProcessManager(registry, { portRangeStart: 18100, portRangeEnd: 18199 });
+  const runtimeReasons: string[] = [];
+  const unsubscribeRuntime = manager.subscribeRuntimeChanges((event) => runtimeReasons.push(event.reason));
   try {
     const started = await manager.start("structured-process");
     assert.equal(started.status, "running");
@@ -177,6 +182,51 @@ test("process manager passes assigned port and spaced arguments through structur
     const stopped = await manager.stop("structured-process");
     assert.equal(stopped.status, "stopped");
     assert.equal(stopped.stopVerification?.portClosureVerified, true);
+    unsubscribeRuntime();
+  }
+  assert.ok(runtimeReasons.includes("start_requested"));
+  assert.ok(runtimeReasons.includes("start_ready"));
+  assert.ok(runtimeReasons.includes("stop_requested"));
+  assert.ok(runtimeReasons.includes("stopped"));
+});
+
+test("shared external ports fail closed instead of marking every registered app running", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-shared-port-state-"));
+  const server = http.createServer((_request, response) => {
+    response.statusCode = 200;
+    response.end("ok");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  const registry = new Registry(stateDir);
+  await registry.load();
+  for (const id of ["shared-one", "shared-two"]) {
+    await registry.upsertManifest({
+      id,
+      name: id,
+      command: "external",
+      cwd: ".",
+      protocol: "http",
+      healthUrl: "/",
+      upstreamPort: port
+    });
+  }
+  const manager = new ProcessManager(registry);
+
+  try {
+    const statuses = await manager.listStatuses();
+    assert.deepEqual(
+      statuses.map((app) => app.runtime.status),
+      ["degraded", "degraded"]
+    );
+    assert.equal(
+      statuses.some((app) => app.runtime.status === "running"),
+      false
+    );
+    assert.ok(statuses.every((app) => app.runtime.blockingReason === "external_port_shared"));
+    assert.equal(await manager.getProxyTarget(statuses[0]!), undefined);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
 });
 
@@ -515,6 +565,104 @@ test("TUI bridge forwards args and child exit code without shell spawn", async (
   assert.equal(spawned?.options.stdio, "inherit");
   assert.equal(spawned?.options.env.RELAYBASE_URL, "http://127.0.0.1:7777");
   assert.equal(spawned?.options.env.RELAYBASE_TUI_CURRENT_DIRECTORY, path.join(os.tmpdir(), "relaybase-project"));
+});
+
+test("TUI bridge restart flag completes daemon replacement before spawning the TUI", async () => {
+  const packageRoot = path.join(os.tmpdir(), "relaybase-package-restart");
+  const expectedBinary = path.join(packageRoot, "bin", "relaybase-tui", "relaybase-tui-linux-amd64");
+  const calls: string[] = [];
+  const exitCode = await runRelaybaseTui(
+    {
+      host: "127.0.0.1",
+      port: 7777,
+      stateDir: path.join(os.tmpdir(), "relaybase-restart-state"),
+      env: {},
+      packageRoot,
+      platform: "linux",
+      arch: "x64",
+      restartDaemonOnLaunch: true
+    },
+    ["--smoke-render"],
+    {
+      restartDaemon: async (): Promise<DaemonRestartResult> => {
+        calls.push("restart");
+        return {
+          reachable: true,
+          compatible: true,
+          authenticated: true,
+          started: true,
+          restarted: true,
+          code: "daemon_restarted",
+          userAction: "Relaybase restarted.",
+          requestId: "restart_test",
+          oldInstanceId: "old",
+          newInstanceId: "new"
+        };
+      },
+      checkDaemon: async () => {
+        calls.push("check");
+        return { reachable: true, statusCode: 200, message: "OK" };
+      },
+      fileExists: async (filePath) => filePath === expectedBinary,
+      spawn: () => {
+        calls.push("spawn");
+        const child = new EventEmitter() as import("node:child_process").ChildProcess;
+        setTimeout(() => child.emit("exit", 0, null), 0);
+        return child;
+      }
+    }
+  );
+
+  assert.equal(exitCode, 0);
+  assert.deepEqual(calls, ["restart", "check", "spawn"]);
+});
+
+test("TUI bridge restart flag blocks launch and emits recovery guidance when replacement fails", async () => {
+  const packageRoot = path.join(os.tmpdir(), "relaybase-package-restart-failed");
+  const expectedBinary = path.join(packageRoot, "bin", "relaybase-tui", "relaybase-tui-linux-amd64");
+  let spawned = false;
+  let stderr = "";
+  const exitCode = await runRelaybaseTui(
+    {
+      host: "127.0.0.1",
+      port: 7777,
+      stateDir: path.join(os.tmpdir(), "relaybase-restart-state-failed"),
+      env: {},
+      packageRoot,
+      platform: "linux",
+      arch: "x64",
+      restartDaemonOnLaunch: true
+    },
+    [],
+    {
+      restartDaemon: async (): Promise<DaemonRestartResult> => ({
+        reachable: true,
+        compatible: true,
+        authenticated: true,
+        started: false,
+        restarted: false,
+        code: "daemon_restart_blocked",
+        userAction: "Wait for active Agent work.",
+        requestId: "restart_blocked"
+      }),
+      fileExists: async (filePath) => filePath === expectedBinary,
+      spawn: () => {
+        spawned = true;
+        return new EventEmitter() as import("node:child_process").ChildProcess;
+      },
+      stderr: {
+        write: (chunk: string | Uint8Array) => {
+          stderr += String(chunk);
+          return true;
+        }
+      }
+    }
+  );
+
+  assert.equal(exitCode, 1);
+  assert.equal(spawned, false);
+  assert.match(stderr, /daemon_restart_blocked/);
+  assert.match(stderr, /Wait for active Agent work/);
 });
 
 test("TUI bridge starts Relaybase daemon before spawning when daemon is unavailable", async () => {
@@ -1348,7 +1496,11 @@ test("package check uses and removes a disposable OS-temp npm cache by default",
           stdout: JSON.stringify([
             {
               filename: "cameloo-relaybase-0.1.0.tgz",
-              files: [{ path: "dist-runtime/cli.js" }, { path: "dist-runtime/daemonLauncher.js" }]
+              files: [
+                { path: "dist-runtime/cli.js" },
+                { path: "dist-runtime/daemonLauncher.js" },
+                { path: "dist-runtime/native/relaybase_windows-win32-x64.node" }
+              ]
             }
           ]),
           stderr: ""
@@ -1376,6 +1528,23 @@ test("package check uses and removes a disposable OS-temp npm cache by default",
   }
 });
 
+test("npm pack JSON parsing tolerates native prepack lifecycle output", () => {
+  const payload = [
+    "Relaybase Windows native module: dist-runtime\\native\\relaybase_windows-win32-x64.node",
+    "gyp info ok",
+    JSON.stringify([{ filename: "cameloo-relaybase-0.1.0.tgz", files: [{ path: "dist-runtime/cli.js" }] }])
+  ].join("\n");
+  const parsed = parseNpmPackJson(payload);
+  assert.equal(parsed?.[0]?.filename, "cameloo-relaybase-0.1.0.tgz");
+  assert.equal(parsed?.[0]?.files?.[0]?.path, "dist-runtime/cli.js");
+});
+
+test("package credential-fixture scan rejects literal secrets without rejecting redaction patterns", () => {
+  assert.equal(containsCredentialFixtureLiteral('const key = "sk-or-live-fixture-secret";'), true);
+  assert.equal(containsCredentialFixtureLiteral("const pattern = /sk-or-[A-Za-z0-9._-]+/g;"), false);
+  assert.equal(containsCredentialFixtureLiteral('const safe = "sk-or-[redacted]";'), false);
+});
+
 test("package check preserves a user-supplied npm cache override", async () => {
   const previousPackageCheckCache = process.env.RELAYBASE_PACKAGE_NPM_CACHE;
   const configuredCache = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-user-package-cache-"));
@@ -1394,7 +1563,11 @@ test("package check preserves a user-supplied npm cache override", async () => {
           stdout: JSON.stringify([
             {
               filename: "cameloo-relaybase-0.1.0.tgz",
-              files: [{ path: "dist-runtime/cli.js" }, { path: "dist-runtime/daemonLauncher.js" }]
+              files: [
+                { path: "dist-runtime/cli.js" },
+                { path: "dist-runtime/daemonLauncher.js" },
+                { path: "dist-runtime/native/relaybase_windows-win32-x64.node" }
+              ]
             }
           ]),
           stderr: ""
@@ -2207,6 +2380,36 @@ test("durable log store handles huge log payloads", async () => {
   assert.equal(result.events[0]?.message, hugeMessage);
   assert.equal(store.health().status, "healthy");
   await store.close();
+});
+
+test("durable log store preserves typed lifecycle sources across reopen", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-log-lifecycle-sources-"));
+  const store = await LogStore.open(stateDir);
+  const sources = [
+    "lifecycle_starting",
+    "process",
+    "lifecycle_stopping",
+    "lifecycle_stopped",
+    "lifecycle_stop_failed"
+  ] as const;
+
+  for (const source of sources) {
+    await store.append({
+      appId: "lifecycle-app",
+      stream: source === "process" ? "stdout" : "system",
+      source,
+      message: source
+    });
+  }
+  await store.close();
+
+  const reopened = await LogStore.open(stateDir);
+  const recovered = await reopened.query({ appId: "lifecycle-app", limit: 20 });
+  assert.deepEqual(
+    recovered.events.map((event) => event.source),
+    sources
+  );
+  await reopened.close();
 });
 
 test("durable log store unavailable path degrades with diagnostics", async () => {

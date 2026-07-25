@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { resolveGroupTarget, safeToolExecute, successResult, type RelaybaseAgentToolDefinition } from "./common.ts";
+import { summarizeGroupHealth } from "../appExplanation.ts";
 
 const parameters = z
   .object({
@@ -24,7 +25,10 @@ export function createGetAppGroupTool(): RelaybaseAgentToolDefinition<z.infer<ty
           return resolved;
         }
         const group = resolved.state.groups.find((entry) => entry.groupId === resolved.groupId);
-        return successResult(definition.name, { group });
+        return successResult(definition.name, {
+          group,
+          healthSummary: group ? summarizeGroupHealth(group) : undefined
+        });
       })
   };
   return definition;

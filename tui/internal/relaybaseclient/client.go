@@ -231,16 +231,224 @@ func (c *Client) GetAgentConfig(ctx context.Context) (*AgentConfig, error) {
 	return &response.Agent.Config, nil
 }
 
-func (c *Client) UpdateAgentConfig(ctx context.Context, update AgentConfigUpdate) (*AgentConfig, error) {
+func (c *Client) UpdateAgentConfig(ctx context.Context, request AgentConfigUpdateRequest) (*AgentConfig, error) {
 	var response struct {
 		Agent struct {
 			Config AgentConfig `json:"config"`
 		} `json:"agent"`
 	}
-	if _, err := c.putJSON(ctx, "/__hub/api/agent/config", update, &response); err != nil {
+	if _, err := c.putJSON(ctx, "/__hub/api/agent/config", request, &response); err != nil {
 		return nil, err
 	}
 	return &response.Agent.Config, nil
+}
+
+func (c *Client) ReloadAgentConfig(ctx context.Context) (*AgentConfigReloadResult, error) {
+	var response struct {
+		Agent struct {
+			Reload AgentConfigReloadResult `json:"reload"`
+		} `json:"agent"`
+	}
+	if _, err := c.postJSON(ctx, "/__hub/api/agent/config/reload", map[string]any{}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Agent.Reload, nil
+}
+
+func (c *Client) GetAgentProviderStatus(ctx context.Context) (*AgentProviderStatus, error) {
+	var response struct {
+		Agent struct {
+			Provider AgentProviderStatus `json:"provider"`
+		} `json:"agent"`
+	}
+	if _, err := c.getJSON(ctx, "/__hub/api/agent/provider/openrouter/status", &response); err != nil {
+		return nil, err
+	}
+	return &response.Agent.Provider, nil
+}
+
+func (c *Client) StartAgentProviderConnection(ctx context.Context, mode string) (*AgentProviderAttempt, error) {
+	var response struct {
+		Agent struct {
+			Provider struct {
+				Attempt AgentProviderAttempt `json:"attempt"`
+			} `json:"provider"`
+		} `json:"agent"`
+	}
+	if mode != "replace" {
+		mode = "connect"
+	}
+	if _, err := c.postJSON(ctx, "/__hub/api/agent/provider/openrouter/"+mode, map[string]any{
+		"openBrowser": true,
+	}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Agent.Provider.Attempt, nil
+}
+
+func (c *Client) DisconnectAgentProvider(ctx context.Context) (*AgentProviderDisconnectResult, error) {
+	var response struct {
+		Agent struct {
+			Provider AgentProviderDisconnectResult `json:"provider"`
+		} `json:"agent"`
+	}
+	if _, err := c.postJSON(ctx, "/__hub/api/agent/provider/openrouter/disconnect", map[string]any{
+		"confirm": "disconnect_local_only",
+	}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Agent.Provider, nil
+}
+
+func (c *Client) MigrateAgentProvider(ctx context.Context) (*AgentProviderMigrationResult, error) {
+	var response struct {
+		Agent struct {
+			Provider AgentProviderMigrationResult `json:"provider"`
+		} `json:"agent"`
+	}
+	if _, err := c.postJSON(ctx, "/__hub/api/agent/provider/openrouter/migrate", map[string]any{
+		"confirm": "migrate_to_windows_dpapi",
+	}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Agent.Provider, nil
+}
+
+func (c *Client) ValidateAgentProvider(ctx context.Context) (*AgentProviderValidationResult, error) {
+	var response struct {
+		Agent struct {
+			Provider AgentProviderValidationResult `json:"provider"`
+		} `json:"agent"`
+	}
+	if _, err := c.postJSON(ctx, "/__hub/api/agent/provider/openrouter/validate", map[string]any{}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Agent.Provider, nil
+}
+
+func (c *Client) PreviewAgentProviderRevoke(ctx context.Context) (*AgentProviderRevokePreview, error) {
+	var response struct {
+		Agent struct {
+			Provider AgentProviderRevokePreview `json:"provider"`
+		} `json:"agent"`
+	}
+	if _, err := c.postJSON(ctx, "/__hub/api/agent/provider/openrouter/revoke/preview", map[string]any{}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Agent.Provider, nil
+}
+
+func (c *Client) PreviewLegacyAgentCredentialRemoval(ctx context.Context) (*AgentLegacyCredentialRemovalPreview, error) {
+	var response struct {
+		Agent struct {
+			Provider struct {
+				LegacyRemoval AgentLegacyCredentialRemovalPreview `json:"legacyRemoval"`
+			} `json:"provider"`
+		} `json:"agent"`
+	}
+	if _, err := c.postJSON(ctx, "/__hub/api/agent/provider/openrouter/legacy-removal/preview", map[string]any{}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Agent.Provider.LegacyRemoval, nil
+}
+
+func (c *Client) ApplyLegacyAgentCredentialRemoval(ctx context.Context, previewID string) (*AgentLegacyCredentialRemovalResult, error) {
+	var response struct {
+		Agent struct {
+			Provider struct {
+				LegacyRemoval AgentLegacyCredentialRemovalResult `json:"legacyRemoval"`
+			} `json:"provider"`
+		} `json:"agent"`
+	}
+	if _, err := c.postJSON(ctx, "/__hub/api/agent/provider/openrouter/legacy-removal/apply", map[string]any{
+		"confirm":   "remove_legacy_external_credential",
+		"previewId": previewID,
+	}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Agent.Provider.LegacyRemoval, nil
+}
+
+func (c *Client) DiagnoseAgentSecurity(ctx context.Context, online bool) (*AgentSecurityStatus, error) {
+	var response struct {
+		Agent struct {
+			Security AgentSecurityStatus `json:"security"`
+		} `json:"agent"`
+	}
+	if _, err := c.postJSON(ctx, "/__hub/api/agent/security/diagnose", map[string]any{
+		"online": online,
+	}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Agent.Security, nil
+}
+
+func (c *Client) PreviewAgentSecurityRepair(ctx context.Context, request AgentSecurityRepairPreviewRequest) (*AgentSecurityRepairPreview, error) {
+	var response struct {
+		Agent struct {
+			Security struct {
+				Repair struct {
+					Preview AgentSecurityRepairPreview `json:"preview"`
+				} `json:"repair"`
+			} `json:"security"`
+		} `json:"agent"`
+	}
+	if _, err := c.postJSON(ctx, "/__hub/api/agent/security/repair/preview", request, &response); err != nil {
+		return nil, err
+	}
+	return &response.Agent.Security.Repair.Preview, nil
+}
+
+func (c *Client) ApplyAgentSecurityRepair(ctx context.Context, previewID string, idempotencyKey string, confirmation string) (*AgentSecurityRepairOperation, error) {
+	var response struct {
+		Agent struct {
+			Security struct {
+				Repair struct {
+					Operation AgentSecurityRepairOperation `json:"operation"`
+				} `json:"repair"`
+			} `json:"security"`
+		} `json:"agent"`
+	}
+	if _, err := c.postJSON(ctx, "/__hub/api/agent/security/repair/apply", map[string]any{
+		"previewId":      previewID,
+		"idempotencyKey": idempotencyKey,
+		"confirmation":   confirmation,
+	}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Agent.Security.Repair.Operation, nil
+}
+
+func (c *Client) GetAgentSecurityRepairOperation(ctx context.Context, operationID string) (*AgentSecurityRepairOperation, error) {
+	var response struct {
+		Agent struct {
+			Security struct {
+				Repair struct {
+					Operation AgentSecurityRepairOperation `json:"operation"`
+				} `json:"repair"`
+			} `json:"security"`
+		} `json:"agent"`
+	}
+	if _, err := c.getJSON(ctx, "/__hub/api/agent/security/repair/operations/"+url.PathEscape(operationID), &response); err != nil {
+		return nil, err
+	}
+	return &response.Agent.Security.Repair.Operation, nil
+}
+
+func (c *Client) GetLatestAgentSecurityRepairOperation(ctx context.Context) (*AgentSecurityRepairOperation, error) {
+	var response struct {
+		Agent struct {
+			Security struct {
+				Repair struct {
+					Operation *AgentSecurityRepairOperation `json:"operation"`
+				} `json:"repair"`
+			} `json:"security"`
+		} `json:"agent"`
+	}
+	if _, err := c.getJSON(ctx, "/__hub/api/agent/security/repair/operations/latest", &response); err != nil {
+		return nil, err
+	}
+	return response.Agent.Security.Repair.Operation, nil
 }
 
 func (c *Client) CreateAgentSession(ctx context.Context, request AgentSessionCreateRequest) (*AgentSession, error) {

@@ -1,174 +1,153 @@
-# TUI Operator Agent OpenRouter Plan
+# Operator Agent OpenRouter provider
 
-This document defines the OpenRouter provider contract for Relaybase's own in-TUI Operator Agent. As of RA010, Relaybase has a daemon Agent Gateway config/session/event API, an isolated OpenRouter compatibility adapter for the OpenAI Agents SDK TypeScript Chat Completions path, a daemon runtime that uses that adapter when remote mode, model slug, and key source are configured, a real Relaybase tool registry, durable redacted session/audit storage, and Go TUI integration through the Agent Gateway. The RA005 live smoke proves provider compatibility when `OPENROUTER_API_KEY` and `RELAYBASE_AGENT_MODEL` are set. Runtime execution exposes read-only tools plus approval-gated daemon lifecycle, export, setup, manifest, registration, prove/open, env override, and TUI-proposed-action tools.
+This document describes the current OpenRouter provider path for Relaybase's built-in Operator Agent. It is a contributor/provider reference; user setup begins in [Operator Agent](operator-agent.md).
 
-## Provider Boundary
+The provider boundary belongs to the TypeScript daemon Agent Gateway. The Go TUI displays configuration status, messages, activity, usage, diagnostics, and approvals but never stores a raw provider key or calls OpenRouter directly.
 
-OpenRouter configuration belongs to the TypeScript daemon Agent Gateway, not the Go TUI. The TUI may show provider status, missing-key diagnostics, model choices, budget state, and approval prompts. It must not store or send raw API keys.
+## Connection and configuration
 
-## Configuration
+On Windows, the normal path is `/settings` → **Agent** → **Provider** → **Connect OpenRouter**. Relaybase:
 
-RA004 daemon Agent Gateway configuration model:
+1. creates a one-use S256 PKCE verifier and loopback callback on `127.0.0.1`;
+2. opens the OpenRouter authorization page;
+3. verifies callback state and accepts one authorization code;
+4. exchanges and validates the candidate in the daemon;
+5. protects it with current-user DPAPI and writes an ACL-restricted blob;
+6. rereads and decrypts the blob before activating its opaque credential reference.
 
-```text
-OPENROUTER_API_KEY
-provider=openrouter
-modelSlug=<model-slug>
-remoteModelEnabled=<boolean>
-toolAllowlist=<tool names>
-approvalPolicy=always_for_mutations
-setupFileWritePolicy=approval_required
-```
+Replace keeps the previous credential active until the candidate has passed validation, protection, durable write, and readback. Ongoing management lives under **Agent → Security and credentials**. Disconnect removes the local protected credential but cannot claim the remote key was revoked. Provider key management remains an external action, and Relaybase preserves local state until remote revocation is externally confirmed.
 
-`OPENROUTER_API_KEY` should be read from the daemon environment, an approved secret reference, or another daemon-owned secret source. TUI preferences and TUI local history may store only key references such as `env:OPENROUTER_API_KEY`.
+If provider validation is temporarily unavailable after exchange, Relaybase stores the candidate as `connected_unverified`, persists that state across restart, and blocks remote runs. **Security and credentials → Validate now** performs the safe current-key metadata request again through a bound repair preview; it activates a new verified revision only after success.
 
-Relaybase CLI commands load a local `.env` file from the command working directory before option parsing. Values already present in the shell environment remain authoritative and are not overwritten by `.env`. To use a different env file, set `RELAYBASE_ENV_FILE` to an absolute path or a path relative to the command working directory.
+After migration, **Remove legacy external key** can preview one exact `OPENROUTER_API_KEY` assignment and requires a second confirmation before atomic removal. Relaybase creates no plaintext backup and refuses shell-owned, ambiguous, changed, invalid, oversized, or insecurely writable sources. Managed mode remains active throughout. Relaybase never silently edits `.env`.
 
-Tracked source includes `.env.example`; the real `.env` and `.env.*` files are ignored by git. A minimal local file for live Operator Agent work is:
+The legacy compatibility path uses:
 
 ```env
 OPENROUTER_API_KEY=
-RELAYBASE_AGENT_MODEL=google/gemini-3.1-flash-lite
+RELAYBASE_AGENT_MODEL=
 RELAYBASE_AGENT_ENABLED=0
 RELAYBASE_AGENT_REMOTE_MODEL_ENABLED=0
 OPENROUTER_HTTP_REFERER=
 OPENROUTER_TITLE=Relaybase Local
 ```
 
-Set both `RELAYBASE_AGENT_ENABLED=1` and `RELAYBASE_AGENT_REMOTE_MODEL_ENABLED=1`, then restart the daemon/TUI launch path, to make ordinary TUI chatbar messages use the daemon Operator Agent. A key and model alone do not enable remote model calls. This keeps copied `.env.example` files safe until the user explicitly opts in.
+Both enablement flags must be `1` for ordinary remote Agent runs. A key and model alone do not enable remote calls.
 
-`GET /__hub/api/agent/config` reports key source and presence only:
+Existing shell values remain authoritative and are not overwritten. Shell state is captured once at startup. `--agent-config <path>` or `RELAYBASE_ENV_FILE` selects an external source that is checked at each new-run boundary and reread only after metadata changes. Valid changes activate atomically; invalid changes preserve the last-known-good revision but block new runs. Reload never mutates global `process.env`.
 
-```json
-{
-  "agent": {
-    "config": {
-      "enabled": false,
-      "provider": {
-        "provider": "openrouter",
-        "apiKeySource": {
-          "type": "environment",
-          "envVar": "OPENROUTER_API_KEY",
-          "configured": false
-        },
-        "remoteModelEnabled": false
-      }
-    }
-  }
-}
+`RELAYBASE_AGENT_MODEL` must be the exact model slug to use. Relaybase does not select or silently substitute a default model.
+
+The daemon Agent configuration API and `/settings agent` can edit non-secret values. The key field stores only the environment-variable name. Raw keys are rejected from configuration updates.
+
+## Provider adapter
+
+The implemented adapter:
+
+- constructs an OpenAI client with `baseURL=https://openrouter.ai/api/v1`;
+- uses the upstream OpenAI Agents SDK TypeScript Chat Completions model/provider path;
+- sets `useResponses=false` for this compatibility path;
+- supports optional `HTTP-Referer` and `X-OpenRouter-Title` attribution values;
+- keeps provider construction and requests in the daemon;
+- does not require a Relaybase-maintained SDK fork.
+
+Provider and model behavior are external and can change. Offline tests prove Relaybase's adapter and policy contract, not the live behavior of every model slug.
+
+## Key handling
+
+Relaybase must never store or return the raw OpenRouter key in:
+
+- TUI preferences or Agent non-secret configuration;
+- daemon audit records or SQLite thread data;
+- setup plans, manifests, wrappers, or env previews;
+- log or thread exports;
+- activity events, traces, diagnostics, screenshots, or reports;
+- child app environments created from Relaybase state.
+
+Configuration responses contain only safe source health, readiness, an opaque revision, credential presence/reference, DPAPI protection mode, and provider-reported limit/expiration metadata.
+
+Managed credentials are decrypted only in the daemon into a short-lived lease. The lease is cleared after provider use. Agent credential names are removed from child app, hook, setup, repair, browser-helper, and child MCP environments. They are never returned through the TUI, API, logs, diagnostics, exports, audits, `.env`, or ordinary configuration.
+
+Missing or invalid provider state becomes an explicit diagnostic and failed/blocked run:
+
+- `AGENT_DISABLED`
+- `AGENT_REMOTE_MODEL_DISABLED`
+- missing or unreadable credential
+- missing model
+- budget exhausted
+- provider timeout or failure
+
+Relaybase does not synthesize assistant text for these failures.
+
+## Model and tool capability
+
+The selected model must support the OpenAI Agents SDK tool path used by Relaybase. A model catalog label is not sufficient evidence.
+
+Every model-proposed call is still:
+
+1. parsed through the SDK/tool schema boundary;
+2. validated by Relaybase;
+3. checked against the effective tool registry;
+4. checked against project grants and policy;
+5. converted to an approval when the action mutates state;
+6. executed through the daemon-owned Relaybase primitive.
+
+The model cannot enable an unregistered tool or approve a mutation by supplying an `approved` JSON field.
+
+## Requests and attribution
+
+Optional attribution values are read from:
+
+- `OPENROUTER_HTTP_REFERER` for `HTTP-Referer`;
+- `OPENROUTER_TITLE` for `X-OpenRouter-Title`.
+
+Missing attribution does not affect deterministic local commands. The credential is passed directly to the daemon provider adapter rather than through `process.env`.
+
+## Execution and budgets
+
+Configured Agent runs use bounded continuation with one run state across segments. Daemon configuration controls:
+
+- turns per segment;
+- total turn ceiling;
+- inactivity timeout;
+- hard run deadline;
+- maximum output tokens;
+- reasoning effort;
+- no-progress repetition limit;
+- daily, monthly, and session budgets.
+
+The daemon checks configured budget before a provider call. Live semantic verification also uses an external provider-usage guard so a stale local accounting value cannot silently exceed its approved phase cost.
+
+## Prompt and result safety
+
+Prompt construction happens in the daemon after policy and redaction. It may include bounded safe Relaybase state, selected UI/app context, approved project inspection results, and active-thread recall.
+
+It does not silently include raw auth tokens, environment values, provider keys, app logs, file diffs, inactive thread transcripts, or unredacted manifests.
+
+Tool results and public activity are sanitized and bounded before SQLite persistence and SSE publication. Processing labels such as `Thinking` and `Reviewing tool result` describe public runtime state and do not contain private model reasoning.
+
+## Live verification
+
+These commands make real provider calls:
+
+```powershell
+npm.cmd run agent:smoke:openrouter
+npm.cmd run agent:live:correctness
+npm.cmd run agent:live:activity
 ```
 
-Raw OpenRouter keys are rejected in `PUT /__hub/api/agent/config`. Set the key in the daemon environment instead.
+`agent:smoke:openrouter` checks basic completion, a harmless function-tool call, and streaming through the actual provider path.
 
-## Key Handling
+`agent:live:correctness` checks semantic tool choice, targets, filesystem boundaries, daemon/process/route evidence, cleanup, response truthfulness, and secret safety with disposable projects.
 
-Rules:
+`agent:live:activity` performs a bounded read-only Agent run and verifies the public activity lifecycle.
 
-- never store the raw key in TUI preferences
-- never store the raw key in daemon audit logs
-- never include the raw key in setup plans, manifests, wrappers, exports, traces, screenshots, or reports
-- never send the raw key to the TUI
-- report key presence, source kind, and validation status without printing the value
-- redact obvious key-like values before model prompts, audit records, and TUI streams
+These commands are opt-in and are not run by the default offline verification gate. Missing credentials, missing model, insufficient spend capacity, or incompatible tool behavior must fail as blocked—not pass through fixtures.
 
-Missing-key diagnostics state that remote model mode is unavailable until an approved key source is configured. Missing model slug also returns a diagnostic. Disabled agent config returns `AGENT_DISABLED`; enabled agent config with remote model mode still off returns `AGENT_REMOTE_MODEL_DISABLED`. Message runs fail with diagnostics rather than fake model output when provider configuration is incomplete.
+## Security boundary
 
-## Model Slug And Capability Checks
+The silent default does not ask the user to unlock a credential during ordinary runs. The optional Windows-verification mode is reported as unavailable until secure prompt ownership is implemented and proven for service, background, console, and TUI-launched daemon modes.
 
-The daemon validates that a selected model slug is non-empty and syntactically usable before constructing the OpenRouter client. The live smoke requires `RELAYBASE_AGENT_MODEL`; Relaybase does not silently pick a default model.
+Current-user DPAPI does not protect against same-user malware, process injection, debuggers, or a compromised Relaybase daemon. It protects primarily against offline copying, another Windows user, and accidental plaintext exposure. A remote broker holding provider keys and issuing short-lived Relaybase client access is a future stronger-security tier, not part of this implementation.
 
-The selected model's real tool capability is verified by `npm run agent:smoke:openrouter`, which makes a live OpenRouter request through the OpenAI Agents SDK TypeScript Chat Completions path and requires a harmless function-tool call to succeed. If the selected model does not support tool calling, the smoke fails with `BLOCKED_OPENROUTER_TOOL_CALL_UNSUPPORTED`.
-
-Required model capabilities:
-
-- tool calling or a compatible structured action proposal path
-- bounded output controls
-- reliable JSON or structured output support for tool proposals, or an SDK-level fallback parser with strict validation
-- streaming support for user-facing assistant text when available
-
-Structured-output caveat: a model capability label is not enough to trust tool execution. Every model-proposed action must still be parsed, schema-validated, policy-checked, and approval-gated by Relaybase before execution.
-
-## Request Attribution Headers
-
-RA005 supports optional safe request attribution headers through environment/config values:
-
-- `OPENROUTER_HTTP_REFERER` -> `HTTP-Referer`
-- `OPENROUTER_TITLE` -> `X-OpenRouter-Title`
-
-Missing attribution headers do not block deterministic local TUI behavior or the live smoke.
-
-## Live Smoke
-
-Run:
-
-```sh
-npm run agent:smoke:openrouter
-```
-
-The command may read `OPENROUTER_API_KEY` and `RELAYBASE_AGENT_MODEL` from `.env`, from `RELAYBASE_ENV_FILE`, or from the shell environment. Shell environment values win over `.env` values. The smoke output must never print the raw key.
-
-The smoke performs real OpenRouter calls and checks:
-
-- basic completion
-- harmless function-tool call through the OpenAI Agents SDK TypeScript path
-- streaming through the same SDK provider path
-
-If `OPENROUTER_API_KEY` is missing, the command exits nonzero with `BLOCKED_OPENROUTER_KEY_MISSING`. If `RELAYBASE_AGENT_MODEL` is missing, it exits nonzero with `BLOCKED_OPENROUTER_MODEL_MISSING`. The smoke must not use a fake OpenRouter server.
-
-## Spend And Budget Controls
-
-Remote mode must be off by default. Implemented budget gates:
-
-- daily budget
-- monthly budget
-- per-session budget
-- max tool-call count per turn
-- max model retries per turn
-- max prompt/context size
-- explicit user approval before sending logs or diagnostics
-
-When a configured budget is exhausted, the daemon blocks before the model call, audits the budget block, and returns a clear diagnostic. It must not silently fall back to a fake model response.
-
-## Prompt Construction
-
-Prompt construction happens in the daemon after redaction and policy checks. The prompt may include:
-
-- safe daemon state summary
-- selected app/group/pane context
-- safe setup plan summary
-- safe diagnostics when opted in
-- safe log excerpts only when the user explicitly opts in
-
-The prompt must not include raw auth tokens, raw env values, raw API keys, unredacted logs, unredacted manifests, or local diagnostic payloads containing secrets.
-
-## Current Status
-
-Current TUI optional LLM behavior remains disconnected from direct provider calls: the Go TUI calls the daemon Agent Gateway/runtime and never calls OpenRouter directly.
-
-Current daemon Agent Gateway behavior as of RA010:
-
-- config/session/message/event endpoints exist
-- session clear and redacted session export endpoints exist
-- configured remote model execution is available through the daemon runtime and OpenRouter adapter
-- runtime prompts include bounded/redacted Relaybase state and TUI context
-- runtime streams `model.request_started`, `model.delta`, `model.completed`, `answer`, and `run.completed` events for successful configured runs
-- runtime streams tool/setup approval, preview, repair, prove, action-result, blocked, and diagnostic events when tools or setup flows are involved
-- runtime emits `diagnostic`, `blocked`, and `run.failed` for disabled, missing-key, missing-model, timeout, or provider failures
-- the daemon-owned tool registry is exposed to the OpenAI Agents SDK runtime
-- mutating tools require approval and route through existing Relaybase daemon services
-- the Go TUI can create sessions, send messages with TUI context, receive session events, render approval/setup previews, and approve or reject pending daemon approvals
-- SDK-facing tool schemas use JSON Schema while internal tool execution still validates with Zod
-- `OPENROUTER_API_KEY` presence is reported as a boolean only
-- raw key config updates are rejected
-- missing key/model/disabled states return diagnostics
-- budget-exceeded states block before remote model calls
-- session and audit records are redacted before persistence under the daemon state directory
-
-Current daemon OpenRouter compatibility behavior as of RA005:
-
-- `src/agent/openrouterProvider.ts` constructs an OpenAI client with `baseURL=https://openrouter.ai/api/v1`
-- the adapter creates `OpenAIChatCompletionsModel` and `OpenAIProvider` with `useResponses=false`
-- no SDK fork is required by the implemented adapter path
-- `npm run agent:smoke:openrouter` is the live proof command
-- missing key/model states fail as blocked, not passed
-- raw OpenRouter keys are not serialized in adapter safe config, reports, or unit-test output
+See [Agent work correctness](agent-work-correctness.md), [Operator Agent tools](tui-agent-tools.md), and [Operator Agent safety](tui-agent-safety.md).

@@ -66,4 +66,8 @@ export class AgentAuditStore {
       : this.#events;
     return events.map((event) => structuredClone(event));
   }
+
+  close(): void {
+    this.#threadStore?.close();
+  }
 }

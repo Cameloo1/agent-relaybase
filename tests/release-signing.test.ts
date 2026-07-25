@@ -44,17 +44,27 @@ test("signature gate fails closed when any required Windows binary is unsigned",
   }
 });
 
-test("signed artifact acceptance requires and preserves both Windows certificate tables", () => {
+test("signed artifact acceptance requires and preserves TUI and credential-module certificate tables", () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "relaybase-signpath-output-"));
   const source = path.join(directory, "source");
-  const destination = path.join(directory, "destination");
+  const destination = path.join(directory, "destination", "tui");
+  const nativeDestination = path.join(directory, "destination", "native");
   try {
     mkdirSync(source, { recursive: true });
-    for (const binary of ["relaybase-tui-windows-amd64.exe", "relaybase-tui-windows-arm64.exe"]) {
+    for (const binary of [
+      "relaybase-tui-windows-amd64.exe",
+      "relaybase-tui-windows-arm64.exe",
+      "relaybase_windows-win32-x64.node",
+      "relaybase_windows-win32-arm64.node"
+    ]) {
       writeFileSync(path.join(source, binary), peFixture({ signed: true }));
     }
-    const accepted = acceptSignedWindowsBinaries({ sourceDir: source, destinationDir: destination });
-    assert.equal(accepted.length, 2);
+    const accepted = acceptSignedWindowsBinaries({
+      sourceDir: source,
+      destinationDir: destination,
+      nativeDestinationDir: nativeDestination
+    });
+    assert.equal(accepted.length, 4);
     for (const entry of accepted) {
       assert.deepEqual(readFileSync(entry.destination), readFileSync(entry.source));
     }

@@ -1,6 +1,6 @@
 # App Components
 
-Relaybase R005 implements component-as-app metadata for the TUI roadmap. Each registered app is still one daemon-owned command/process. The metadata only groups existing apps into frontend, backend, worker, database, service, or other panes.
+Relaybase implements component-as-app metadata for grouping in the operator console. Each registered app is still one daemon-owned command/process. The metadata only groups existing apps into frontend, backend, worker, database, service, or other panes.
 
 ## Manifest Metadata
 

@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { parseNpmPackJson } from "./npm-pack-json.mjs";
 import { targetForPlatform } from "./tui-go.mjs";
 import { inspectWindowsSignature, verifyAuthenticodeTrust } from "./windows-signature.mjs";
 
@@ -75,7 +76,9 @@ export function runPackageInstallSmoke(options = {}) {
     }
     if (
       !checkOutput.includes(`Relaybase package: ${expected}`) ||
-      !/Installed TUI: ready \([^\r\n;]+; build [0-9a-f]{12}\)\./.test(checkOutput)
+      !/Installed TUI: ready \([^\r\n;]+; build [0-9a-f]{12}; (?:version [^;]+; source [^;]+; commit [^;]+; built [^)]+|embedded identity unavailable)\)\./.test(
+        checkOutput
+      )
     ) {
       report(check);
       console.error("Installed relaybase check did not report package and safe TUI build identity.");
@@ -110,6 +113,30 @@ export function runPackageInstallSmoke(options = {}) {
         return 1;
       }
       console.log(`Installed Windows TUI signature is trusted${trust.signer ? `: ${trust.signer}` : "."}`);
+      const installedNative = path.join(
+        workspace,
+        "node_modules",
+        "@cameloo",
+        "relaybase",
+        "dist-runtime",
+        "native",
+        `relaybase_windows-win32-${target.goarch === "amd64" ? "x64" : target.goarch}.node`
+      );
+      const nativeInspection = inspectWindowsSignature(installedNative);
+      if (!nativeInspection.hasAuthenticode) {
+        console.error(`Installed Windows credential module is unsigned: ${nativeInspection.reason}`);
+        return 1;
+      }
+      const nativeTrust = verifyAuthenticodeTrust(installedNative);
+      if (!nativeTrust.trusted) {
+        console.error(
+          `Installed Windows credential module signature is not trusted: ${nativeTrust.status} (${nativeTrust.statusMessage})`
+        );
+        return 1;
+      }
+      console.log(
+        `Installed Windows credential module signature is trusted${nativeTrust.signer ? `: ${nativeTrust.signer}` : "."}`
+      );
     }
     const tui = runExecutable(
       installedTui,
@@ -134,6 +161,10 @@ export function runPackageInstallSmoke(options = {}) {
     }
     const daemonProbe = runCompiledDaemonProbe(workspace);
     if (daemonProbe.status !== 0) return report(daemonProbe);
+    if (target.goos === "windows") {
+      const credentialProbe = runCompiledCredentialProbe(workspace);
+      if (credentialProbe.status !== 0) return report(credentialProbe);
+    }
     console.log(`Disposable install smoke passed for ${target.goos}/${target.goarch} at version ${expected}.`);
     return 0;
   } finally {
@@ -187,20 +218,39 @@ function runCompiledDaemonProbe(workspace) {
   });
 }
 
+function runCompiledCredentialProbe(workspace) {
+  const modulePath = path.join(
+    workspace,
+    "node_modules",
+    "@cameloo",
+    "relaybase",
+    "dist-runtime",
+    "agent",
+    "windowsCredentialStore.js"
+  );
+  const stateDir = path.join(workspace, "credential-state");
+  const probePath = path.join(root, "scripts", "compiled-native-credential-smoke.mjs");
+  return spawnSync(process.execPath, [probePath, modulePath, stateDir], {
+    cwd: workspace,
+    encoding: "utf8",
+    shell: false,
+    timeout: 30_000
+  });
+}
+
 function pack(cwd, destination, cache) {
   const result = runNpm(["pack", "--pack-destination", destination, "--json"], { cwd, cache });
   if (result.status !== 0) {
     report(result);
     return undefined;
   }
-  try {
-    const parsed = JSON.parse(result.stdout);
-    const entry = Array.isArray(parsed) ? parsed[0] : parsed;
-    return path.join(destination, entry.filename);
-  } catch {
+  const parsed = parseNpmPackJson(result.stdout);
+  const entry = Array.isArray(parsed) ? parsed[0] : parsed;
+  if (typeof entry?.filename !== "string") {
     console.error(`Could not parse npm pack output from ${cwd}.`);
     return undefined;
   }
+  return path.join(destination, entry.filename);
 }
 
 function runNpm(args, options) {

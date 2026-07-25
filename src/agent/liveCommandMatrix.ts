@@ -1,10 +1,10 @@
 import fs from "node:fs";
 import { promises as fsp } from "node:fs";
+import { randomBytes } from "node:crypto";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { createRelaybaseServer, type RelaybaseServer } from "../server.ts";
-import { AgentGatewayService } from "./gateway.ts";
 import { OperatorAgentRuntime } from "./runtime.ts";
 import { sanitizeAgentPayload } from "./errors.ts";
 import {
@@ -19,7 +19,6 @@ import {
 } from "./liveAcceptance.ts";
 import type { AgentRunEvent } from "./types.ts";
 
-const REQUIRED_MODEL = "google/gemini-3.1-flash-lite";
 const REASONING_EFFORT = "medium";
 const ARTIFACT_DIR = path.join(process.cwd(), "artifacts", "agent-live");
 const REPORT_PATH = path.join(process.cwd(), "reports", "agent", "live-command-matrix-report.md");
@@ -27,7 +26,7 @@ const REPORT_PATH = path.join(process.cwd(), "reports", "agent", "live-command-m
 export interface AgentLiveCommandMatrixResult {
   ok: boolean;
   status: "PASS" | "BLOCKED" | "FAIL";
-  modelSlug: typeof REQUIRED_MODEL;
+  modelSlug: string;
   reasoning: { enabled: true; effort: typeof REASONING_EFFORT };
   artifacts: Record<string, string>;
   cases: LiveMatrixCase[];
@@ -73,24 +72,18 @@ export async function runAgentLiveCommandMatrix(): Promise<AgentLiveCommandMatri
   let acceptance: AgentLiveAcceptanceResult | undefined;
   let failure: unknown;
   let status: AgentLiveCommandMatrixResult["status"];
+  let modelSlug = process.env.RELAYBASE_AGENT_MODEL?.trim() || "unconfigured";
 
   await resetArtifactDir(ARTIFACT_DIR);
 
   try {
-    cases.push(...(await runConfigDiagnosticSlices(knownSecrets)));
-
-    const provider = resolveOpenRouterProviderOptions({ modelSlug: REQUIRED_MODEL });
+    const provider = resolveOpenRouterProviderOptions();
+    modelSlug = provider.modelSlug;
     knownSecrets.push(provider.apiKey);
-    if (provider.modelSlug !== REQUIRED_MODEL) {
-      throw new AgentLiveCommandMatrixBlocked("BLOCKED_OPENROUTER_MODEL_MISMATCH", "Resolved model did not match.", {
-        requiredModel: REQUIRED_MODEL,
-        resolvedModel: provider.modelSlug
-      });
-    }
-
-    cases.push(await runProviderTimeoutSlice(knownSecrets));
+    cases.push(...(await runConfigDiagnosticSlices(knownSecrets, modelSlug)));
+    cases.push(await runProviderTimeoutSlice(knownSecrets, modelSlug));
     cases.push(await runModelUnavailableSlice(knownSecrets));
-    cases.push(...(await runLiveSafetySlices(knownSecrets)));
+    cases.push(...(await runLiveSafetySlices(knownSecrets, modelSlug)));
 
     acceptance = await runAgentLiveAcceptance();
     cases.push(...acceptanceCases(acceptance));
@@ -118,7 +111,7 @@ export async function runAgentLiveCommandMatrix(): Promise<AgentLiveCommandMatri
   const result: AgentLiveCommandMatrixResult = {
     ok: status === "PASS",
     status,
-    modelSlug: REQUIRED_MODEL,
+    modelSlug,
     reasoning: { enabled: true, effort: REASONING_EFFORT },
     artifacts,
     cases,
@@ -172,13 +165,17 @@ export function formatAgentLiveCommandMatrixError(error: unknown): string {
   return formatAgentLiveAcceptanceError(error);
 }
 
-async function runConfigDiagnosticSlices(knownSecrets: string[]): Promise<LiveMatrixCase[]> {
+async function runConfigDiagnosticSlices(knownSecrets: string[], modelSlug: string): Promise<LiveMatrixCase[]> {
   const previousMissing = process.env.RELAYBASE_AGENT_MATRIX_MISSING_KEY;
   const previousBudget = process.env.RELAYBASE_AGENT_MATRIX_BUDGET_KEY;
   const previousConfig = process.env.RELAYBASE_AGENT_MATRIX_CONFIG_KEY;
   delete process.env.RELAYBASE_AGENT_MATRIX_MISSING_KEY;
-  process.env.RELAYBASE_AGENT_MATRIX_CONFIG_KEY = "sk-or-matrix-config-secret";
-  process.env.RELAYBASE_AGENT_MATRIX_BUDGET_KEY = "sk-or-matrix-budget-secret";
+  process.env.RELAYBASE_AGENT_MATRIX_CONFIG_KEY = ["sk", "or", "matrix", randomBytes(18).toString("base64url")].join(
+    "-"
+  );
+  process.env.RELAYBASE_AGENT_MATRIX_BUDGET_KEY = ["sk", "or", "budget", randomBytes(18).toString("base64url")].join(
+    "-"
+  );
   knownSecrets.push(process.env.RELAYBASE_AGENT_MATRIX_CONFIG_KEY);
   knownSecrets.push(process.env.RELAYBASE_AGENT_MATRIX_BUDGET_KEY);
 
@@ -195,7 +192,7 @@ async function runConfigDiagnosticSlices(knownSecrets: string[]): Promise<LiveMa
         config: {
           enabled: false,
           provider: {
-            modelSlug: REQUIRED_MODEL,
+            modelSlug,
             remoteModelEnabled: true,
             apiKeyEnvVar: "RELAYBASE_AGENT_MATRIX_CONFIG_KEY"
           }
@@ -221,11 +218,11 @@ async function runConfigDiagnosticSlices(knownSecrets: string[]): Promise<LiveMa
     cases.push(
       await runDiagnosticCase(baseUrl, token, {
         id: "config.openrouter-key-missing",
-        expectedCode: "OPENROUTER_API_KEY_MISSING",
+        expectedCode: "AGENT_CREDENTIAL_MISSING",
         config: {
           enabled: true,
           provider: {
-            modelSlug: REQUIRED_MODEL,
+            modelSlug,
             remoteModelEnabled: true,
             apiKeyEnvVar: "RELAYBASE_AGENT_MATRIX_MISSING_KEY"
           }
@@ -240,7 +237,7 @@ async function runConfigDiagnosticSlices(knownSecrets: string[]): Promise<LiveMa
         config: {
           enabled: true,
           provider: {
-            modelSlug: REQUIRED_MODEL,
+            modelSlug,
             remoteModelEnabled: true,
             apiKeyEnvVar: "RELAYBASE_AGENT_MATRIX_BUDGET_KEY"
           },
@@ -270,7 +267,7 @@ async function runConfigDiagnosticSlices(knownSecrets: string[]): Promise<LiveMa
   }
 }
 
-async function runProviderTimeoutSlice(knownSecrets: string[]): Promise<LiveMatrixCase> {
+async function runProviderTimeoutSlice(knownSecrets: string[], modelSlug: string): Promise<LiveMatrixCase> {
   const server = await startMatrixServer({
     agentRuntime: new OperatorAgentRuntime({ timeoutMs: 1 })
   });
@@ -282,7 +279,7 @@ async function runProviderTimeoutSlice(knownSecrets: string[]): Promise<LiveMatr
       config: {
         enabled: true,
         provider: {
-          modelSlug: REQUIRED_MODEL,
+          modelSlug,
           remoteModelEnabled: true,
           apiKeyEnvVar: "OPENROUTER_API_KEY"
         }
@@ -328,7 +325,7 @@ async function runModelUnavailableSlice(knownSecrets: string[]): Promise<LiveMat
   }
 }
 
-async function runLiveSafetySlices(knownSecrets: string[]): Promise<LiveMatrixCase[]> {
+async function runLiveSafetySlices(knownSecrets: string[], modelSlug: string): Promise<LiveMatrixCase[]> {
   const server = await startMatrixServer({
     agentRuntime: new OperatorAgentRuntime({ timeoutMs: 60_000 })
   });
@@ -339,7 +336,7 @@ async function runLiveSafetySlices(knownSecrets: string[]): Promise<LiveMatrixCa
     await apiRequest(baseUrl, token, "PUT", "/__hub/api/agent/config", {
       enabled: true,
       provider: {
-        modelSlug: REQUIRED_MODEL,
+        modelSlug,
         remoteModelEnabled: true,
         apiKeyEnvVar: "OPENROUTER_API_KEY"
       }
@@ -462,10 +459,12 @@ async function runSafetyPrompt(
 async function startMatrixServer(options: { agentRuntime?: OperatorAgentRuntime } = {}): Promise<RelaybaseServer> {
   const workspace = await fsp.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-live-matrix-"));
   const stateDir = path.join(workspace, "state");
-  const server = await createRelaybaseServer({ host: "127.0.0.1", port: 0, stateDir });
-  if (options.agentRuntime) {
-    server.runtime.agentGateway = new AgentGatewayService({ stateDir, agentRuntime: options.agentRuntime });
-  }
+  const server = await createRelaybaseServer({
+    host: "127.0.0.1",
+    port: 0,
+    stateDir,
+    agentRuntime: options.agentRuntime ?? new OperatorAgentRuntime({ maxOutputTokens: 1024 })
+  });
   await server.listen();
   return server;
 }
@@ -782,8 +781,8 @@ async function writeReport(result: AgentLiveCommandMatrixResult): Promise<void> 
     "## Scope",
     "",
     result.status === "PASS"
-      ? `This matrix used the real Relaybase daemon, Agent Gateway, OpenAI Agents SDK TypeScript runtime, OpenRouter provider, exact ${REQUIRED_MODEL} model slug, reasoning request metadata, approval gates, setup/lifecycle APIs, and the real Go TUI smoke-render artifacts produced by the RA013 live acceptance runner. It did not use mocked model responses.`
-      : `This matrix is designed to use the real Relaybase daemon, Agent Gateway, OpenAI Agents SDK TypeScript runtime, OpenRouter provider, exact ${REQUIRED_MODEL} model slug, reasoning request metadata, approval gates, setup/lifecycle APIs, and the real Go TUI smoke-render artifacts produced by the RA013 live acceptance runner. This run stopped before live provider acceptance completed, and it must not be reported as live proof.`,
+      ? `This matrix used the real Relaybase daemon, Agent Gateway, OpenAI Agents SDK TypeScript runtime, OpenRouter provider, selected ${result.modelSlug} model slug, reasoning request metadata, approval gates, setup/lifecycle APIs, and the real Go TUI smoke-render artifacts produced by the RA013 live acceptance runner. It did not use mocked model responses.`
+      : `This matrix is designed to use the real Relaybase daemon, Agent Gateway, OpenAI Agents SDK TypeScript runtime, OpenRouter provider, selected ${result.modelSlug} model slug, reasoning request metadata, approval gates, setup/lifecycle APIs, and the real Go TUI smoke-render artifacts produced by the RA013 live acceptance runner. This run stopped before live provider acceptance completed, and it must not be reported as live proof.`,
     "",
     "## Model",
     "",

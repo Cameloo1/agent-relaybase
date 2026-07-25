@@ -15,6 +15,7 @@ import { getAppState, getRelaybaseState } from "./appState.ts";
 import { applyAppUnregister, previewAppUnregister } from "./appUnregister.ts";
 import { AppRenameError, applyAppRename, previewAppRename } from "./appRename.ts";
 import { appRecordEventData } from "./daemonEvents.ts";
+import { DaemonRestartRequestError } from "./daemonRestart.ts";
 import { dashboardInventory } from "./dashboard.ts";
 import { LogExportRequestError } from "./logExport.ts";
 import {
@@ -101,6 +102,67 @@ export async function handleApiRequest(
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/__hub/api/daemon/restart-preview") {
+      requireToken(runtime, request, {
+        code: "UNAUTHORIZED_DAEMON_RESTART_PREVIEW",
+        message: "Unauthorized daemon restart preview.",
+        userAction: "Use the session token from this daemon state directory before previewing restart."
+      });
+      sendJson(response, 200, { restart: { preview: await runtime.restart.preview() } });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/__hub/api/daemon/prepare-restart") {
+      requireToken(runtime, request, {
+        code: "UNAUTHORIZED_DAEMON_RESTART",
+        message: "Unauthorized daemon restart preparation.",
+        userAction: "Use the session token from this daemon state directory before restarting."
+      });
+      const body = await readJsonBody(request);
+      assertExactRestartBodyFields(body, ["requestId", "expectedInstanceId", "previewId"]);
+      const requestId = requiredRestartField(body.requestId, "requestId");
+      const expectedInstanceId = requiredRestartField(body.expectedInstanceId, "expectedInstanceId");
+      const previewId = requiredRestartField(body.previewId, "previewId");
+      const prepared = await runtime.restart.prepare({ requestId, expectedInstanceId, previewId });
+      sendJson(response, 200, { restart: { prepared } });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/__hub/api/daemon/shutdown") {
+      requireToken(runtime, request, {
+        code: "UNAUTHORIZED_DAEMON_SHUTDOWN",
+        message: "Unauthorized daemon shutdown request.",
+        userAction: "Use the session token from this daemon state directory before restarting."
+      });
+      const body = await readJsonBody(request);
+      if (body.confirm !== true) {
+        throw new ApiError(400, "DAEMON_RESTART_CONFIRMATION_REQUIRED", "Daemon restart requires confirm=true.", {
+          retryable: false,
+          userAction: "Review a fresh restart preview, then submit the bound preview with confirm=true."
+        });
+      }
+      assertExactRestartBodyFields(body, ["requestId", "expectedInstanceId", "previewId", "confirm"]);
+      const requestId = requiredRestartField(body.requestId, "requestId");
+      const expectedInstanceId = requiredRestartField(body.expectedInstanceId, "expectedInstanceId");
+      const previewId = requiredRestartField(body.previewId, "previewId");
+      const prepared = await runtime.restart.prepare({ requestId, expectedInstanceId, previewId });
+      sendJson(response, 202, { restart: { accepted: true, prepared } });
+      runtime.requestShutdown("restart");
+      return;
+    }
+
+    if (
+      runtime.restart.quiescing &&
+      request.method !== "GET" &&
+      request.method !== "HEAD" &&
+      request.method !== "OPTIONS"
+    ) {
+      throw new ApiError(503, "DAEMON_RESTART_QUIESCING", "Relaybase is quiescing for daemon restart.", {
+        retryable: true,
+        userAction: "Wait for the daemon restart to finish before submitting new work."
+      });
+    }
+
     if (request.method === "GET" && url.pathname === "/__hub/api/state") {
       requireToken(runtime, request, {
         code: "UNAUTHORIZED_STATE_READ",
@@ -155,6 +217,11 @@ export async function handleApiRequest(
       parts[1] === "api" &&
       parts[2] === "operations"
     ) {
+      requireToken(runtime, request, {
+        code: "UNAUTHORIZED_OPERATION_READ",
+        message: "Unauthorized Relaybase operation read.",
+        userAction: "Use the session token from this daemon state directory before reading lifecycle history."
+      });
       const operation = runtime.operations.get(parts[3]);
       if (!operation) {
         throw new ApiError(404, "OPERATION_NOT_FOUND", "Relaybase operation was not found.", {
@@ -487,6 +554,34 @@ function appUnregisterNotFound(id: string): ApiError {
     detail: { appId: id },
     userAction: "Refresh registered app state and choose an existing stable app id."
   });
+}
+
+function requiredRestartField(value: unknown, field: string): string {
+  if (typeof value !== "string" || !value.trim() || value.length > 200) {
+    throw new ApiError(400, "DAEMON_RESTART_REQUEST_INVALID", `Daemon restart ${field} is invalid.`, {
+      retryable: false,
+      detail: { field },
+      userAction: "Request a fresh restart preview and submit its exact bound identifiers."
+    });
+  }
+  return value.trim();
+}
+
+function assertExactRestartBodyFields(body: Record<string, unknown>, expected: string[]): void {
+  const actual = Object.keys(body).sort();
+  const wanted = [...expected].sort();
+  if (actual.length !== wanted.length || actual.some((field, index) => field !== wanted[index])) {
+    throw new ApiError(
+      400,
+      "DAEMON_RESTART_BODY_INVALID",
+      "Daemon restart request fields do not match the bound contract.",
+      {
+        retryable: false,
+        detail: { expected: wanted, received: actual },
+        userAction: "Request a fresh restart preview and send only its exact documented binding fields."
+      }
+    );
+  }
 }
 
 function assertExactBodyFields(body: Record<string, unknown>, expected: string[], code: string): void {
@@ -948,6 +1043,22 @@ function sendApiError(
         message: error.message,
         detail: error.detail,
         retryable: error.retryable,
+        userAction: error.userAction,
+        correlationId
+      })
+    );
+    return;
+  }
+
+  if (error instanceof DaemonRestartRequestError) {
+    sendJson(
+      response,
+      error.statusCode,
+      relaybaseErrorResponse({
+        code: error.code,
+        message: error.message,
+        detail: error.detail,
+        retryable: error.statusCode >= 500 || error.statusCode === 409,
         userAction: error.userAction,
         correlationId
       })

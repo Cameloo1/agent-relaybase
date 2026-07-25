@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import type { RelaybaseRuntime } from "../server.ts";
 import { buildOperatorPromptContext, type OperatorPromptContext } from "./context.ts";
 import { AgentRuntimeError, diagnosticFromRuntimeError, redactAgentText, sanitizeAgentPayload } from "./errors.ts";
+import { normalizeAgentExecutionPolicy } from "./executionPolicy.ts";
 import type { AgentRuntimeEvent } from "./events.ts";
 import { createOperatorAgent, operatorAgentReadOnlyToolNames, operatorAgentToolNames } from "./operatorAgent.ts";
 import { evaluateToolPolicy, outputGuardrail } from "./policy.ts";
@@ -8,7 +10,9 @@ import { createOpenRouterAgentProvider } from "./provider/openrouter.ts";
 import { buildOperatorPromptInput } from "./prompts.ts";
 import type {
   AgentConfig,
+  AgentBlockedCandidate,
   AgentDiagnostic,
+  AgentExecutionPolicy,
   AgentMessage,
   AgentProjectRootGrant,
   AgentRun,
@@ -22,10 +26,16 @@ export interface OperatorAgentRuntimeOptions {
   runnerFactory?: OperatorAgentRunnerFactory;
   timeoutMs?: number;
   maxTurns?: number;
+  segmentMaxTurns?: number;
+  totalMaxTurns?: number;
+  inactivityTimeoutMs?: number;
+  hardRunTimeoutMs?: number;
+  maxOutputTokens?: number;
+  noProgressRepeatLimit?: number;
 }
 
 export interface OperatorAgentRunner {
-  run(agent: unknown, input: string, options?: Record<string, unknown>): Promise<any>;
+  run(agent: unknown, input: any, options?: Record<string, unknown>): Promise<any>;
 }
 
 export type OperatorAgentRunnerFactory = (input: {
@@ -44,6 +54,11 @@ export interface OperatorAgentRuntimeInput {
   threadContext?: AgentThreadContextPreview;
   emit: (event: AgentRuntimeEvent) => void;
   knownSecrets?: string[];
+  credential: string;
+  providerAttribution?: {
+    httpReferer?: string;
+    title?: string;
+  };
   signal?: AbortSignal;
 }
 
@@ -56,6 +71,7 @@ export interface OperatorAgentRuntimeResult {
   toolNames: string[];
   pendingApprovals?: OperatorAgentPendingApprovalRequest[];
   usage?: AgentUsage;
+  blockedCandidate?: AgentBlockedCandidate;
 }
 
 export interface OperatorAgentPendingApprovalRequest {
@@ -72,13 +88,11 @@ const MODEL_DELTA_MAX_CHARS = 512;
 
 export class OperatorAgentRuntime {
   #runnerFactory?: OperatorAgentRunnerFactory;
-  #timeoutMs: number;
-  #maxTurns: number;
+  #options: OperatorAgentRuntimeOptions;
 
   constructor(options: OperatorAgentRuntimeOptions = {}) {
     this.#runnerFactory = options.runnerFactory;
-    this.#timeoutMs = options.timeoutMs ?? 60_000;
-    this.#maxTurns = options.maxTurns ?? 8;
+    this.#options = options;
   }
 
   initialize(config: AgentConfig): { modelSlug: string; toolNames: string[] } {
@@ -87,7 +101,6 @@ export class OperatorAgentRuntime {
         userAction: "Configure a model slug before initializing the Operator Agent runtime."
       });
     }
-    createOpenRouterAgentProvider(config);
     return {
       modelSlug: config.provider.modelSlug,
       toolNames: operatorAgentToolNames()
@@ -103,7 +116,8 @@ export class OperatorAgentRuntime {
         });
       }
 
-      const provider = createOpenRouterAgentProvider(input.config);
+      const provider = createOpenRouterAgentProvider(input.config, input.credential, input.providerAttribution);
+      const execution = this.#executionPolicy(input.config);
       const promptContext = await buildOperatorPromptContext(input.relaybase, input.context, input.threadContext);
       const { agent, toolNames } = createOperatorAgent({
         modelSlug: input.config.provider.modelSlug,
@@ -111,6 +125,8 @@ export class OperatorAgentRuntime {
         tuiContext: input.context,
         projectRootGrants: input.projectRootGrants,
         config: input.config,
+        reasoningEffort: execution.reasoningEffort,
+        maxOutputTokens: execution.maxOutputTokens,
         emit: input.emit
       });
       const runner =
@@ -133,7 +149,7 @@ export class OperatorAgentRuntime {
           modelSlug: input.config.provider.modelSlug,
           reasoning: {
             enabled: true,
-            effort: "medium"
+            effort: execution.reasoningEffort
           },
           toolNames,
           promptContextIncluded: {
@@ -147,7 +163,7 @@ export class OperatorAgentRuntime {
       const deltaEmitter = new ModelDeltaEmitter(input.emit);
       let result: any;
       try {
-        result = await this.#runWithTimeout(
+        result = await this.#runBounded(
           runner,
           agent,
           prompt,
@@ -156,6 +172,7 @@ export class OperatorAgentRuntime {
             deltaEmitter.flush();
             input.emit(event);
           },
+          execution,
           input.signal
         );
       } finally {
@@ -241,18 +258,21 @@ export class OperatorAgentRuntime {
       const toolResults = toolResultSummary(result);
       const outputDiagnostic = outputGuardrail(output, toolResults.count, input.message.content, toolResults.toolNames);
       if (outputDiagnostic) {
+        const blockedCandidate = buildBlockedCandidate(output, outputDiagnostic.code);
         input.emit({ type: "diagnostic", data: outputDiagnostic });
         input.emit({
           type: "blocked",
           data: {
             kind: "blocked",
             content: outputDiagnostic.message,
-            diagnostic: outputDiagnostic
+            diagnostic: outputDiagnostic,
+            candidate: candidateMetadata(blockedCandidate)
           }
         });
         return {
           status: "failed",
           modelOutputProduced: true,
+          blockedCandidate,
           diagnostics: [outputDiagnostic],
           promptContext,
           toolNames
@@ -303,20 +323,122 @@ export class OperatorAgentRuntime {
     }
   }
 
-  async #runWithTimeout(
+  #executionPolicy(config: AgentConfig): AgentExecutionPolicy {
+    const configured = normalizeAgentExecutionPolicy(config.execution);
+    const legacyMaxTurns = this.#options.maxTurns;
+    const legacyTimeoutMs = this.#options.timeoutMs;
+    const segmentMaxTurns = this.#options.segmentMaxTurns ?? legacyMaxTurns ?? configured.segmentMaxTurns;
+    return {
+      ...configured,
+      segmentMaxTurns,
+      totalMaxTurns: Math.max(
+        segmentMaxTurns,
+        this.#options.totalMaxTurns ?? legacyMaxTurns ?? configured.totalMaxTurns
+      ),
+      inactivityTimeoutMs: this.#options.inactivityTimeoutMs ?? legacyTimeoutMs ?? configured.inactivityTimeoutMs,
+      hardRunTimeoutMs: this.#options.hardRunTimeoutMs ?? legacyTimeoutMs ?? configured.hardRunTimeoutMs,
+      maxOutputTokens: this.#options.maxOutputTokens ?? configured.maxOutputTokens,
+      noProgressRepeatLimit: this.#options.noProgressRepeatLimit ?? configured.noProgressRepeatLimit
+    };
+  }
+
+  async #runBounded(
     runner: OperatorAgentRunner,
     agent: unknown,
-    prompt: string,
+    prompt: unknown,
     emitDelta: (delta: string) => void,
     emitEvent: (event: AgentRuntimeEvent) => void,
+    execution: AgentExecutionPolicy,
+    externalSignal?: AbortSignal
+  ): Promise<any> {
+    const hardDeadline = Date.now() + execution.hardRunTimeoutMs;
+    const noProgress = new NoProgressTracker(execution.noProgressRepeatLimit);
+    let runInput: unknown = prompt;
+    let turnCeiling = Math.min(execution.segmentMaxTurns, execution.totalMaxTurns);
+    let segment = 1;
+
+    while (true) {
+      try {
+        return await this.#runSegment(
+          runner,
+          agent,
+          runInput,
+          turnCeiling,
+          emitDelta,
+          emitEvent,
+          execution.inactivityTimeoutMs,
+          hardDeadline,
+          execution.hardRunTimeoutMs,
+          noProgress,
+          externalSignal
+        );
+      } catch (error) {
+        if (!isMaxTurnsExceededError(error)) {
+          throw error;
+        }
+        const state = maxTurnsRunState(error);
+        if (!state || turnCeiling >= execution.totalMaxTurns) {
+          throw new AgentRuntimeError(
+            "AGENT_TURN_LIMIT_REACHED",
+            `Operator Agent reached the configured ${execution.totalMaxTurns}-turn limit before completing the request.`,
+            {
+              retryable: true,
+              userAction:
+                "Inspect the partial result, then retry or raise the bounded total-turn limit in Agent settings.",
+              detail: {
+                turnsUsed: turnCeiling,
+                totalMaxTurns: execution.totalMaxTurns,
+                segmentMaxTurns: execution.segmentMaxTurns,
+                segments: segment
+              }
+            }
+          );
+        }
+        const previousCeiling = turnCeiling;
+        turnCeiling = Math.min(execution.totalMaxTurns, turnCeiling + execution.segmentMaxTurns);
+        segment += 1;
+        emitEvent({
+          type: "run.continuing",
+          data: {
+            segment,
+            turnsUsed: previousCeiling,
+            nextTurnCeiling: turnCeiling,
+            totalMaxTurns: execution.totalMaxTurns
+          }
+        });
+        runInput = state;
+      }
+    }
+  }
+
+  async #runSegment(
+    runner: OperatorAgentRunner,
+    agent: unknown,
+    runInput: unknown,
+    maxTurns: number,
+    emitDelta: (delta: string) => void,
+    emitEvent: (event: AgentRuntimeEvent) => void,
+    inactivityTimeoutMs: number,
+    hardDeadline: number,
+    hardRunTimeoutMs: number,
+    noProgress: NoProgressTracker,
     externalSignal?: AbortSignal
   ): Promise<any> {
     const controller = new AbortController();
-    let timedOut = false;
-    const timeoutError = () =>
-      new AgentRuntimeError("AGENT_PROVIDER_TIMEOUT", "Operator Agent provider request timed out.", {
+    const processing = new ModelProcessingTracker(emitEvent);
+    const inactivityError = () =>
+      new AgentRuntimeError("AGENT_INACTIVITY_TIMEOUT", "Operator Agent stopped producing model or tool progress.", {
         retryable: true,
-        userAction: "Retry the request or choose a faster OpenRouter model."
+        userAction:
+          "Inspect the last activity, then retry or increase the bounded inactivity timeout in Agent settings.",
+        detail: { inactivityTimeoutMs }
+      });
+    const hardTimeoutError = () =>
+      new AgentRuntimeError("AGENT_HARD_DURATION_REACHED", "Operator Agent reached the configured hard run duration.", {
+        retryable: true,
+        userAction:
+          "Inspect the partial result, then retry or increase the bounded hard run duration in Agent settings.",
+        detail: { hardRunTimeoutMs }
       });
     const cancelledError = () =>
       new AgentRuntimeError("AGENT_RUN_CANCELLED", "Operator Agent run was cancelled.", {
@@ -327,51 +449,115 @@ export class OperatorAgentRuntime {
     const abortPromise = new Promise<never>((_resolve, reject) => {
       rejectAbort = reject;
     });
-    const onExternalAbort = () => {
+    const rejectAndAbort = (error: Error) => {
       if (!controller.signal.aborted) {
-        controller.abort(externalSignal?.reason);
+        controller.abort(error);
       }
-      rejectAbort?.(cancelledError());
+      rejectAbort?.(error);
+    };
+    const onExternalAbort = () => {
+      rejectAndAbort(cancelledError());
     };
     if (externalSignal?.aborted) {
       onExternalAbort();
     } else {
       externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
     }
-    const timer = setTimeout(() => {
-      timedOut = true;
-      if (!controller.signal.aborted) {
-        controller.abort();
+    let inactivityTimer: NodeJS.Timeout | undefined;
+    const touchProgress = () => {
+      if (inactivityTimer) {
+        clearTimeout(inactivityTimer);
       }
-      rejectAbort?.(timeoutError());
-    }, this.#timeoutMs);
+      inactivityTimer = setTimeout(() => rejectAndAbort(inactivityError()), inactivityTimeoutMs);
+      inactivityTimer.unref?.();
+    };
+    touchProgress();
+    const hardTimeoutMs = Math.max(1, hardDeadline - Date.now());
+    const hardTimer = setTimeout(() => rejectAndAbort(hardTimeoutError()), hardTimeoutMs);
+    hardTimer.unref?.();
     try {
-      const runPromise = runner.run(agent, prompt, {
+      processing.begin();
+      const runPromise = runner.run(agent, runInput, {
         stream: true,
-        maxTurns: this.#maxTurns,
+        maxTurns,
         signal: controller.signal
       });
       const result = await Promise.race([runPromise, abortPromise]);
+      touchProgress();
       if (isAsyncIterable(result)) {
         await Promise.race([
           (async () => {
             for await (const event of result) {
-              handleSdkStreamEvent(event, emitDelta, emitEvent);
+              touchProgress();
+              handleSdkStreamEvent(
+                event,
+                (delta) => {
+                  touchProgress();
+                  emitDelta(delta);
+                },
+                (runtimeEvent) => {
+                  if (noProgress.observe(runtimeEvent)) {
+                    throw new AgentRuntimeError(
+                      "AGENT_NO_PROGRESS",
+                      `Operator Agent repeated the same tool result ${noProgress.repeatCount} times without observable progress.`,
+                      {
+                        retryable: true,
+                        userAction:
+                          "Inspect the repeated tool activity, clarify the target, or retry with a different approach.",
+                        detail: {
+                          toolName: noProgress.toolName,
+                          repeatCount: noProgress.repeatCount
+                        }
+                      }
+                    );
+                  }
+                  emitEvent(runtimeEvent);
+                },
+                processing
+              );
             }
             await result.completed;
           })(),
           abortPromise
         ]);
       }
+      processing.complete();
       return result;
-    } finally {
-      clearTimeout(timer);
-      externalSignal?.removeEventListener("abort", onExternalAbort);
-      if (timedOut && !controller.signal.aborted) {
-        controller.abort();
+    } catch (error) {
+      if (isMaxTurnsExceededError(error)) {
+        processing.complete();
+      } else {
+        processing.fail();
       }
+      if (!controller.signal.aborted) {
+        controller.abort(error);
+      }
+      throw error;
+    } finally {
+      if (inactivityTimer) {
+        clearTimeout(inactivityTimer);
+      }
+      clearTimeout(hardTimer);
+      externalSignal?.removeEventListener("abort", onExternalAbort);
     }
   }
+}
+
+function buildBlockedCandidate(content: string, diagnosticCode: string): AgentBlockedCandidate {
+  const inspectable = !/SECRET|CREDENTIAL|BYPASS|INJECTION/i.test(diagnosticCode);
+  return {
+    disposition: inspectable ? "retained_redacted" : "discarded_security",
+    inspectable,
+    sha256: createHash("sha256").update(content).digest("hex"),
+    byteCount: Buffer.byteLength(content, "utf8"),
+    diagnosticCode,
+    ...(inspectable ? { content } : {})
+  };
+}
+
+function candidateMetadata(candidate: AgentBlockedCandidate): Omit<AgentBlockedCandidate, "content"> {
+  const { content: _content, ...metadata } = candidate;
+  return metadata;
 }
 
 class ModelDeltaEmitter {
@@ -624,6 +810,10 @@ function valueProperty(value: unknown, key: string): unknown {
   return value && typeof value === "object" && key in value ? (value as Record<string, unknown>)[key] : undefined;
 }
 
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
 function parseArguments(value: unknown): Record<string, unknown> {
   if (!value) {
     return {};
@@ -639,14 +829,81 @@ function parseArguments(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+class NoProgressTracker {
+  readonly limit: number;
+  repeatCount = 0;
+  toolName?: string;
+  #lastDigest?: string;
+  #argumentsByCallId = new Map<string, unknown>();
+
+  constructor(limit: number) {
+    this.limit = Math.max(2, limit);
+  }
+
+  observe(event: AgentRuntimeEvent): boolean {
+    if (event.type === "tool.started") {
+      const data = objectRecord(event.data);
+      const callId = textProperty(data, "toolCallId");
+      if (callId) {
+        this.#argumentsByCallId.set(callId, data.arguments);
+      }
+      return false;
+    }
+    if (event.type !== "tool.completed" && event.type !== "tool.failed") {
+      return false;
+    }
+    const data = objectRecord(event.data);
+    const callId = textProperty(data, "toolCallId");
+    const toolName = textProperty(data, "toolName") ?? "unknown";
+    const digest = createHash("sha256")
+      .update(
+        JSON.stringify({
+          toolName,
+          arguments: callId ? this.#argumentsByCallId.get(callId) : undefined,
+          result: sanitizeAgentPayload(data.result)
+        })
+      )
+      .digest("hex");
+    if (callId) {
+      this.#argumentsByCallId.delete(callId);
+    }
+    if (digest === this.#lastDigest) {
+      this.repeatCount += 1;
+    } else {
+      this.#lastDigest = digest;
+      this.repeatCount = 1;
+      this.toolName = toolName;
+    }
+    return this.repeatCount >= this.limit;
+  }
+}
+
+function isMaxTurnsExceededError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const sdk = loadOpenAIAgentsSdkRuntime();
+  return (
+    error instanceof sdk.MaxTurnsExceededError || (error instanceof Error && error.name === "MaxTurnsExceededError")
+  );
+}
+
+function maxTurnsRunState(error: unknown): unknown {
+  return error && typeof error === "object" && "state" in error ? (error as { state?: unknown }).state : undefined;
+}
+
 function loadRunnerConstructor(): new (options?: Record<string, unknown>) => OperatorAgentRunner {
   const sdk = loadOpenAIAgentsSdkRuntime();
   return sdk.Runner;
 }
 
-function loadOpenAIAgentsSdkRuntime(): { Runner: new (options?: Record<string, unknown>) => OperatorAgentRunner } {
+function loadOpenAIAgentsSdkRuntime(): {
+  Runner: new (options?: Record<string, unknown>) => OperatorAgentRunner;
+  MaxTurnsExceededError: new (message: string, state?: unknown) => Error;
+} {
   return loadOpenAIAgentsSdkRuntimeRequire("@openai/agents") as {
     Runner: new (options?: Record<string, unknown>) => OperatorAgentRunner;
+    MaxTurnsExceededError: new (message: string, state?: unknown) => Error;
   };
 }
 
@@ -671,10 +928,13 @@ function extractModelDelta(event: unknown): string | undefined {
 function handleSdkStreamEvent(
   event: unknown,
   emitDelta: (delta: string) => void,
-  emitEvent: (event: AgentRuntimeEvent) => void
+  emitEvent: (event: AgentRuntimeEvent) => void,
+  processing: ModelProcessingTracker
 ): void {
+  processing.observe(event);
   const delta = extractModelDelta(event);
   if (delta) {
+    processing.complete();
     emitDelta(delta);
   }
 
@@ -688,7 +948,27 @@ function handleSdkStreamEvent(
   const name = textProperty(event, "name");
   const item = valueProperty(event, "item");
   const raw = valueProperty(item, "rawItem") ?? item;
+  if (name === "handoff_requested" || name === "handoff_occurred") {
+    processing.complete();
+    emitEvent({
+      type: name === "handoff_requested" ? "agent.handoff_started" : "agent.handoff_completed",
+      data: {
+        handoffId: textProperty(item, "id") ?? textProperty(raw, "id"),
+        targetAgent: textProperty(item, "targetAgent") ?? textProperty(raw, "targetAgent")
+      }
+    });
+    return;
+  }
+  if (name === "tool_search_called" || name === "tool_search_output_created") {
+    processing.complete();
+    emitEvent({
+      type: name === "tool_search_called" ? "tool.search_started" : "tool.search_completed",
+      data: { searchId: textProperty(item, "id") ?? textProperty(raw, "id") }
+    });
+    return;
+  }
   if (name === "tool_called") {
+    processing.complete();
     const toolName = textProperty(item, "name") ?? textProperty(raw, "name");
     if (!toolName) {
       return;
@@ -736,6 +1016,7 @@ function handleSdkStreamEvent(
       result: output
     }
   });
+  processing.noteToolResult();
 
   if (toolName === "preview_setup_writes" && status === "succeeded") {
     const data = output && typeof output === "object" ? (output as { data?: unknown }).data : undefined;
@@ -745,6 +1026,77 @@ function handleSdkStreamEvent(
         setupPlanPreview: data ?? output
       }
     });
+  }
+}
+
+class ModelProcessingTracker {
+  readonly #emit: (event: AgentRuntimeEvent) => void;
+  #active?: { turnId: string; responseId?: string; label: string; completedLabel: string };
+  #turn = 0;
+  #reviewingToolResult = false;
+
+  constructor(emit: (event: AgentRuntimeEvent) => void) {
+    this.#emit = emit;
+  }
+
+  begin(): void {
+    this.#start();
+  }
+
+  observe(event: unknown): void {
+    if (textProperty(event, "type") !== "raw_model_stream_event") {
+      return;
+    }
+    const data = valueProperty(event, "data");
+    const eventType = textProperty(data, "type") ?? "";
+    if (eventType === "response.created" || eventType === "response.in_progress") {
+      this.#start(textProperty(valueProperty(data, "response"), "id") ?? textProperty(data, "response_id"));
+      return;
+    }
+    if (eventType === "response.completed") {
+      this.complete();
+      return;
+    }
+    if (eventType === "response.failed" || eventType === "response.incomplete") {
+      this.fail();
+    }
+  }
+
+  noteToolResult(): void {
+    this.#reviewingToolResult = true;
+  }
+
+  complete(): void {
+    this.#finish("model.processing_completed");
+  }
+
+  fail(): void {
+    this.#finish("model.processing_failed");
+  }
+
+  #start(responseId?: string): void {
+    if (this.#active) {
+      return;
+    }
+    this.#turn += 1;
+    const label = this.#reviewingToolResult ? "Reviewing tool result" : "Thinking";
+    const completedLabel = this.#reviewingToolResult ? "Reviewed tool result" : "Thought";
+    this.#reviewingToolResult = false;
+    this.#active = {
+      turnId: String(this.#turn),
+      ...(responseId ? { responseId } : {}),
+      label,
+      completedLabel
+    };
+    this.#emit({ type: "model.processing_started", data: { ...this.#active } });
+  }
+
+  #finish(type: "model.processing_completed" | "model.processing_failed"): void {
+    if (!this.#active) {
+      return;
+    }
+    this.#emit({ type, data: { ...this.#active } });
+    this.#active = undefined;
   }
 }
 

@@ -11,6 +11,8 @@ relaybase --version
 
 `relaybase start` with no app id launches the normal daemon + TUI operator surface. `relaybase check` is a read-only local diagnosis bundle. `relaybase verify` is the source-checkout verification gate. Lower-level commands such as `configure`, `open`, `health`, `list`, `serve`, `tui`, and `start <app-id>` remain available for automation and direct lifecycle control.
 
+Inside the TUI, use `?` or `/help` for searchable command help and `/settings` for categorized settings. See [Operator console](operator-console.md) for slash commands, keys, app/package managers, and Agent Chat.
+
 After installing dependencies, build the current-platform TUI once. The npm wrappers then call the same bundled paths from the source checkout:
 
 ```powershell
@@ -29,11 +31,73 @@ If PowerShell says `relaybase` is not recognized, either run `npm.cmd start` fro
 --host <host>        Hub host. Default: 127.0.0.1 or RELAYBASE_HOST.
 --state-dir <path>   Relaybase state directory.
 --cwd <path>         Project root. Default: current directory.
+--agent-config <path>
+                     Select one external Agent configuration file for run-boundary reload.
 --json               Print machine-readable output for supported commands.
 --verbose            Include expanded detail for supported commands.
+--restart-daemon     Safely replace the daemon before `start` or `tui`.
 ```
 
 `--json` results can include `nextActions`: concrete follow-up actions with an owner, command when available, and evidence when Relaybase can name the failing boundary.
+
+## agent
+
+```powershell
+relaybase agent --help
+relaybase agent config status
+relaybase agent config reload
+relaybase agent provider status
+relaybase agent provider connect
+relaybase agent provider replace
+relaybase agent provider validate
+relaybase agent provider migrate --yes
+relaybase agent provider cleanup-legacy
+relaybase agent provider cleanup-legacy --yes
+relaybase agent provider revoke
+relaybase agent provider disconnect --yes
+relaybase agent smoke-openrouter
+relaybase agent live-correctness
+relaybase agent live-command-matrix
+relaybase agent live-folder-start
+relaybase agent threads list
+relaybase agent threads active
+relaybase agent threads show <session-id>
+relaybase agent threads context <session-id>
+relaybase agent threads activate <session-id>
+relaybase agent threads rename <session-id> <title>
+relaybase agent threads clear <session-id>
+relaybase agent threads export <session-id> --markdown
+```
+
+Config and provider commands use the token-gated daemon API. Connect and replace use daemon-owned OpenRouter OAuth PKCE; browser helpers receive a credential-scrubbed environment. `validate` retries the safe provider metadata check for a protected but unverified credential. Migration copies a legacy key into current-user DPAPI only after explicit confirmation. `cleanup-legacy` first previews one exact external assignment; `--yes` applies that bound preview atomically without a plaintext backup. It refuses shell-owned, ambiguous, stale, or insecurely writable sources. Disconnect is local-only. Revoke cannot report success without provider confirmation.
+
+## repair
+
+```text
+relaybase repair
+relaybase repair --agent-security
+relaybase repair --agent-security --online
+relaybase repair --agent-security --issue <code>
+relaybase repair --agent-security --action <action-id> --plan
+relaybase repair --agent-security --action <action-id> --yes
+relaybase repair --agent-security --safe --plan
+relaybase repair --agent-security --safe --yes
+relaybase repair --agent-security --apply <preview-id> --yes
+relaybase repair --operation <operation-id>
+relaybase repair --agent-security --json
+```
+
+The initial repair registry contains the Agent security doctor. Bare `repair` and `--agent-security` run a local, silent diagnosis through the authenticated daemon. `--online` explicitly permits an OpenRouter credential probe; it is never implied. `--action` and `--safe` create a short-lived preview bound to the active config revision, credential identity, source fingerprint, and selected actions. `--plan` prints that preview; `--yes` authorizes exactly that preview. `--apply` resumes a stored preview, and `--operation` resolves a durable receipt after a lost response or restart.
+
+Repair exits `0` for healthy or verified, `1` for transport/authentication/execution failure, `2` when findings or confirmation remain, `3` for a provider-owned or manual action, and `4` for stale state. `--json` emits one document and never prompts. Repair, daemon control, and token-gated Agent control commands do not load a project `.env` into the CLI process; legacy-source inspection and managed-credential decryption remain daemon-only.
+
+`relaybase configure --repair` remains project setup repair. `relaybase repair-prefix` remains source-checkout command repair. Neither is reinterpreted by the top-level repair framework.
+
+`smoke-openrouter`, `live-correctness`, `live-command-matrix`, and `live-folder-start` make real provider calls and require explicit credentials, model selection, and cost approval. They are not part of the default offline verification gate.
+
+`live-acceptance` remains a compatibility alias for `live-correctness`.
+
+Thread commands use the daemon Agent Gateway API. They do not read or edit `agent.sqlite` directly.
 
 ## tui
 
@@ -41,10 +105,13 @@ If PowerShell says `relaybase` is not recognized, either run `npm.cmd start` fro
 relaybase serve
 relaybase tui
 relaybase tui --port 7777 --host 127.0.0.1
+relaybase tui --restart-daemon
 relaybase tui -- --theme dark
 ```
 
 `relaybase tui` launches the Go Bubble Tea TUI as a client of the running daemon. It does not start apps, inspect ports, or manage process lifecycle locally. The bridge passes `--base-url` and `--state-dir` to the TUI using the same `--host`, `--port`, and `--state-dir` conventions as other Relaybase commands. TUI-specific arguments can be passed after `--`.
+
+`relaybase tui --restart-daemon` performs the same bound restart workflow as `relaybase daemon restart` before the TUI is launched. A blocked or unverified restart fails the launch and, when a report was written, prints its redacted path instead of silently continuing against an uncertain daemon.
 
 Inside the TUI, `/manage` opens the registered-app management table. Its confirmation-gated **Rename app** action edits the durable display name while preserving the stable app ID, route, current process, packages, panes, logs, history, and automation. Its final **Add to package** action changes only saved package membership. `/packages` opens the dedicated package table for creation, launch/run inspection, ordered member editing, rename, and definition deletion. Bare `/start` remains the faster app launcher and does not expose management actions.
 
@@ -95,6 +162,7 @@ Troubleshooting:
 relaybase start
 relaybase start --plan
 relaybase start --port 7777 --state-dir "$env:LOCALAPPDATA\Relaybase"
+relaybase start --restart-daemon
 relaybase start -- --theme dark
 relaybase start <app-id>
 npm.cmd start
@@ -105,6 +173,19 @@ With no app id, `start` is the daily launch bundle. It locates the packaged or r
 With an app id, `start <app-id>` keeps the existing lifecycle meaning and starts that registered app through the daemon mutation API.
 
 `--plan` prints the bundled steps without launching the TUI.
+
+## daemon restart
+
+```powershell
+relaybase daemon restart
+relaybase daemon restart --json
+```
+
+The restart command discovers and authenticates the current daemon, obtains a state-bound preview, and refuses to proceed while an Agent run, lifecycle operation, or package run is active. It quiesces new mutations, stops only Relaybase-owned app processes, preserves externally managed processes, shuts down the old daemon, starts a distinct daemon instance, verifies the new instance ID, and restores the previously running owned apps through normal lifecycle operations.
+
+Only one restart lease may exist per state directory. A stale lease is recovered only after its owning process is gone and the bounded stale interval has elapsed. Restart results and per-app restore outcomes are written as redacted JSON under `<state-dir>/restarts/`. A failed app stop attempts to restore apps already stopped before returning control.
+
+If a daemon service reports a shutdown warning but the old listener still closes and a distinct instance starts, the restart is reported as completed with warnings instead of as a clean success. The CLI and in-app result point to the redacted restart report for recovery details.
 
 ## check
 
@@ -162,8 +243,6 @@ The default verification gate runs formatting, lint, typecheck, Node tests, Jest
 
 `package:check`, used by the full gate, runs `npm pack --dry-run --json`. By default it creates and removes a disposable cache under the operating-system temp directory. Set `RELAYBASE_PACKAGE_NPM_CACHE` only when an intentional persistent cache override is required.
 
-## configure
-
 ## register
 
 ```powershell
@@ -181,6 +260,8 @@ The default is one quick bounded proof: start, declared health, stop, and backen
 The operator console automatically prepares a read-only preview when one deterministic repair is available without more input, or opens an arrow-key chooser when several safe repairs are available. Applying the selected preview remains confirmation-gated. Repeating the unchanged failed launch plan performs no new lifecycle attempt and preserves the prior repair choices.
 
 Stable registration codes include `REGISTER_MANIFEST_NOT_FOUND`, `REGISTER_MANIFEST_INVALID`, `REGISTER_INPUT_REQUIRED`, `REGISTER_PREVIEW_REQUIRED`, `REGISTER_CONFIRMATION_REQUIRED`, `REGISTER_PREVIEW_STALE`, `REGISTER_REGISTRY_FAILED`, and `REGISTER_ALREADY_CURRENT`. Verification failures use the stable `REGISTER_VERIFY_*` codes documented in [Troubleshooting](troubleshooting.md).
+
+## configure
 
 ```powershell
 relaybase configure

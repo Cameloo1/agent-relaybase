@@ -107,6 +107,17 @@ export interface AppLogStreamRotatedEvent {
   at: string;
 }
 
+export interface AppRuntimeChangedEvent {
+  appId: string;
+  status: RuntimeStatus;
+  health: "unknown" | "healthy" | "unhealthy";
+  phase: LifecyclePhase;
+  reason: string;
+  at: string;
+  pid?: number;
+  assignedPort?: number;
+}
+
 export interface ProcessManagerOptions {
   hubHost?: string;
   hubPort?: number;
@@ -114,6 +125,7 @@ export interface ProcessManagerOptions {
   portRangeEnd?: number;
   stopPortOpenProbe?: (port: number, host: string) => Promise<boolean>;
   logStore?: LogStore;
+  sanitizeEnvironment?: (environment: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
 }
 
 export interface LifecycleRunOptions {
@@ -130,6 +142,12 @@ export interface LifecycleRunOptions {
   };
 }
 
+export interface ProcessManagerShutdownResult {
+  requestedAppIds: string[];
+  stoppedAppIds: string[];
+  failed: Array<{ appId: string; error: string }>;
+}
+
 export class ProcessManager {
   readonly registry: Registry;
   readonly hubHost: string;
@@ -139,11 +157,13 @@ export class ProcessManager {
   readonly mcp: ChildMcpSupervisor;
   readonly stopPortOpenProbe: (port: number, host: string) => Promise<boolean>;
   readonly logStore?: LogStore;
+  readonly sanitizeEnvironment: (environment: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
   #runtime = new Map<string, RuntimeEntry>();
   #mutations = new Map<string, { action: "start" | "stop" | "restart"; promise: Promise<RuntimeView> }>();
   #portReservations = new Map<number, string>();
   #logSubscribers = new Set<(event: AppLogEvent) => void>();
   #logRotationSubscribers = new Set<(event: AppLogStreamRotatedEvent) => void>();
+  #runtimeSubscribers = new Set<(event: AppRuntimeChangedEvent) => void>();
   #logSequence = 0;
 
   constructor(registry: Registry, options: ProcessManagerOptions = {}) {
@@ -154,8 +174,61 @@ export class ProcessManager {
     this.portRangeEnd = options.portRangeEnd ?? DEFAULT_PORT_RANGE_END;
     this.stopPortOpenProbe = options.stopPortOpenProbe ?? ((port, host) => isPortOpen(port, host));
     this.logStore = options.logStore;
+    this.sanitizeEnvironment = options.sanitizeEnvironment ?? ((environment) => ({ ...environment }));
     this.#logSequence = options.logStore?.lastSequence ?? 0;
-    this.mcp = new ChildMcpSupervisor();
+    this.mcp = new ChildMcpSupervisor({ sanitizeEnvironment: this.sanitizeEnvironment });
+  }
+
+  runningOwnedAppIds(): string[] {
+    return [...this.#runtime.entries()]
+      .filter(([, entry]) => Boolean(entry.child && entry.child.exitCode === null))
+      .map(([appId]) => appId)
+      .sort();
+  }
+
+  runningExternalAppIds(): string[] {
+    return [...this.#runtime.entries()]
+      .filter(([, entry]) => !entry.child && entry.status === "running")
+      .map(([appId]) => appId)
+      .sort();
+  }
+
+  async shutdownOwnedApps(options: { timeoutMs?: number } = {}): Promise<ProcessManagerShutdownResult> {
+    const requestedAppIds = this.runningOwnedAppIds();
+    if (requestedAppIds.length === 0) {
+      return { requestedAppIds, stoppedAppIds: [], failed: [] };
+    }
+    const controller = new AbortController();
+    const timeoutMs = Math.min(Math.max(options.timeoutMs ?? 120_000, 1_000), 10 * 60_000);
+    const timer = setTimeout(() => controller.abort("process_manager_shutdown_timeout"), timeoutMs);
+    timer.unref?.();
+    try {
+      const settled = await Promise.allSettled(
+        requestedAppIds.map(async (appId) => {
+          const state = await this.stop(appId, { signal: controller.signal });
+          if (state.status !== "stopped") {
+            throw new Error(state.lastError ?? `App stopped with status ${state.status}.`);
+          }
+          return appId;
+        })
+      );
+      const stoppedAppIds: string[] = [];
+      const failed: Array<{ appId: string; error: string }> = [];
+      settled.forEach((result, index) => {
+        const appId = requestedAppIds[index];
+        if (result.status === "fulfilled") {
+          stoppedAppIds.push(result.value);
+        } else {
+          failed.push({
+            appId,
+            error: result.reason instanceof Error ? result.reason.message : String(result.reason)
+          });
+        }
+      });
+      return { requestedAppIds, stoppedAppIds, failed };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async start(id: string, options: LifecycleRunOptions = {}): Promise<RuntimeView> {
@@ -203,6 +276,7 @@ export class ProcessManager {
         "conflict"
       );
       this.#runtime.set(id, conflict);
+      this.#publishRuntimeChange(id, conflict, "port_conflict");
       return this.#view(conflict, id);
     }
 
@@ -233,6 +307,7 @@ export class ProcessManager {
     entry.lastStartAttempt = attempt;
     this.#recordAttempt(entry, attempt);
     this.#runtime.set(id, entry);
+    this.#publishRuntimeChange(id, entry, "start_requested");
 
     const env = { ...this.#appEnv(app, assignedPort), ...launchPlan.environment };
     if (app.preStartCommand) {
@@ -254,6 +329,7 @@ export class ProcessManager {
         this.#finishAttempt(attempt, "failed", entry.phase, entry.lastError);
         this.#releasePortReservation(app.id, assignedPort);
         entry.assignedPort = undefined;
+        this.#publishRuntimeChange(id, entry, "start_cancelled");
         throw lifecycleAbortError(signal);
       }
       if (preStart.status !== "succeeded") {
@@ -263,6 +339,7 @@ export class ProcessManager {
         entry.phase = "errored";
         entry.lastError = message;
         this.#finishAttempt(attempt, "failed", entry.phase, message);
+        this.#publishRuntimeChange(id, entry, "prestart_failed");
         return this.#view(entry, id);
       }
     }
@@ -275,6 +352,7 @@ export class ProcessManager {
       entry.phase = healthy ? "running" : "errored";
       entry.lastError = healthy ? undefined : "External application is not reachable on its declared upstream port.";
       this.#finishAttempt(attempt, healthy ? "succeeded" : "failed", entry.phase, entry.lastError);
+      this.#publishRuntimeChange(id, entry, healthy ? "external_ready" : "external_unhealthy");
       return this.#view(entry, id);
     }
     const spawnSpec = app.launch
@@ -294,7 +372,7 @@ export class ProcessManager {
       app.id,
       `[relaybase] starting ${app.id} on ${this.hubHost}:${assignedPort}`,
       "system",
-      "system",
+      "lifecycle_starting",
       app,
       env
     );
@@ -303,16 +381,18 @@ export class ProcessManager {
       return this.#cancelStartedApp(app, entry, child, attempt, signal);
     }
 
-    child.stdout.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stdout", "start", app, env));
-    child.stderr.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stderr", "start", app, env));
+    child.stdout.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stdout", "process", app, env));
+    child.stderr.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stderr", "process", app, env));
     child.once("error", (error) => {
       entry.status = "errored";
       entry.health = "unhealthy";
       entry.phase = "errored";
       entry.lastError = error.message;
-      this.#appendLog(app.id, `[relaybase] process error: ${error.message}`, "system", "system", app, env);
+      this.#appendLog(app.id, `[relaybase] process error: ${error.message}`, "system", "process", app, env, "error");
+      this.#publishRuntimeChange(app.id, entry, "process_error");
     });
     child.once("exit", (code, signal) => {
+      const expectedStop = entry.status === "stopping" || entry.status === "stopped";
       if (entry.status !== "stopped" && entry.status !== "errored") {
         entry.status = code === 0 ? "stopped" : "errored";
         entry.phase = code === 0 ? "stopped" : "errored";
@@ -328,10 +408,12 @@ export class ProcessManager {
         app.id,
         `[relaybase] exited code=${code ?? "null"} signal=${signal ?? "null"}`,
         "system",
-        "system",
+        "process",
         app,
-        env
+        env,
+        code === 0 || expectedStop ? "info" : "error"
       );
+      this.#publishRuntimeChange(app.id, entry, expectedStop ? "process_stopped" : "process_exited");
     });
 
     entry.phase = "waiting_for_health";
@@ -399,6 +481,7 @@ export class ProcessManager {
       await this.#cleanupAfterFailedStart(app, entry, child);
     }
 
+    this.#publishRuntimeChange(id, entry, entry.status === "running" ? "start_ready" : "start_failed");
     return this.#view(entry, id);
   }
 
@@ -440,6 +523,7 @@ export class ProcessManager {
       stopped.health = "unhealthy";
       stopped.cleanupStatus = app.stopCommand ? "pending" : "not_needed";
       this.#runtime.set(id, stopped);
+      this.#publishRuntimeChange(id, stopped, "stop_requested");
       stopped.mcpDrain = await this.mcp.stopApp(id);
       return this.#finalizeStop(app, stopped, attempt, assignedPort, options);
     }
@@ -449,7 +533,8 @@ export class ProcessManager {
     entry.phase = "stopping";
     entry.health = "unhealthy";
     entry.cleanupStatus = app.stopCommand ? "pending" : "not_needed";
-    this.#appendLog(id, "[relaybase] stopping", "system", "system", app);
+    this.#appendLog(id, "[relaybase] stopping", "system", "lifecycle_stopping", app);
+    this.#publishRuntimeChange(id, entry, "stop_requested");
     entry.mcpDrain = await this.mcp.stopApp(id);
 
     await this.#terminateChild(entry.child);
@@ -551,26 +636,56 @@ export class ProcessManager {
     };
   }
 
+  subscribeRuntimeChanges(listener: (event: AppRuntimeChangedEvent) => void): () => void {
+    this.#runtimeSubscribers.add(listener);
+    return () => {
+      this.#runtimeSubscribers.delete(listener);
+    };
+  }
+
   async listStatuses(): Promise<AppStatusView[]> {
     const apps = await this.registry.list();
     const views: AppStatusView[] = [];
+    const externalClaims = new Map<number, number>();
+    for (const app of apps) {
+      if (!this.#runtime.has(app.id) && app.upstreamPort) {
+        externalClaims.set(app.upstreamPort, (externalClaims.get(app.upstreamPort) ?? 0) + 1);
+      }
+    }
+    const openPorts = new Map<number, boolean>();
+    await Promise.all(
+      [...externalClaims.keys()].map(async (port) => {
+        openPorts.set(port, await isPortOpen(port, this.hubHost));
+      })
+    );
 
     for (const app of apps) {
       const runtime = this.#runtime.get(app.id);
       const view = runtime ? this.#view(runtime, app.id) : this.#view(this.#entry("stopped", "unknown"), app.id);
       if (!runtime && app.upstreamPort) {
-        view.externalPortOpen = await isPortOpen(app.upstreamPort, this.hubHost);
+        view.externalPortOpen = openPorts.get(app.upstreamPort) ?? false;
         if (view.externalPortOpen) {
-          view.status = "running";
-          view.health =
-            app.protocol === "tcp"
-              ? "healthy"
-              : (await checkAppHealth(app, app.upstreamPort, this.hubHost))
-                ? "healthy"
-                : "unhealthy";
-          view.phase = "running";
           view.assignedPort = app.upstreamPort;
-          view.canOpen = view.health === "healthy";
+          if ((externalClaims.get(app.upstreamPort) ?? 0) > 1) {
+            view.status = "degraded";
+            view.health = "unhealthy";
+            view.phase = "degraded";
+            view.canStart = false;
+            view.canStop = false;
+            view.canOpen = false;
+            view.primaryAction = "repair";
+            view.blockingReason = "external_port_shared";
+          } else {
+            const healthy = app.protocol === "tcp" ? true : await checkAppHealth(app, app.upstreamPort, this.hubHost);
+            view.status = healthy ? "running" : "degraded";
+            view.health = healthy ? "healthy" : "unhealthy";
+            view.phase = healthy ? "running" : "degraded";
+            view.canStart = false;
+            view.canStop = false;
+            view.canOpen = healthy;
+            view.primaryAction = healthy ? "open" : "repair";
+            if (!healthy) view.blockingReason = "external_health_unverified";
+          }
         }
       }
 
@@ -591,8 +706,12 @@ export class ProcessManager {
       return { port: runtime.assignedPort, external: false };
     }
 
-    if (app.upstreamPort && (await isPortOpen(app.upstreamPort, this.hubHost))) {
-      return { port: app.upstreamPort, external: true };
+    if (app.upstreamPort) {
+      const apps = await this.registry.list();
+      const claimCount = apps.filter((candidate) => candidate.upstreamPort === app.upstreamPort).length;
+      if (claimCount === 1 && (await isPortOpen(app.upstreamPort, this.hubHost))) {
+        return { port: app.upstreamPort, external: true };
+      }
     }
 
     return undefined;
@@ -710,7 +829,16 @@ export class ProcessManager {
       entry.phase = entry.cleanupStatus === "verification_failed" ? "stop_verification_failed" : "cleanup_failed";
       entry.lastError = failureReason;
       this.#finishAttempt(attempt, "failed", entry.phase, failureReason);
-      this.#appendLog(app.id, `[relaybase] stop failed: ${failureReason}`, "system", "system", app, env);
+      this.#appendLog(
+        app.id,
+        `[relaybase] stop failed: ${failureReason}`,
+        "system",
+        "lifecycle_stop_failed",
+        app,
+        env,
+        "error"
+      );
+      this.#publishRuntimeChange(app.id, entry, "stop_failed");
       return this.#view(entry, app.id);
     }
 
@@ -725,7 +853,8 @@ export class ProcessManager {
     entry.lastError = undefined;
     entry.blockingReason = undefined;
     this.#finishAttempt(attempt, "succeeded", entry.phase);
-    this.#appendLog(app.id, "[relaybase] stopped", "system", "system", app, env);
+    this.#appendLog(app.id, "[relaybase] stopped", "system", "lifecycle_stopped", app, env);
+    this.#publishRuntimeChange(app.id, entry, "stopped");
     return this.#view(entry, app.id);
   }
 
@@ -810,6 +939,7 @@ export class ProcessManager {
     entry.lastError = "Lifecycle start was cancelled during daemon shutdown.";
     this.#finishAttempt(attempt, "failed", entry.phase, entry.lastError);
     await this.#cleanupAfterFailedStart(app, entry, child, { shutdown: true });
+    this.#publishRuntimeChange(app.id, entry, "start_cancelled");
     throw lifecycleAbortError(signal);
   }
 
@@ -915,11 +1045,13 @@ export class ProcessManager {
             ? "stopped"
             : status === "conflict"
               ? "conflict"
-              : status === "starting"
-                ? "launching"
-                : status === "stopping"
-                  ? "stopping"
-                  : "errored"),
+              : status === "degraded"
+                ? "degraded"
+                : status === "starting"
+                  ? "launching"
+                  : status === "stopping"
+                    ? "stopping"
+                    : "errored"),
       ...(assignedPort ? { assignedPort } : {}),
       ...(lastError ? { lastError } : {}),
       logs: [],
@@ -976,14 +1108,14 @@ export class ProcessManager {
   }
 
   #appEnv(app: AppRecord, assignedPort: number): NodeJS.ProcessEnv {
-    return {
+    return this.sanitizeEnvironment({
       ...process.env,
       ...app.env,
       ...(assignedPort ? { PORT: String(assignedPort) } : {}),
       HOST: this.hubHost,
       RELAYBASE_APP_ID: app.id,
       RELAYBASE_BASE_URL: `http://${app.id}.localhost:${this.hubPort}`
-    };
+    });
   }
 
   #ownsBackendPort(app: AppRecord, entry: RuntimeEntry): boolean {
@@ -1218,7 +1350,8 @@ export class ProcessManager {
     stream: AppLogEvent["stream"] = "system",
     source: AppLogEvent["source"] = "system",
     app?: AppRecord,
-    env?: NodeJS.ProcessEnv
+    env?: NodeJS.ProcessEnv,
+    level?: AppLogEvent["level"]
   ): void {
     const entry = this.#runtime.get(id);
     if (!entry) {
@@ -1245,7 +1378,7 @@ export class ProcessManager {
         message: safeLine,
         stream,
         source,
-        level: stream === "stderr" ? "error" : "info",
+        level: level ?? (stream === "stderr" ? "error" : "info"),
         redacted: redaction.redacted
       };
       entry.logEvents.push(event);
@@ -1360,6 +1493,16 @@ export class ProcessManager {
       };
     }
 
+    if (entry.status === "degraded") {
+      return {
+        canStart: false,
+        canStop: false,
+        canOpen: false,
+        primaryAction: "repair",
+        blockingReason: entry.blockingReason ?? "external_health_unverified"
+      };
+    }
+
     if (entry.status === "errored" || entry.status === "conflict") {
       return {
         canStart: true,
@@ -1376,5 +1519,21 @@ export class ProcessManager {
       canOpen: false,
       primaryAction: "start"
     };
+  }
+
+  #publishRuntimeChange(appId: string, entry: RuntimeEntry, reason: string): void {
+    const event: AppRuntimeChangedEvent = {
+      appId,
+      status: entry.status,
+      health: entry.health,
+      phase: entry.phase,
+      reason,
+      at: new Date().toISOString(),
+      ...(entry.pid ? { pid: entry.pid } : {}),
+      ...(entry.assignedPort ? { assignedPort: entry.assignedPort } : {})
+    };
+    for (const subscriber of this.#runtimeSubscribers) {
+      subscriber(event);
+    }
   }
 }

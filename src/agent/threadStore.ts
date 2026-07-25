@@ -68,6 +68,10 @@ export class ThreadStore {
     return structuredClone(this.#diagnostics);
   }
 
+  close(): void {
+    this.#db.close();
+  }
+
   createSession(raw: AgentSessionCreateRequest, context: TuiAgentContext): AgentSession {
     const now = new Date().toISOString();
     const session: AgentSession = {

@@ -198,6 +198,13 @@ export class AppPackageService {
     return this.store.listDefinitions();
   }
 
+  activeRuns(): AppPackageRun[] {
+    return this.store
+      .listDefinitions()
+      .flatMap((definition) => this.store.listRunsForPackage(definition.id))
+      .filter((run) => !isTerminalRunStatus(run.status));
+  }
+
   getDefinition(id: string): AppPackageDefinition {
     const definition = this.store.getDefinition(id);
     if (!definition) {

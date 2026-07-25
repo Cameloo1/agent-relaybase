@@ -269,13 +269,13 @@ func TestOperatorPaneLogLinesKeepTheirSemanticToneAssociation(t *testing.T) {
 	style := styles.New(theme)
 	data := operatorCompatibilityData(100, 32, 1)
 	startLine, ok := panes.ProjectLogEvent(relaybaseclient.LogEvent{
-		Stream: "stdout", Source: "start", Level: "info", Message: "start-marker",
+		Stream: "system", Source: "lifecycle_starting", Level: "info", Message: "start-marker",
 	})
 	if !ok {
 		t.Fatal("daemon start event did not project")
 	}
 	stopLine, ok := panes.ProjectLogEvent(relaybaseclient.LogEvent{
-		Stream: "stdout", Source: "stop", Level: "info", Message: "stop-marker",
+		Stream: "system", Source: "lifecycle_stopped", Level: "info", Message: "stop-marker",
 	})
 	if !ok {
 		t.Fatal("daemon stop event did not project")
@@ -287,7 +287,6 @@ func TestOperatorPaneLogLinesKeepTheirSemanticToneAssociation(t *testing.T) {
 		startLine,
 		stopLine,
 	}
-	rendered := BuildShell(style, data).Text
 	tests := []struct {
 		marker string
 		color  color.Color
@@ -295,22 +294,30 @@ func TestOperatorPaneLogLinesKeepTheirSemanticToneAssociation(t *testing.T) {
 		{marker: "success-marker", color: theme.Success},
 		{marker: "warning-marker", color: theme.Warning},
 		{marker: "error-marker", color: theme.Error},
-		{marker: "start-marker", color: theme.Accent},
-		{marker: "stop-marker", color: theme.Accent},
+		{marker: "start-marker", color: theme.Success},
+		{marker: "stop-marker", color: theme.Error},
 	}
-	for _, test := range tests {
-		line := ""
-		for _, candidate := range strings.Split(rendered, "\n") {
-			if strings.Contains(candidate, test.marker) {
-				line = candidate
-				break
+	for _, mode := range []string{"dashboard", "expanded"} {
+		modeData := data
+		if mode == "expanded" {
+			focused := modeData.Panes[0]
+			modeData.FocusedPane = &focused
+		}
+		rendered := BuildShell(style, modeData).Text
+		for _, test := range tests {
+			line := ""
+			for _, candidate := range strings.Split(rendered, "\n") {
+				if strings.Contains(candidate, test.marker) {
+					line = candidate
+					break
+				}
 			}
-		}
-		if line == "" {
-			t.Fatalf("operator pane omitted %q from the final frame", test.marker)
-		}
-		if expected := ansiRGB("38", test.color); !strings.Contains(line, expected) {
-			t.Fatalf("log %q lost tone %q on its rendered line; codes=%q", test.marker, expected, ansiEscapePattern.FindAllString(line, -1))
+			if line == "" {
+				t.Fatalf("%s operator pane omitted %q from the final frame", mode, test.marker)
+			}
+			if expected := ansiRGB("38", test.color); !strings.Contains(line, expected) {
+				t.Fatalf("%s log %q lost tone %q on its rendered line; codes=%q", mode, test.marker, expected, ansiEscapePattern.FindAllString(line, -1))
+			}
 		}
 	}
 }

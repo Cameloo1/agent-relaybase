@@ -28,6 +28,8 @@ const (
 	KindCancel          = "cancel"
 	KindDaemonStatus    = "daemon_status"
 	KindDaemonRepair    = "daemon_repair"
+	KindDaemonRestart   = "daemon_restart"
+	KindSettings        = "settings"
 	KindCreatePackage   = "create_package"
 	KindPackages        = "packages"
 	KindLaunchPackage   = "launch_package"
@@ -311,6 +313,20 @@ func Parse(input string) (ParsedCommand, error) {
 			return ParsedCommand{}, ParseError{Message: "Use /usage."}
 		}
 		parsed.Kind = KindUsage
+	case "settings":
+		if err := rejectUnexpectedFlags(args, "/settings [agent [security]]"); err != nil {
+			return ParsedCommand{}, err
+		}
+		valid := len(args) == 0 ||
+			(len(args) == 1 && strings.EqualFold(args[0], "agent")) ||
+			(len(args) == 2 && strings.EqualFold(args[0], "agent") && strings.EqualFold(args[1], "security"))
+		if !valid {
+			return ParsedCommand{}, ParseError{Message: "Use /settings, /settings agent, or /settings agent security."}
+		}
+		parsed.Kind = KindSettings
+		if len(args) > 0 {
+			parsed.Target = strings.ToLower(strings.Join(args, " "))
+		}
 	case "confirm":
 		if err := rejectUnexpectedFlags(args, "/confirm"); err != nil {
 			return ParsedCommand{}, err
@@ -328,19 +344,21 @@ func Parse(input string) (ParsedCommand, error) {
 		}
 		parsed.Kind = KindCancel
 	case "daemon":
-		if err := rejectUnexpectedFlags(args, "/daemon <status|repair|retry>"); err != nil {
+		if err := rejectUnexpectedFlags(args, "/daemon <status|repair|retry|restart>"); err != nil {
 			return ParsedCommand{}, err
 		}
 		if len(args) != 1 {
-			return ParsedCommand{}, ParseError{Message: "Use /daemon <status|repair|retry>."}
+			return ParsedCommand{}, ParseError{Message: "Use /daemon <status|repair|retry|restart>."}
 		}
 		switch strings.ToLower(args[0]) {
 		case "status":
 			parsed.Kind = KindDaemonStatus
 		case "repair", "retry":
 			parsed.Kind = KindDaemonRepair
+		case "restart":
+			parsed.Kind = KindDaemonRestart
 		default:
-			return ParsedCommand{}, ParseError{Message: "Use /daemon <status|repair|retry>."}
+			return ParsedCommand{}, ParseError{Message: "Use /daemon <status|repair|retry|restart>."}
 		}
 	case "thread":
 		if len(args) == 0 {
@@ -563,7 +581,7 @@ func RequiresConfirmation(command ParsedCommand) bool {
 		KindPackageRunRetry, KindPackageRunAbort,
 		KindAddApp, KindRegister, KindConfigure, KindOpen, KindProve, KindHealthProve,
 		KindManifestEdit, KindHealthRoute, KindPortPinned, KindComponentRole, KindComponentGroup, KindComponentLabel,
-		KindDaemonRepair:
+		KindDaemonRepair, KindDaemonRestart:
 		if command.Kind == KindConfigure && command.DryRun {
 			return false
 		}

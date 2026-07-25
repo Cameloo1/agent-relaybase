@@ -2,6 +2,7 @@ package views
 
 import (
 	"fmt"
+	"image/color"
 	"reflect"
 	"regexp"
 	"strings"
@@ -309,6 +310,31 @@ func TestPaneLogIndicatorsRender(t *testing.T) {
 	withCursor := statusLine(panes.PaneSnapshot{Status: "running", Follow: true, NextBefore: "40", HasMore: true})
 	if !strings.Contains(withCursor, "older available") {
 		t.Fatalf("expected older available indicator, got %q", withCursor)
+	}
+}
+
+func TestPaneStatusToneIsSemanticAndTextRemainsVisible(t *testing.T) {
+	theme, _ := styles.ResolveTheme("dark", func(string) string { return "" })
+	style := styles.New(theme)
+
+	for _, testCase := range []struct {
+		status string
+		color  color.Color
+	}{
+		{status: "running", color: theme.Success},
+		{status: "starting", color: theme.Warning},
+		{status: "degraded", color: theme.Warning},
+		{status: "stopped", color: theme.Error},
+		{status: "failed", color: theme.Error},
+	} {
+		rendered := renderPaneStatusLine(style, panes.PaneSnapshot{Status: testCase.status, Follow: true}, 80)
+		if !strings.Contains(compactSnapshot(rendered), "status "+testCase.status) {
+			t.Fatalf("status %q lost its text label: %q", testCase.status, compactSnapshot(rendered))
+		}
+		want := lipgloss.NewStyle().Foreground(testCase.color).Render(testCase.status)
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("status %q did not use semantic color", testCase.status)
+		}
 	}
 }
 

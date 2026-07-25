@@ -52,9 +52,8 @@ export function diagnosticsForAgentConfig(config: AgentConfig): AgentDiagnostic[
       code: "AGENT_DISABLED",
       message: "Relaybase Operator Agent is disabled.",
       checkedAt: now,
-      userAction: "Set RELAYBASE_AGENT_ENABLED=1 in .env or enable the agent in daemon config."
+      userAction: "Enable the Agent in Settings > Agent > Configuration."
     });
-    return diagnostics;
   }
   if (!config.provider.remoteModelEnabled) {
     diagnostics.push({
@@ -63,18 +62,17 @@ export function diagnosticsForAgentConfig(config: AgentConfig): AgentDiagnostic[
       code: "AGENT_REMOTE_MODEL_DISABLED",
       message: "Relaybase Operator Agent remote model mode is disabled.",
       checkedAt: now,
-      userAction: "Set RELAYBASE_AGENT_REMOTE_MODEL_ENABLED=1 in .env before sending natural-language model requests."
+      userAction: "Enable remote model access in Settings > Agent > Configuration."
     });
-    return diagnostics;
   }
   if (!config.provider.apiKeySource.configured) {
     diagnostics.push({
-      id: "agent.config.openrouter_key_missing",
+      id: "agent.config.credential_missing",
       severity: "error",
-      code: "OPENROUTER_API_KEY_MISSING",
-      message: `${config.provider.apiKeySource.envVar} is not set in the daemon environment.`,
+      code: "AGENT_CREDENTIAL_MISSING",
+      message: "No usable OpenRouter credential is connected.",
       checkedAt: now,
-      userAction: `Set ${config.provider.apiKeySource.envVar} before enabling remote Operator Agent runs.`
+      userAction: "Connect OpenRouter in Settings > Agent > Provider."
     });
   }
   if (!config.provider.modelSlug) {
@@ -84,7 +82,7 @@ export function diagnosticsForAgentConfig(config: AgentConfig): AgentDiagnostic[
       code: "AGENT_MODEL_MISSING",
       message: "No OpenRouter model slug is configured.",
       checkedAt: now,
-      userAction: "Configure a model slug before sending natural-language model requests."
+      userAction: "Choose a model in Settings > Agent > Configuration."
     });
   }
   return diagnostics;

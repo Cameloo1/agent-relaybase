@@ -9,7 +9,7 @@ import (
 func TestCatalogCoversEveryCurrentCommandKindWithParseableExamples(t *testing.T) {
 	wantKinds := []string{
 		KindLaunch, KindStart, KindStop, KindRestart, KindLogsExport, KindPage, KindPaneColor, KindPin, KindUnpin,
-		KindTheme, KindHelp, KindManage, KindUsage, KindConfirm, KindCancel, KindDaemonStatus, KindDaemonRepair,
+		KindTheme, KindHelp, KindManage, KindUsage, KindSettings, KindConfirm, KindCancel, KindDaemonStatus, KindDaemonRepair, KindDaemonRestart,
 		KindCreatePackage, KindPackages, KindLaunchPackage, KindDeletePackage, KindPackageRunRetry, KindPackageRunAbort,
 		KindThreadList, KindThreadNew, KindThreadSwitch, KindThreadRename, KindThreadClear, KindThreadExport, KindThreadPreview,
 		KindAddApp, KindRegister, KindConfigure, KindOpen, KindProve, KindHealthProve, KindRepair,

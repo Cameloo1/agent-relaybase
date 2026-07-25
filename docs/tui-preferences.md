@@ -1,12 +1,14 @@
 # TUI Preferences
 
-As of R013, Relaybase TUI preferences are local to the Go TUI and are stored under the existing Relaybase state directory:
+Relaybase TUI preferences are local to the Go TUI and are stored under the selected Relaybase state directory:
 
 ```text
 <state-dir>/tui/preferences.json
 ```
 
 This keeps preferences out of arbitrary project folders and avoids adding a daemon mutation surface before `/__hub/api/preferences` is implemented. The daemon still owns lifecycle, logs, routes, token state, and API truth. The TUI preference file only stores terminal UI customization.
+
+`/settings` is the interactive editor for these local preferences and for separate daemon-owned Agent configuration. General, Appearance, and Interaction rows either show runtime state or persist through this file. `/settings agent` reads and writes only token-gated daemon contracts. `/settings agent security` reads daemon-owned security findings, bound repair previews, and safe receipts; none are copied into `preferences.json`.
 
 ## Schema
 
@@ -91,9 +93,9 @@ The durable Operator Agent thread database is:
 
 The daemon uses that database for active-thread metadata, thread titles, redacted messages, runs, session events, approval records, audit records, export records, and one-time legacy import from `agent/sessions.json` and `agent/audit.jsonl` when those files exist. Those legacy files are left as backups after import. The TUI reads and updates thread state only through `/__hub/api/agent/*`; it does not use preferences as a fallback transcript store.
 
-## Operator Agent Provider Preferences
+## Legacy Provider Preference Fields
 
-R013 added a disabled-by-default provider configuration shell in local TUI preferences. RA Agent work adds daemon-owned Agent Gateway configuration and execution. The implemented behavior is:
+The version 1 preference schema retains disabled-by-default provider shell fields for compatibility. They are not the authority for daemon Operator Agent execution. Current behavior is:
 
 - deterministic mode remains the local fallback
 - `local_model` and `remote_model` remain local preference/configuration states for UI display and future local-provider work

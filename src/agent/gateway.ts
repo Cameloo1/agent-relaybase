@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { RelaybaseRuntime } from "../server.ts";
@@ -16,6 +16,11 @@ import {
   sanitizeAgentPayload,
   sanitizeAgentPayloadWithReport
 } from "./errors.ts";
+import {
+  DEFAULT_AGENT_EXECUTION_POLICY,
+  invalidAgentExecutionPolicy,
+  normalizeAgentExecutionPolicy
+} from "./executionPolicy.ts";
 import type { AgentRuntimeEvent } from "./events.ts";
 import { evaluateToolPolicy, stableArgumentsHash, userMessageGuardrail } from "./policy.ts";
 import { OperatorAgentRuntime } from "./runtime.ts";
@@ -27,23 +32,29 @@ import {
   workflowContinuationForApprovedTool
 } from "./runCoordinator.ts";
 import { AgentSessionStore } from "./sessionStore.ts";
-import { executeRelaybaseAgentTool } from "./tools/index.ts";
+import { executeRelaybaseAgentTool, relaybaseAgentToolNames } from "./tools/index.ts";
 import { authorizeAgentToolProjectScope, createCanonicalProjectRootGrant } from "./tools/projectSafety.ts";
 import { createSetupPreviewBinding } from "./tools/setupPreviewBinding.ts";
 import { bindAgentToolApprovalState } from "./tools/approvalStateBinding.ts";
 import type {
   AgentApproval,
+  AgentBlockedCandidate,
   AgentAuditEvent,
   AgentConfig,
   AgentConfigUpdate,
   AgentDiagnostic,
   AgentMessage,
   AgentMessageRequest,
+  AgentModelSource,
   AgentProviderConfig,
   AgentProjectRootGrant,
   AgentRun,
   AgentRunEvent,
   AgentRunEventType,
+  AgentSecurityRepairActionId,
+  AgentSecurityRepairOperation,
+  AgentSecurityRepairPreview,
+  AgentSecurityStatus,
   AgentSession,
   AgentSessionCreateRequest,
   AgentSessionExportRequest,
@@ -55,6 +66,27 @@ import type {
   TuiAgentContext
 } from "./types.ts";
 import { activeThreadUsageSnapshot } from "./usageSummary.ts";
+import { AgentActivityProjector } from "./activity.ts";
+import {
+  AgentConfigManager,
+  AgentConfigResolutionError,
+  type AgentConfigReloadResult,
+  type ResolvedAgentRunConfig,
+  type SafeProviderCredentialMetadata
+} from "./configManager.ts";
+import { AgentCredentialError, type CredentialStore } from "./credentialStore.ts";
+import {
+  OpenRouterConnectionError,
+  OpenRouterConnectionManager,
+  OpenRouterValidationUnavailableError,
+  type OpenRouterConnectionAttemptState
+} from "./openrouterConnection.ts";
+import { withoutAgentCredentialEnvironment } from "./childEnvironment.ts";
+import { openTrustedExternalUrl } from "../externalUrl.ts";
+import type { LegacyCredentialRemovalPreview } from "./legacyCredentialRemoval.ts";
+import { AgentSecurityDoctor } from "./securityDoctor.ts";
+import { AgentSecurityRepairJournal } from "./securityRepairJournal.ts";
+import { AgentSecurityRepairError, AgentSecurityRepairService } from "./securityRepairService.ts";
 
 const DEFAULT_OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY";
 const AGENT_ENABLED_ENV = "RELAYBASE_AGENT_ENABLED";
@@ -63,7 +95,7 @@ const AGENT_MODEL_ENV = "RELAYBASE_AGENT_MODEL";
 const MAX_AUTHORIZED_PROJECT_ROOTS = 8;
 const MAX_PROJECT_ROOT_LENGTH = 4_096;
 const AGENT_CONFIG_FILE = "config.json";
-const DEFAULT_TOOL_ALLOWLIST = [
+const LEGACY_DEFAULT_TOOL_ALLOWLIST = [
   "list_apps",
   "get_app_state",
   "get_app_group",
@@ -140,6 +172,7 @@ interface QueuedRunInput {
   context: TuiAgentContext;
   projectRootGrants: readonly AgentProjectRootGrant[];
   config: AgentConfig;
+  resolvedConfig: ResolvedAgentRunConfig;
   knownSecrets: string[];
   retryOfRunId?: string;
 }
@@ -150,10 +183,22 @@ export interface AgentGatewayServiceOptions {
   approvalStore?: ApprovalStore;
   auditStore?: AgentAuditStore;
   stateDir?: string;
+  environment?: {
+    modelSource?: AgentModelSource;
+    envFilePath?: string;
+    envFileFingerprint?: string;
+    envFileAppliedKeys?: string[];
+    envFileSkippedKeys?: string[];
+    envFileSourceKind?: "explicit_env_file" | "cwd_env_file";
+  };
+  credentialStore?: CredentialStore;
+  openExternalUrl?: (url: string, env: NodeJS.ProcessEnv) => boolean;
 }
 
 export class AgentGatewayService {
   #config: AgentConfig = defaultAgentConfig();
+  #configManager: AgentConfigManager;
+  #openRouterConnection: OpenRouterConnectionManager;
   #sessions: AgentSessionStore;
   #agentRuntime: OperatorAgentRuntime;
   #approvals: ApprovalStore;
@@ -164,14 +209,154 @@ export class AgentGatewayService {
   #sequence = 0;
   #budgetReservations = new Map<string, { sessionId: string; estimatedUsd: number; createdAt: string }>();
   #executions = new Map<string, RunExecution>();
+  #activity = new AgentActivityProjector();
+  #openExternalUrl: (url: string, env: NodeJS.ProcessEnv) => boolean;
+  #credentialStore?: CredentialStore;
+  #securityRepairJournal: AgentSecurityRepairJournal;
+  #securityRepair: AgentSecurityRepairService;
 
   constructor(options: AgentGatewayServiceOptions = {}) {
+    this.#openExternalUrl = options.openExternalUrl ?? openTrustedExternalUrl;
+    this.#credentialStore = options.credentialStore;
     this.#stateDir = options.stateDir;
     this.#configPath = options.stateDir ? path.join(options.stateDir, "agent", AGENT_CONFIG_FILE) : undefined;
-    this.#config = loadPersistedAgentConfig(defaultAgentConfig(), this.#configPath);
+    const persisted = loadPersistedAgentConfig(
+      defaultAgentConfig(process.env, options.environment?.modelSource),
+      this.#configPath
+    );
+    this.#config = persisted.config;
+    this.#configManager = new AgentConfigManager({
+      initialConfig: this.#config,
+      environment: options.environment,
+      shellEnvironment: process.env,
+      credentialStore: options.credentialStore,
+      managedCredentialState: persisted.managedCredentialState,
+      onActivated: (config) => {
+        this.#config = config;
+        this.#persistConfig();
+      }
+    });
     this.#sessions = options.sessionStore ?? new AgentSessionStore({ stateDir: options.stateDir });
     this.#agentRuntime = options.agentRuntime ?? new OperatorAgentRuntime();
     this.#audit = options.auditStore ?? new AgentAuditStore({ stateDir: options.stateDir });
+    this.#openRouterConnection = new OpenRouterConnectionManager({
+      configManager: this.#configManager,
+      onStateChange: (state) => {
+        if (!["connected", "connected_unverified", "cancelled", "expired", "failed"].includes(state.status)) {
+          return;
+        }
+        const event =
+          state.status === "connected" || state.status === "connected_unverified"
+            ? state.mode === "replace"
+              ? "agent.credential_replaced"
+              : "agent.credential_connected"
+            : "agent.credential_connection_failed";
+        this.#auditEvent(event, {
+          attemptId: state.attemptId,
+          mode: state.mode,
+          result: state.status,
+          diagnosticCode: state.diagnostic?.code
+        });
+      }
+    });
+    this.#securityRepairJournal = new AgentSecurityRepairJournal({
+      stateDir: options.stateDir,
+      ...(options.credentialStore?.available() && options.credentialStore.restrictPathToCurrentUser
+        ? { restrictPath: (target: string) => options.credentialStore!.restrictPathToCurrentUser!(target) }
+        : {})
+    });
+    const securityDoctor = new AgentSecurityDoctor({
+      getConfig: () => this.#safeConfig(),
+      refreshManagedCredentialState: () => this.#configManager.refreshManagedCredentialState(),
+      inspectCredentialProtection: async (credentialId) => {
+        if (this.#credentialStore?.inspectProtection) {
+          const credential = await this.#credentialStore.inspectProtection(credentialId);
+          const journalAcl = this.#credentialStore.inspectPathProtection
+            ? await this.#credentialStore.inspectPathProtection(this.#securityRepairJournal.dbPath)
+            : "unknown";
+          return {
+            ...credential,
+            acl: credential.acl === "weak" || journalAcl === "weak" ? "weak" : credential.acl
+          };
+        }
+        const config = this.#safeConfig();
+        return {
+          available: Boolean(this.#credentialStore?.available()),
+          credentialExists: Boolean(config.provider.apiKeySource.configured),
+          acl: "unknown"
+        };
+      },
+      providerAttempt: () => {
+        const attempt = this.#openRouterConnection.status();
+        return attempt ? { status: attempt.status, expiresAt: attempt.expiresAt } : null;
+      },
+      probeProviderCredential: async () => {
+        await this.#configManager.probeManagedCredential((credential) =>
+          this.#openRouterConnection.validateCredential(credential)
+        );
+      },
+      windowsVerificationAvailability: () =>
+        this.#credentialStore?.verificationAvailability?.() ?? {
+          available: false,
+          reason: "interactive_daemon_prompt_ownership_unproven"
+        }
+    });
+    this.#securityRepair = new AgentSecurityRepairService({
+      doctor: securityDoctor,
+      journal: this.#securityRepairJournal,
+      binding: () => this.#securityRepairBinding(),
+      refreshManagedCredentialState: () => this.#configManager.refreshManagedCredentialState(),
+      clearStaleProviderConnection: () => {
+        this.#openRouterConnection.clearTerminalAttempts();
+      },
+      repairCredentialAcl: () => this.#repairCredentialAcl(),
+      validateManagedCredential: async () => {
+        await this.validateOpenRouterCredential();
+      },
+      migrateLegacyCredential: async () => {
+        await this.migrateOpenRouterCredential();
+      },
+      removeLegacyExternalAssignment: async () => {
+        const preview = await this.previewLegacyCredentialRemoval();
+        await this.applyLegacyCredentialRemoval(preview.previewId);
+      },
+      disconnectLocalCredential: async () => {
+        await this.disconnectOpenRouter();
+      },
+      openProviderKeyManagement: async () => {
+        const opened = this.#openExternalUrl(
+          "https://openrouter.ai/settings/keys",
+          this.sanitizeChildEnvironment(process.env)
+        );
+        if (!opened) {
+          throw new AgentGatewayRequestError(
+            409,
+            "AGENT_PROVIDER_KEY_MANAGEMENT_OPEN_FAILED",
+            "Relaybase could not open OpenRouter key management.",
+            {
+              retryable: true,
+              userAction: "Open https://openrouter.ai/settings/keys in a trusted browser."
+            }
+          );
+        }
+      },
+      reloadSelectedAgentConfig: async () => {
+        const result = await this.reloadConfig();
+        if (result.status === "blocked") {
+          throw new AgentGatewayRequestError(
+            409,
+            result.diagnostic?.code ?? "AGENT_CONFIG_RELOAD_INVALID",
+            result.diagnostic?.message ?? "Agent configuration reload was blocked.",
+            {
+              retryable: false,
+              userAction:
+                result.diagnostic?.userAction ?? "Repair the selected source and create a fresh repair preview."
+            }
+          );
+        }
+      },
+      audit: (type, data) => this.#auditEvent(type, data)
+    });
     this.#approvals = options.approvalStore ?? new ApprovalStore({ threadStore: this.#sessions.threadStore() });
     this.#sequence = this.#sessions.maxEventSequence();
     const recoveredApprovals = this.#approvals.recoverPending();
@@ -191,6 +376,21 @@ export class AgentGatewayService {
     this.#reconcileInterruptedRuns(new Set(recoveredApprovals.map((approval) => approval.runId)));
   }
 
+  async close(): Promise<void> {
+    this.#openRouterConnection.close();
+    for (const execution of this.#executions.values()) execution.controller.abort("Relaybase daemon is shutting down.");
+    const deadline = Date.now() + 5_000;
+    while (this.#executions.size > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    if (this.#executions.size > 0) {
+      throw new Error("Operator Agent executions did not stop before the shutdown deadline.");
+    }
+    this.#audit.close();
+    this.#sessions.close();
+    this.#securityRepairJournal.close();
+  }
+
   getConfig(): AgentConfig {
     return this.#safeConfig();
   }
@@ -203,17 +403,57 @@ export class AgentGatewayService {
         "Agent config must reference an API key source, not include a raw key.",
         {
           retryable: false,
-          userAction: "Set OPENROUTER_API_KEY in the daemon environment and reference that env var in config."
+          userAction: "Use Agent Provider settings to connect OpenRouter or select a legacy environment key reference."
         }
       );
     }
 
-    const update = raw as AgentConfigUpdate;
+    const previousConfig = structuredClone(this.#config);
+    const requestUpdate =
+      raw.update && typeof raw.update === "object" && !Array.isArray(raw.update)
+        ? (raw.update as Record<string, unknown>)
+        : raw;
+    const expectedRevisionId =
+      typeof raw.expectedRevisionId === "string" && raw.expectedRevisionId.trim()
+        ? raw.expectedRevisionId.trim()
+        : undefined;
+    const update = requestUpdate as AgentConfigUpdate;
+    const invalidExecution =
+      update.execution === undefined
+        ? undefined
+        : invalidAgentExecutionPolicy(update.execution, this.#config.execution);
+    if (invalidExecution) {
+      throw new AgentGatewayRequestError(
+        400,
+        "AGENT_EXECUTION_POLICY_INVALID",
+        `Agent execution policy is invalid: ${invalidExecution}`,
+        {
+          retryable: false,
+          userAction: "Correct the bounded execution setting and retry."
+        }
+      );
+    }
     const now = new Date().toISOString();
+    const requestedToolMode =
+      update.toolAllowlistMode === "all_registered" || update.toolAllowlistMode === "explicit_allowlist"
+        ? update.toolAllowlistMode
+        : Array.isArray(update.toolAllowlist)
+          ? "explicit_allowlist"
+          : this.#config.toolAllowlistMode;
+    const requestedToolAllowlist =
+      requestedToolMode === "all_registered"
+        ? relaybaseAgentToolNames()
+        : Array.isArray(update.toolAllowlist)
+          ? normalizedToolNames(update.toolAllowlist)
+          : this.#config.toolAllowlist;
     this.#config = {
       ...this.#config,
       ...(typeof update.enabled === "boolean" ? { enabled: update.enabled } : {}),
-      ...(Array.isArray(update.toolAllowlist) ? { toolAllowlist: update.toolAllowlist.map(String) } : {}),
+      ...(update.execution
+        ? { execution: normalizeAgentExecutionPolicy(update.execution, this.#config.execution) }
+        : {}),
+      toolAllowlist: requestedToolAllowlist,
+      toolAllowlistMode: requestedToolMode,
       ...(update.approvalPolicy ? { approvalPolicy: update.approvalPolicy } : {}),
       ...(typeof update.allowBrowserOpen === "boolean" ? { allowBrowserOpen: update.allowBrowserOpen } : {}),
       ...(typeof update.allowCopyRoute === "boolean" ? { allowCopyRoute: update.allowCopyRoute } : {}),
@@ -221,7 +461,12 @@ export class AgentGatewayService {
       provider: {
         ...this.#config.provider,
         ...(update.provider?.modelSlug !== undefined
-          ? { modelSlug: stringOrUndefined(update.provider.modelSlug) }
+          ? {
+              modelSlug: stringOrUndefined(update.provider.modelSlug),
+              modelSource: update.provider.modelSlug.trim()
+                ? ({ kind: "persisted_config", label: "saved Agent configuration" } as const)
+                : ({ kind: "unconfigured", label: "not configured" } as const)
+            }
           : {}),
         ...(update.provider?.apiKeyEnvVar !== undefined
           ? {
@@ -244,9 +489,351 @@ export class AgentGatewayService {
       },
       updatedAt: now
     };
-    this.#persistConfig();
-    this.#auditEvent("agent.config_updated", { config: this.#safeConfig() });
-    return this.#safeConfig();
+    let safeConfig: AgentConfig;
+    try {
+      safeConfig = this.#configManager.activateManagedConfig(this.#config, expectedRevisionId);
+    } catch (error) {
+      if (error instanceof AgentConfigResolutionError) {
+        this.#config = previousConfig;
+        throw new AgentGatewayRequestError(409, error.diagnostic.code, error.diagnostic.message, {
+          retryable: false,
+          userAction: error.diagnostic.userAction
+        });
+      }
+      throw error;
+    }
+    if (
+      (previousConfig.enabled && !safeConfig.enabled) ||
+      (previousConfig.provider.remoteModelEnabled && !safeConfig.provider.remoteModelEnabled)
+    ) {
+      this.#stopModelExecutionsForLiveSafety();
+    }
+    this.#auditEvent("agent.config_updated", {
+      revisionId: safeConfig.revision?.id,
+      generation: safeConfig.revision?.generation,
+      changedFields: Object.keys(update)
+    });
+    return safeConfig;
+  }
+
+  async reloadConfig(): Promise<AgentConfigReloadResult> {
+    const result = await this.#configManager.reload({ force: true });
+    this.#auditEvent(result.status === "blocked" ? "agent.config_reload_failed" : "agent.config_reload_applied", {
+      status: result.status,
+      oldRevisionId: result.oldRevisionId,
+      newRevisionId: result.newRevisionId,
+      changedFields: result.changedFields,
+      diagnosticCode: result.diagnostic?.code
+    });
+    return result;
+  }
+
+  async providerStatus(attemptId?: string): Promise<{
+    config: AgentConfig;
+    attempt: OpenRouterConnectionAttemptState | null;
+  }> {
+    await this.#configManager.refreshManagedCredentialState();
+    return {
+      config: this.#safeConfig(),
+      attempt: this.#openRouterConnection.status(attemptId)
+    };
+  }
+
+  async agentSecurityStatus(options: { online?: boolean } = {}): Promise<AgentSecurityStatus> {
+    const status = await this.#securityControl(() => this.#securityRepair.diagnose(options));
+    const lastSecurityEvent = this.#audit
+      .list()
+      .toReversed()
+      .find((event) =>
+        ["agent.security_", "agent.credential_", "agent.legacy_credential_", "agent.windows_verification_"].some(
+          (prefix) => event.type.startsWith(prefix)
+        )
+      );
+    return {
+      ...status,
+      ...(lastSecurityEvent ? { lastSecurityEvent: { at: lastSecurityEvent.at, type: lastSecurityEvent.type } } : {})
+    };
+  }
+
+  async previewAgentSecurityRepair(input: {
+    actionIds?: AgentSecurityRepairActionId[];
+    issueCodes?: string[];
+    safe?: boolean;
+    online?: boolean;
+  }): Promise<AgentSecurityRepairPreview> {
+    return this.#securityControl(() => this.#securityRepair.preview(input));
+  }
+
+  async applyAgentSecurityRepair(input: {
+    previewId: string;
+    idempotencyKey: string;
+    confirmation: string;
+  }): Promise<AgentSecurityRepairOperation> {
+    return this.#securityControl(() => this.#securityRepair.apply(input));
+  }
+
+  agentSecurityRepairPreview(previewId: string): AgentSecurityRepairPreview {
+    return this.#securityControlSync(() => this.#securityRepair.storedPreview(previewId));
+  }
+
+  agentSecurityRepairOperation(operationId: string): AgentSecurityRepairOperation {
+    return this.#securityControlSync(() => this.#securityRepair.operation(operationId));
+  }
+
+  latestAgentSecurityRepairOperation(): AgentSecurityRepairOperation | null {
+    return this.#securityControlSync(() => this.#securityRepair.latestOperation());
+  }
+
+  cancelAgentSecurityRepair(operationId: string): AgentSecurityRepairOperation {
+    return this.#securityControlSync(() => this.#securityRepair.cancel(operationId));
+  }
+
+  async connectOpenRouter(
+    mode: "connect" | "replace" = "connect",
+    options: { openBrowser?: boolean } = {}
+  ): Promise<OpenRouterConnectionAttemptState & { browserOpen?: "opened" | "unavailable" }> {
+    const attempt = await this.#openRouterConnection.start(mode);
+    const browserOpen =
+      options.openBrowser && attempt.authorizationUrl
+        ? this.#openExternalUrl(attempt.authorizationUrl, this.sanitizeChildEnvironment(process.env))
+          ? "opened"
+          : "unavailable"
+        : undefined;
+    this.#auditEvent("agent.credential_connect_requested", {
+      attemptId: attempt.attemptId,
+      mode,
+      expiresAt: attempt.expiresAt,
+      browserOpen
+    });
+    return { ...attempt, ...(browserOpen ? { browserOpen } : {}) };
+  }
+
+  async disconnectOpenRouter(): Promise<{
+    disconnected: boolean;
+    remoteCredentialStillActive: true;
+    config: AgentConfig;
+  }> {
+    this.#auditEvent("agent.credential_disconnect_requested", {
+      credentialId: this.#safeConfig().credential?.credentialId
+    });
+    const disconnected = await this.#credentialControl(() => this.#configManager.disconnectManagedCredential());
+    this.#stopModelExecutionsForLiveSafety();
+    this.#auditEvent("agent.credential_disconnected", {
+      disconnected,
+      remoteCredentialStillActive: true,
+      revisionId: this.#safeConfig().revision?.id
+    });
+    return { disconnected, remoteCredentialStillActive: true, config: this.#safeConfig() };
+  }
+
+  async migrateOpenRouterCredential(): Promise<{ migrated: true; config: AgentConfig }> {
+    const descriptor = await this.#credentialControl(() =>
+      this.#configManager.migrateLegacyCredential((credential) =>
+        this.#openRouterConnection.validateCredential(credential)
+      )
+    );
+    this.#auditEvent("agent.credential_connected", {
+      credentialId: descriptor.credentialId,
+      protection: descriptor.protection,
+      result: "migrated"
+    });
+    return { migrated: true, config: this.#safeConfig() };
+  }
+
+  async validateOpenRouterCredential(): Promise<{ validated: true; config: AgentConfig }> {
+    await this.#credentialControl(() =>
+      this.#configManager.validateManagedCredential((credential) =>
+        this.#openRouterConnection.validateCredential(credential)
+      )
+    );
+    this.#auditEvent("agent.credential_connected", {
+      credentialId: this.#safeConfig().credential?.credentialId,
+      protection: this.#safeConfig().credential?.protection,
+      result: "revalidated"
+    });
+    return { validated: true, config: this.#safeConfig() };
+  }
+
+  async previewLegacyCredentialRemoval(): Promise<LegacyCredentialRemovalPreview> {
+    const preview = await this.#credentialControl(() => this.#configManager.previewLegacyCredentialRemoval());
+    this.#auditEvent("agent.legacy_credential_removal_previewed", {
+      previewId: preview.previewId,
+      sourceLabel: preview.sourceLabel,
+      keyName: preview.keyName,
+      lineNumber: preview.lineNumber,
+      expiresAt: preview.expiresAt
+    });
+    return preview;
+  }
+
+  async applyLegacyCredentialRemoval(previewId: string): Promise<{
+    removed: true;
+    sourceLabel: string;
+    changedLineCount: 1;
+    reload: AgentConfigReloadResult;
+    config: AgentConfig;
+  }> {
+    const result = await this.#credentialControl(() => this.#configManager.applyLegacyCredentialRemoval(previewId));
+    this.#auditEvent("agent.legacy_credential_removed", {
+      previewId,
+      sourceLabel: result.sourceLabel,
+      changedLineCount: result.changedLineCount,
+      revisionId: result.reload.newRevisionId
+    });
+    return { ...result, config: this.#safeConfig() };
+  }
+
+  previewOpenRouterRevocation(): {
+    action: "remote_revoke";
+    supported: false;
+    requiresExternalAction: true;
+    managementUrl: string;
+    localCredentialPreserved: true;
+  } {
+    this.#auditEvent("agent.credential_revocation_requested", {
+      mode: "preview",
+      credentialId: this.#safeConfig().credential?.credentialId
+    });
+    return {
+      action: "remote_revoke",
+      supported: false,
+      requiresExternalAction: true,
+      managementUrl: "https://openrouter.ai/settings/keys",
+      localCredentialPreserved: true
+    };
+  }
+
+  recordOpenRouterRevocationUnconfirmed(): void {
+    this.#auditEvent("agent.credential_revocation_unconfirmed", {
+      credentialId: this.#safeConfig().credential?.credentialId,
+      localCredentialPreserved: true
+    });
+  }
+
+  setWindowsVerificationMode(mode: unknown): {
+    highSecurityMode: "unavailable";
+    selectedMode: "off";
+  } {
+    if (mode === "off") {
+      return { highSecurityMode: "unavailable", selectedMode: "off" };
+    }
+    this.#auditEvent("agent.windows_verification_failed", {
+      result: "unavailable",
+      reason: "interactive_daemon_prompt_ownership_unproven"
+    });
+    throw new AgentGatewayRequestError(
+      409,
+      "AGENT_WINDOWS_VERIFICATION_UNAVAILABLE",
+      "Require Windows verification is unavailable in this daemon launch mode.",
+      {
+        retryable: false,
+        userAction: "Keep silent mode enabled. Relaybase will not silently downgrade a required verification policy."
+      }
+    );
+  }
+
+  sanitizeChildEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    return withoutAgentCredentialEnvironment(source, [
+      this.#config.provider.apiKeySource.type === "environment" ? (this.#config.provider.apiKeySource.envVar ?? "") : ""
+    ]);
+  }
+
+  async #repairCredentialAcl(): Promise<void> {
+    const credentialId = this.#safeConfig().credential?.credentialId;
+    if (!credentialId || !this.#credentialStore?.repairProtection) {
+      throw new AgentCredentialError(
+        "AGENT_CREDENTIAL_DPAPI_PROTECT_FAILED",
+        "Protected credential ACL repair is unavailable."
+      );
+    }
+    await this.#credentialControl(() => this.#credentialStore!.repairProtection!(credentialId));
+    this.#credentialStore.restrictPathToCurrentUser?.(this.#securityRepairJournal.dbPath);
+    if (
+      this.#credentialStore.inspectPathProtection &&
+      (await this.#credentialStore.inspectPathProtection(this.#securityRepairJournal.dbPath)) === "weak"
+    ) {
+      throw new AgentCredentialError(
+        "AGENT_CREDENTIAL_DPAPI_PROTECT_FAILED",
+        "Relaybase could not verify the repaired security journal access policy."
+      );
+    }
+  }
+
+  #securityRepairBinding(): {
+    configRevisionId: string;
+    credentialIdentity: string;
+    sourceFingerprint: string;
+  } {
+    const binding = this.#configManager.securityRepairBindingState();
+    return {
+      configRevisionId: binding.configRevisionId,
+      credentialIdentity: createHash("sha256")
+        .update(binding.credentialId ?? "none")
+        .digest("hex"),
+      sourceFingerprint: binding.sourceFingerprint
+    };
+  }
+
+  async #securityControl<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof AgentSecurityRepairError) {
+        throw new AgentGatewayRequestError(error.statusCode, error.code, error.message, {
+          retryable: error.code === "AGENT_SECURITY_REPAIR_PREVIEW_STALE",
+          userAction: error.userAction
+        });
+      }
+      throw error;
+    }
+  }
+
+  #securityControlSync<T>(operation: () => T): T {
+    try {
+      return operation();
+    } catch (error) {
+      if (error instanceof AgentSecurityRepairError) {
+        throw new AgentGatewayRequestError(error.statusCode, error.code, error.message, {
+          retryable: error.code === "AGENT_SECURITY_REPAIR_PREVIEW_STALE",
+          userAction: error.userAction
+        });
+      }
+      throw error;
+    }
+  }
+
+  async #credentialControl<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof AgentCredentialError) {
+        throw new AgentGatewayRequestError(409, error.code, error.message, {
+          retryable: false,
+          userAction:
+            error.code === "AGENT_LEGACY_CREDENTIAL_REMOVAL_STALE"
+              ? "Create a fresh removal preview and confirm it again."
+              : "Review Agent Provider status and retry the protected credential operation."
+        });
+      }
+      if (error instanceof OpenRouterValidationUnavailableError) {
+        throw new AgentGatewayRequestError(
+          503,
+          "AGENT_PROVIDER_KEY_UNVERIFIED",
+          "OpenRouter credential validation is temporarily unavailable.",
+          {
+            retryable: true,
+            userAction: "Retry validation when provider connectivity is available."
+          }
+        );
+      }
+      if (error instanceof OpenRouterConnectionError) {
+        throw new AgentGatewayRequestError(409, error.code, error.message, {
+          retryable: false,
+          userAction: "Replace or reconnect the OpenRouter credential."
+        });
+      }
+      throw error;
+    }
   }
 
   async diagnostics(runtime: RelaybaseRuntime): Promise<AgentDiagnostic[]> {
@@ -291,6 +878,13 @@ export class AgentGatewayService {
 
   listSessions(): AgentSession[] {
     return this.#sessions.list();
+  }
+
+  activeRuns(): AgentRun[] {
+    return this.#sessions
+      .list()
+      .map((session) => activeRunForSession(session))
+      .filter((run): run is AgentRun => Boolean(run));
   }
 
   getSession(sessionId: string): AgentSession {
@@ -458,18 +1052,14 @@ export class AgentGatewayService {
 
     const context = await normalizeTuiContext(runtime, raw.context ?? session.context);
     const projectRootGrants = await canonicalProjectRootGrants(context);
-    const config = this.#safeConfig();
-    const knownSecrets = [process.env[config.provider.apiKeySource.envVar] ?? "", runtime.token].filter(
-      (secret) => secret.length > 0
-    );
-    const safeContent = redactAgentText(content, knownSecrets);
     const messageId = idempotencyKey ? idempotentMessageId(sessionId, idempotencyKey) : randomUUID();
+    const idempotencySafeContent = redactAgentText(content, [runtime.token]);
     session = this.getSession(sessionId);
     const existingMessage = session.messages.find((candidate) => candidate.id === messageId);
     if (existingMessage) {
       if (
         submissionFingerprint(existingMessage.content, existingMessage.context) !==
-        submissionFingerprint(safeContent, context)
+        submissionFingerprint(idempotencySafeContent, context)
       ) {
         throw new AgentGatewayRequestError(
           409,
@@ -500,7 +1090,7 @@ export class AgentGatewayService {
       this.#auditEvent(
         "agent.run_submission_reused",
         { sessionId, runId: existingRun.id, messageId },
-        { sessionId, runId: existingRun.id, modelSlug: existingRun.modelSlug, knownSecrets }
+        { sessionId, runId: existingRun.id, modelSlug: existingRun.modelSlug, knownSecrets: [runtime.token] }
       );
       return {
         message: existingMessage,
@@ -524,6 +1114,32 @@ export class AgentGatewayService {
       );
     }
 
+    let resolvedConfig: ResolvedAgentRunConfig | undefined;
+    let resolutionDiagnostic: AgentDiagnostic | undefined;
+    try {
+      resolvedConfig = await this.#configManager.resolveForNewRun();
+    } catch (error) {
+      if (
+        error instanceof AgentCredentialError &&
+        this.#safeConfig().provider.apiKeySource.type === "managed_windows_dpapi"
+      ) {
+        this.#auditEvent("agent.credential_unprotect_failed", {
+          credentialId: this.#safeConfig().credential?.credentialId,
+          diagnosticCode: error.code
+        });
+      }
+      resolutionDiagnostic =
+        error instanceof AgentConfigResolutionError
+          ? error.diagnostic
+          : error instanceof AgentCredentialError
+            ? diagnosticFromCredentialError(error)
+            : diagnosticFromRuntimeError(error);
+    }
+    const config = resolvedConfig?.config ?? this.#safeConfig();
+    const knownSecrets = [runtime.token, ...(resolvedConfig?.redactionSecrets ?? [])].filter(
+      (secret) => secret.length > 0
+    );
+    const safeContent = redactAgentText(content, knownSecrets);
     const draftMessage: AgentMessage = {
       id: messageId,
       sessionId,
@@ -538,6 +1154,8 @@ export class AgentGatewayService {
       status: "queued",
       provider: "openrouter",
       modelSlug: config.provider.modelSlug,
+      configRevisionId: resolvedConfig?.revisionId ?? config.revision?.id,
+      configGeneration: resolvedConfig?.generation ?? config.revision?.generation,
       createdAt: now,
       events: []
     };
@@ -545,22 +1163,33 @@ export class AgentGatewayService {
     const message = this.#sessions.appendMessage(sessionId, draftMessage) ?? draftMessage;
     const run = this.#sessions.appendRun(sessionId, draftRun) ?? draftRun;
     this.#sessions.updateContext(sessionId, context);
+    session = this.getSession(sessionId);
+    this.#publishRunEvent(
+      session,
+      run,
+      "message.user",
+      { messageId: message.id, content: message.content },
+      knownSecrets
+    );
 
     const inputDiagnostic = userMessageGuardrail(content);
     if (inputDiagnostic) {
+      resolvedConfig?.credentialLease.dispose();
       this.#finishBlockedRun(session, run, "agent.run_blocked", inputDiagnostic, content, knownSecrets);
       return { message, run, diagnostics: [inputDiagnostic] };
     }
 
-    const diagnostics = this.#configDiagnostics();
-    const blockingDiagnostic = diagnostics.find((diagnostic) => diagnostic.severity === "error");
-    if (blockingDiagnostic) {
+    if (resolutionDiagnostic || !resolvedConfig) {
+      const blockingDiagnostic =
+        resolutionDiagnostic ??
+        diagnosticFromRuntimeError(new Error("Agent configuration resolution ended without a snapshot."));
       this.#finishBlockedRun(session, run, "agent.run_blocked", blockingDiagnostic, content, knownSecrets);
       return { message, run, diagnostics: [blockingDiagnostic] };
     }
 
     const budgetDiagnostic = this.#reserveBudget(config, sessionId, run.id);
     if (budgetDiagnostic) {
+      resolvedConfig.credentialLease.dispose();
       this.#finishBlockedRun(session, run, "agent.budget_blocked", budgetDiagnostic, content, knownSecrets);
       return { message, run, diagnostics: [budgetDiagnostic] };
     }
@@ -587,6 +1216,7 @@ export class AgentGatewayService {
         context,
         projectRootGrants,
         config,
+        resolvedConfig,
         knownSecrets,
         retryOfRunId: options.retryOfRunId
       });
@@ -664,6 +1294,37 @@ export class AgentGatewayService {
     return this.getRun(sessionId, runId);
   }
 
+  #stopModelExecutionsForLiveSafety(): void {
+    for (const [sessionId, execution] of [...this.#executions.entries()]) {
+      if (execution.kind === "approved_tool") {
+        continue;
+      }
+      const session = this.#sessions.get(sessionId);
+      const run = session?.runs.find((candidate) => candidate.id === execution.runId);
+      if (!session || !run || !["queued", "running"].includes(run.status)) {
+        continue;
+      }
+      execution.controller.abort("agent_live_safety_configuration_changed");
+      this.#rejectPendingApprovalsForRun(sessionId, run.id, "agent_disabled");
+      const diagnostic: AgentDiagnostic = {
+        id: "agent.run.cancelled_by_live_safety",
+        severity: "warning",
+        code: "AGENT_RUN_CANCELLED",
+        message: "Operator Agent model work stopped because live safety configuration was tightened.",
+        checkedAt: new Date().toISOString(),
+        userAction: "Review Agent settings before retrying the request."
+      };
+      this.#finishFailedRun(session, run, diagnostic, "", []);
+      this.#releaseBudget(run.id);
+      this.#executions.delete(sessionId);
+      this.#auditEvent(
+        "agent.run_stopped_by_live_safety",
+        { sessionId, runId: run.id },
+        { sessionId, runId: run.id, modelSlug: run.modelSlug }
+      );
+    }
+  }
+
   async retryRun(
     runtime: RelaybaseRuntime,
     sessionId: string,
@@ -718,6 +1379,7 @@ export class AgentGatewayService {
   async #executeQueuedRun(input: QueuedRunInput): Promise<void> {
     const execution = this.#executions.get(input.sessionId);
     if (!execution || execution.runId !== input.runId) {
+      input.resolvedConfig.credentialLease.dispose();
       return;
     }
 
@@ -725,6 +1387,7 @@ export class AgentGatewayService {
     let run = session.runs.find((candidate) => candidate.id === input.runId);
     const message = session.messages.find((candidate) => candidate.id === input.messageId);
     if (!run || !message || run.status !== "queued" || execution.controller.signal.aborted) {
+      input.resolvedConfig.credentialLease.dispose();
       this.#releaseBudget(input.runId);
       if (this.#executions.get(input.sessionId)?.runId === input.runId) {
         this.#executions.delete(input.sessionId);
@@ -772,6 +1435,8 @@ export class AgentGatewayService {
         projectRootGrants: input.projectRootGrants,
         threadContext,
         knownSecrets: input.knownSecrets,
+        credential: input.resolvedConfig.credentialLease.value(),
+        providerAttribution: input.resolvedConfig.provider,
         signal: execution.controller.signal,
         emit: (event: AgentRuntimeEvent) => {
           if (!execution.controller.signal.aborted) {
@@ -782,6 +1447,7 @@ export class AgentGatewayService {
     } catch (error) {
       unexpectedDiagnostic = diagnosticFromRuntimeError(error, input.config.provider.modelSlug);
     } finally {
+      input.resolvedConfig.credentialLease.dispose();
       this.#releaseBudget(input.runId);
       if (this.#executions.get(input.sessionId)?.runId === input.runId) {
         this.#executions.delete(input.sessionId);
@@ -882,6 +1548,13 @@ export class AgentGatewayService {
         { modelOutputProduced: true, toolNames: result.toolNames },
         input.knownSecrets
       );
+      this.#publishRunEvent(
+        session,
+        run,
+        "run.finalized",
+        { outcome: "completed", assistantMessageDisposition: result.assistantContent ? "persisted" : "none" },
+        input.knownSecrets
+      );
       this.#auditEvent(
         "agent.run_completed",
         {
@@ -916,7 +1589,8 @@ export class AgentGatewayService {
       message.content,
       input.knownSecrets,
       result.diagnostics,
-      result.modelOutputProduced ?? false
+      result.modelOutputProduced ?? false,
+      result.blockedCandidate
     );
   }
 
@@ -934,6 +1608,13 @@ export class AgentGatewayService {
     this.#publishRunEvent(session, run, "diagnostic", diagnostic, knownSecrets);
     this.#publishRunEvent(session, run, "blocked", { kind: "blocked", diagnostic }, knownSecrets);
     this.#publishRunEvent(session, run, "run.failed", { diagnostic, modelOutputProduced: false }, knownSecrets);
+    this.#publishRunEvent(
+      session,
+      run,
+      "run.finalized",
+      { outcome: "blocked", assistantMessageDisposition: "none", diagnostic },
+      knownSecrets
+    );
     this.#auditEvent(
       auditType,
       {
@@ -953,11 +1634,20 @@ export class AgentGatewayService {
     content: string,
     knownSecrets: string[],
     diagnostics: AgentDiagnostic[] = [diagnostic],
-    modelOutputProduced = false
+    modelOutputProduced = false,
+    blockedCandidate?: AgentBlockedCandidate
   ): void {
     run.status = diagnostic.code === "AGENT_RUN_CANCELLED" ? "cancelled" : "failed";
     run.completedAt = new Date().toISOString();
     run.diagnostic = diagnostic;
+    const candidate = blockedCandidate
+      ? {
+          ...blockedCandidate,
+          ...(session.privacy?.advancedRedactedDetailEnabled && blockedCandidate.inspectable
+            ? { content: blockedCandidate.content }
+            : { content: undefined })
+        }
+      : undefined;
     this.#publishRunEvent(
       session,
       run,
@@ -965,10 +1655,31 @@ export class AgentGatewayService {
       {
         diagnostic,
         cancelled: run.status === "cancelled",
-        modelOutputProduced
+        modelOutputProduced,
+        finalizationFollows: true,
+        ...(candidate ? { candidate } : {})
       },
       knownSecrets
     );
+    this.#publishRunEvent(
+      session,
+      run,
+      "run.finalized",
+      {
+        outcome: run.status === "cancelled" ? "cancelled" : "failed",
+        assistantMessageDisposition: blockedCandidate?.disposition ?? "none",
+        diagnostic,
+        ...(candidate ? { candidate } : {})
+      },
+      knownSecrets
+    );
+    if (blockedCandidate) {
+      this.#auditEvent(
+        "agent.blocked_candidate",
+        { sessionId: session.id, runId: run.id, candidate: blockedCandidate },
+        { sessionId: session.id, runId: run.id, modelSlug: run.modelSlug, knownSecrets }
+      );
+    }
     this.#auditEvent(
       run.status === "cancelled" ? "agent.run_cancelled" : "agent.run_failed",
       {
@@ -1167,9 +1878,7 @@ export class AgentGatewayService {
         }
       );
     }
-    const knownSecrets = [process.env[config.provider.apiKeySource.envVar] ?? "", runtime.token].filter(
-      (secret) => secret.length > 0
-    );
+    const knownSecrets = [runtime.token];
     const existingExecution = this.#executions.get(session.id);
     if (status === "approved" && existingExecution) {
       throw new AgentGatewayRequestError(
@@ -1620,6 +2329,13 @@ export class AgentGatewayService {
       { approvalId: approval.id, toolName, toolResultProduced: true, result },
       knownSecrets
     );
+    this.#publishRunEvent(
+      session,
+      run,
+      "run.finalized",
+      { outcome: "completed", assistantMessageDisposition: "tool_result", approvalId: approval.id, toolName },
+      knownSecrets
+    );
   }
 
   #budgetDiagnostic(config: AgentConfig, sessionId: string): AgentDiagnostic | undefined {
@@ -1676,6 +2392,16 @@ export class AgentGatewayService {
     toolName: string,
     decision: ReturnType<typeof evaluateToolPolicy>
   ): AgentDiagnostic | undefined {
+    if (!config.enabled) {
+      return {
+        id: "agent.tool.agent_disabled",
+        severity: "error",
+        code: "AGENT_DISABLED",
+        message: "The approved tool did not start because Operator Agent was disabled.",
+        checkedAt: new Date().toISOString(),
+        userAction: "Enable the Agent before approving or resuming this workflow."
+      };
+    }
     if (!config.toolAllowlist.includes(toolName)) {
       return {
         id: "agent.tool.disallowed_by_config",
@@ -1747,18 +2473,18 @@ export class AgentGatewayService {
   }
 
   #safeConfig(): AgentConfig {
-    const providerActive = this.#config.enabled && this.#config.provider.remoteModelEnabled;
-    const configured = providerActive && Boolean(process.env[this.#config.provider.apiKeySource.envVar]);
-    return {
-      ...this.#config,
-      provider: {
-        ...this.#config.provider,
-        apiKeySource: {
-          ...this.#config.provider.apiKeySource,
-          configured
-        }
-      }
-    };
+    const config = this.#configManager.getSafeState();
+    const activeRunUsesOlderRevision = this.#sessions
+      .list()
+      .some((session) =>
+        session.runs.some(
+          (run) =>
+            ["queued", "running", "waiting_for_approval"].includes(run.status) &&
+            Boolean(run.configRevisionId) &&
+            run.configRevisionId !== config.revision?.id
+        )
+      );
+    return { ...config, activeRunUsesOlderRevision };
   }
 
   #configDiagnostics(): AgentDiagnostic[] {
@@ -1772,16 +2498,21 @@ export class AgentGatewayService {
     const directory = path.dirname(this.#configPath);
     fs.mkdirSync(directory, { recursive: true });
     const persisted = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       enabled: this.#config.enabled,
       provider: {
         modelSlug: this.#config.provider.modelSlug,
+        apiKeySourceType: this.#config.provider.apiKeySource.type,
         apiKeyEnvVar: this.#config.provider.apiKeySource.envVar,
+        credentialId: this.#config.provider.apiKeySource.credentialId,
+        credentialState: this.#configManager.managedCredentialPersistenceState(),
         remoteModelEnabled: this.#config.provider.remoteModelEnabled,
         httpRefererEnvVar: this.#config.provider.httpRefererEnvVar,
         titleEnvVar: this.#config.provider.titleEnvVar
       },
+      execution: this.#config.execution,
       toolAllowlist: this.#config.toolAllowlist,
+      toolAllowlistMode: this.#config.toolAllowlistMode,
       approvalPolicy: this.#config.approvalPolicy,
       allowBrowserOpen: this.#config.allowBrowserOpen,
       allowCopyRoute: this.#config.allowCopyRoute,
@@ -1801,14 +2532,22 @@ export class AgentGatewayService {
     knownSecrets: string[] = []
   ): AgentRunEvent {
     const sequence = ++this.#sequence;
+    const at = new Date().toISOString();
+    const activity = this.#activity.project(type, data, run.id, at);
+    const projectedData =
+      activity && data && typeof data === "object" && !Array.isArray(data)
+        ? { ...(data as Record<string, unknown>), activity }
+        : activity
+          ? { value: data, activity }
+          : data;
     const event: AgentRunEvent = {
       id: String(sequence),
       sequence,
       sessionId: session.id,
       runId: run.id,
       type,
-      at: new Date().toISOString(),
-      data: sanitizeAgentPayload(data, knownSecrets)
+      at,
+      data: sanitizeAgentPayload(projectedData, knownSecrets)
     };
     this.#sessions.updateRun(session.id, run);
     const persisted = this.#sessions.appendRunEvent(session.id, run.id, event);
@@ -2102,13 +2841,29 @@ function validProjectRoot(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0 && value.length <= MAX_PROJECT_ROOT_LENGTH;
 }
 
-export function defaultAgentConfig(env: NodeJS.ProcessEnv = process.env): AgentConfig {
+function diagnosticFromCredentialError(error: AgentCredentialError): AgentDiagnostic {
+  return {
+    id: `agent.credential.${error.code.toLowerCase()}`,
+    severity: "error",
+    code: error.code,
+    message: error.message,
+    checkedAt: new Date().toISOString(),
+    userAction:
+      error.code === "AGENT_CREDENTIAL_MISSING"
+        ? "Connect OpenRouter from Settings > Agent > Provider."
+        : "Retry the credential operation. Reconnect OpenRouter if the protected credential cannot be recovered."
+  };
+}
+
+export function defaultAgentConfig(env: NodeJS.ProcessEnv = process.env, modelSource?: AgentModelSource): AgentConfig {
   const now = new Date().toISOString();
   const enabled = envBoolean(env[AGENT_ENABLED_ENV]);
   return {
     enabled,
-    provider: defaultProviderConfig(env, enabled),
-    toolAllowlist: [...DEFAULT_TOOL_ALLOWLIST],
+    provider: defaultProviderConfig(env, modelSource),
+    execution: DEFAULT_AGENT_EXECUTION_POLICY,
+    toolAllowlist: relaybaseAgentToolNames(),
+    toolAllowlistMode: "all_registered",
     approvalPolicy: "always_for_mutations",
     setupFileWritePolicy: "approval_required",
     allowBrowserOpen: false,
@@ -2117,19 +2872,29 @@ export function defaultAgentConfig(env: NodeJS.ProcessEnv = process.env): AgentC
   };
 }
 
-function loadPersistedAgentConfig(defaults: AgentConfig, configPath: string | undefined): AgentConfig {
+function loadPersistedAgentConfig(
+  defaults: AgentConfig,
+  configPath: string | undefined
+): {
+  config: AgentConfig;
+  managedCredentialState?: {
+    verified: boolean;
+    lastValidatedAt?: string;
+    metadata?: SafeProviderCredentialMetadata;
+  };
+} {
   if (!configPath || !fs.existsSync(configPath)) {
-    return defaults;
+    return { config: defaults };
   }
 
   let raw: unknown;
   try {
     raw = JSON.parse(fs.readFileSync(configPath, "utf8")) as unknown;
   } catch {
-    return defaults;
+    return { config: defaults };
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return defaults;
+    return { config: defaults };
   }
 
   const persisted = raw as Record<string, unknown>;
@@ -2138,17 +2903,17 @@ function loadPersistedAgentConfig(defaults: AgentConfig, configPath: string | un
       ? (persisted.provider as Record<string, unknown>)
       : {};
   const persistedAllowlist = Array.isArray(persisted.toolAllowlist)
-    ? persisted.toolAllowlist
-        .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
-        .map((entry) => entry.trim())
-        .slice(0, DEFAULT_TOOL_ALLOWLIST.length)
+    ? normalizedToolNames(persisted.toolAllowlist)
     : undefined;
+  const persistedToolMode = persistedToolAllowlistMode(persisted.toolAllowlistMode, persistedAllowlist);
   const persistedBudgets = normalizedPersistedBudgets(persisted.budgets);
 
   const merged: AgentConfig = {
     ...defaults,
     ...(typeof persisted.enabled === "boolean" ? { enabled: persisted.enabled } : {}),
-    ...(persistedAllowlist ? { toolAllowlist: persistedAllowlist } : {}),
+    execution: normalizeAgentExecutionPolicy(persisted.execution, defaults.execution),
+    toolAllowlist: persistedToolMode === "all_registered" ? relaybaseAgentToolNames() : (persistedAllowlist ?? []),
+    toolAllowlistMode: persistedToolMode,
     ...(persisted.approvalPolicy === "always_for_mutations" || persisted.approvalPolicy === "read_only_only"
       ? { approvalPolicy: persisted.approvalPolicy }
       : {}),
@@ -2161,7 +2926,10 @@ function loadPersistedAgentConfig(defaults: AgentConfig, configPath: string | un
     provider: {
       ...defaults.provider,
       ...(typeof provider.modelSlug === "string" && provider.modelSlug.trim()
-        ? { modelSlug: provider.modelSlug.trim() }
+        ? {
+            modelSlug: provider.modelSlug.trim(),
+            modelSource: { kind: "persisted_config", label: "saved Agent configuration" } as const
+          }
         : {}),
       ...(typeof provider.remoteModelEnabled === "boolean" ? { remoteModelEnabled: provider.remoteModelEnabled } : {}),
       ...(typeof provider.httpRefererEnvVar === "string" && provider.httpRefererEnvVar.trim()
@@ -2170,14 +2938,23 @@ function loadPersistedAgentConfig(defaults: AgentConfig, configPath: string | un
       ...(typeof provider.titleEnvVar === "string" && provider.titleEnvVar.trim()
         ? { titleEnvVar: provider.titleEnvVar.trim() }
         : {}),
-      apiKeySource: {
-        type: "environment",
-        envVar:
-          typeof provider.apiKeyEnvVar === "string" && provider.apiKeyEnvVar.trim()
-            ? provider.apiKeyEnvVar.trim()
-            : defaults.provider.apiKeySource.envVar,
-        configured: false
-      }
+      apiKeySource:
+        provider.apiKeySourceType === "managed_windows_dpapi" &&
+        typeof provider.credentialId === "string" &&
+        provider.credentialId.trim()
+          ? {
+              type: "managed_windows_dpapi",
+              credentialId: provider.credentialId.trim(),
+              configured: true
+            }
+          : {
+              type: "environment",
+              envVar:
+                typeof provider.apiKeyEnvVar === "string" && provider.apiKeyEnvVar.trim()
+                  ? provider.apiKeyEnvVar.trim()
+                  : (defaults.provider.apiKeySource.envVar ?? DEFAULT_OPENROUTER_KEY_ENV),
+              configured: false
+            }
     }
   };
 
@@ -2195,7 +2972,59 @@ function loadPersistedAgentConfig(defaults: AgentConfig, configPath: string | un
       delete merged.provider.modelSlug;
     }
   }
-  return merged;
+  return {
+    config: merged,
+    ...(merged.provider.apiKeySource.type === "managed_windows_dpapi"
+      ? { managedCredentialState: persistedManagedCredentialState(provider.credentialState) }
+      : {})
+  };
+}
+
+function persistedManagedCredentialState(value: unknown): {
+  verified: boolean;
+  lastValidatedAt?: string;
+  metadata?: SafeProviderCredentialMetadata;
+} {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { verified: false };
+  }
+  const state = value as Record<string, unknown>;
+  const metadataValue =
+    state.metadata && typeof state.metadata === "object" && !Array.isArray(state.metadata)
+      ? (state.metadata as Record<string, unknown>)
+      : {};
+  const metadata: SafeProviderCredentialMetadata = {};
+  if (
+    typeof metadataValue.keyLabel === "string" &&
+    metadataValue.keyLabel.trim() &&
+    !/sk-or-|bearer|authorization|api[_-]?key\s*[:=]/i.test(metadataValue.keyLabel)
+  ) {
+    metadata.keyLabel = metadataValue.keyLabel.trim().slice(0, 80);
+  }
+  if (typeof metadataValue.limitUsd === "number" && Number.isFinite(metadataValue.limitUsd)) {
+    metadata.limitUsd = metadataValue.limitUsd;
+  }
+  if (typeof metadataValue.limitRemainingUsd === "number" && Number.isFinite(metadataValue.limitRemainingUsd)) {
+    metadata.limitRemainingUsd = metadataValue.limitRemainingUsd;
+  }
+  if (
+    metadataValue.limitReset === "daily" ||
+    metadataValue.limitReset === "weekly" ||
+    metadataValue.limitReset === "monthly" ||
+    metadataValue.limitReset === null
+  ) {
+    metadata.limitReset = metadataValue.limitReset;
+  }
+  if (typeof metadataValue.expiresAt === "string" || metadataValue.expiresAt === null) {
+    metadata.expiresAt = metadataValue.expiresAt;
+  }
+  return {
+    verified: state.verified === true,
+    ...(typeof state.lastValidatedAt === "string" && state.lastValidatedAt
+      ? { lastValidatedAt: state.lastValidatedAt }
+      : {}),
+    ...(Object.keys(metadata).length ? { metadata } : {})
+  };
 }
 
 function normalizedPersistedBudgets(value: unknown): AgentConfig["budgets"] | undefined {
@@ -2215,23 +3044,54 @@ function normalizedPersistedBudgets(value: unknown): AgentConfig["budgets"] | un
 
 function defaultProviderConfig(
   env: NodeJS.ProcessEnv = process.env,
-  agentEnabled = envBoolean(env[AGENT_ENABLED_ENV])
+  modelSource?: AgentModelSource
 ): AgentProviderConfig {
   const modelSlug = nonEmptyString(env[AGENT_MODEL_ENV], "");
   const remoteModelEnabled = envBoolean(env[AGENT_REMOTE_MODEL_ENABLED_ENV]);
-  const envProviderActive = agentEnabled && remoteModelEnabled;
   return {
     provider: "openrouter",
-    ...(envProviderActive && modelSlug ? { modelSlug } : {}),
+    ...(modelSlug ? { modelSlug } : {}),
+    modelSource: modelSlug
+      ? (modelSource ?? { kind: "shell_environment", label: "shell environment" })
+      : { kind: "unconfigured", label: "not configured" },
     apiKeySource: {
       type: "environment",
       envVar: DEFAULT_OPENROUTER_KEY_ENV,
-      configured: envProviderActive && Boolean(env[DEFAULT_OPENROUTER_KEY_ENV])
+      configured: Boolean(env[DEFAULT_OPENROUTER_KEY_ENV])
     },
     httpRefererEnvVar: "OPENROUTER_HTTP_REFERER",
     titleEnvVar: "OPENROUTER_TITLE",
     remoteModelEnabled
   };
+}
+
+function normalizedToolNames(value: readonly unknown[]): string[] {
+  return [
+    ...new Set(
+      value
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+    )
+  ];
+}
+
+function persistedToolAllowlistMode(value: unknown, allowlist: string[] | undefined): AgentConfig["toolAllowlistMode"] {
+  if (value === "all_registered" || value === "explicit_allowlist") {
+    return value;
+  }
+  if (
+    !allowlist ||
+    sameToolSet(allowlist, LEGACY_DEFAULT_TOOL_ALLOWLIST) ||
+    sameToolSet(allowlist, relaybaseAgentToolNames())
+  ) {
+    return "all_registered";
+  }
+  return "explicit_allowlist";
+}
+
+function sameToolSet(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((entry) => right.includes(entry));
 }
 
 function envBoolean(value: string | undefined): boolean {
@@ -2356,8 +3216,13 @@ function limitExceeded(
 function usageCost(data: unknown): number {
   const usage = data && typeof data === "object" ? (data as { usage?: unknown }).usage : undefined;
   const record = usage && typeof usage === "object" ? (usage as Record<string, unknown>) : {};
-  const value = record.estimatedCostUsd;
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  for (const value of [record.costUsd, record.estimatedCostUsd]) {
+    const parsed = typeof value === "string" && value.trim() ? Number(value) : value;
+    if (typeof parsed === "number" && Number.isFinite(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+  return 0;
 }
 
 function budgetReservationUsd(budgets: AgentConfig["budgets"]): number {

@@ -3,13 +3,18 @@ import { createSdkTool } from "./common.ts";
 import { createAddEnvOverrideSafeTool } from "./addEnvOverrideSafe.ts";
 import { createApplySetupPlanTool } from "./applySetupPlan.ts";
 import { createDetectProjectTool } from "./detectProject.ts";
+import { createDiscoverProjectRootsTool } from "./discoverProjectRoots.ts";
+import { createExplainAppProblemTool } from "./explainAppProblem.ts";
 import { createExportLogsTool } from "./exportLogs.ts";
 import { createGetAppGroupTool } from "./getAppGroup.ts";
 import { createGetAppStateTool } from "./getAppState.ts";
+import { createGetAgentCapabilitiesTool } from "./getAgentCapabilities.ts";
+import { createGetCurrentContextTool } from "./getCurrentContext.ts";
 import { createGetDiagnosticsTool } from "./getDiagnostics.ts";
 import { createInspectManifestTool } from "./inspectManifest.ts";
 import { createListAppsTool } from "./listApps.ts";
 import { createOpenProjectOrAppTool } from "./openProjectOrApp.ts";
+import { createGetOperationStatusTool, createListOperationsTool } from "./operationObservability.ts";
 import { createPatchManifestFieldsTool } from "./patchManifestFields.ts";
 import { createPlanAppSetupTool } from "./planAppSetup.ts";
 import { createPreviewSetupWritesTool } from "./previewSetupWrites.ts";
@@ -51,7 +56,12 @@ export function relaybaseAgentToolDefinitions(): RelaybaseAgentToolDefinition[] 
     createListAppsTool(),
     createGetAppStateTool(),
     createGetAppGroupTool(),
+    createGetCurrentContextTool(),
+    createGetAgentCapabilitiesTool(),
+    createExplainAppProblemTool(),
     createGetDiagnosticsTool(),
+    createGetOperationStatusTool(),
+    createListOperationsTool(),
     createTailLogsTool(),
     createSearchLogsTool(),
     createProjectListFilesTool(),
@@ -59,6 +69,7 @@ export function relaybaseAgentToolDefinitions(): RelaybaseAgentToolDefinition[] 
     createProjectReadFileTool(),
     createProjectDetectStartCommandsTool(),
     createProjectInspectPackageScriptsTool(),
+    createDiscoverProjectRootsTool(),
     createStartAppTool(),
     createStopAppTool(),
     createRestartAppTool(),
@@ -85,7 +96,9 @@ export function relaybaseAgentToolDefinitions(): RelaybaseAgentToolDefinition[] 
 
 export function createRelaybaseAgentToolRegistry(context: AgentToolExecutionContext): RelaybaseAgentToolRegistry {
   const allDefinitions = relaybaseAgentToolDefinitions();
-  const allowlist = context.config?.toolAllowlist ? new Set(context.config.toolAllowlist) : undefined;
+  const resolvedContext = { ...context, registeredToolNames: allDefinitions.map((definition) => definition.name) };
+  const allowlist =
+    context.config?.toolAllowlistMode === "explicit_allowlist" ? new Set(context.config.toolAllowlist) : undefined;
   const definitions = allDefinitions.filter((definition) => {
     if (allowlist && !allowlist.has(definition.name)) {
       return false;
@@ -94,7 +107,7 @@ export function createRelaybaseAgentToolRegistry(context: AgentToolExecutionCont
   });
   return {
     definitions,
-    sdkTools: definitions.map((definition) => createSdkTool(definition, context)),
+    sdkTools: definitions.map((definition) => createSdkTool(definition, resolvedContext)),
     toolNames: definitions.map((definition) => definition.name),
     readOnlyToolNames: definitions
       .filter((definition) => !definition.approvalRequired)
@@ -126,10 +139,12 @@ export async function executeRelaybaseAgentTool(
   input: Record<string, unknown>,
   context: AgentToolExecutionContext
 ) {
-  const definition = relaybaseAgentToolDefinitions().find((entry) => entry.name === name);
+  const allDefinitions = relaybaseAgentToolDefinitions();
+  const definition = allDefinitions.find((entry) => entry.name === name);
   if (!definition) {
     throw new Error(`Unknown Relaybase agent tool: ${name}`);
   }
+  context = { ...context, registeredToolNames: allDefinitions.map((entry) => entry.name) };
   const authorization = await authorizeAgentToolProjectScope(
     name,
     input,

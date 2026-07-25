@@ -195,6 +195,11 @@ export class RelaybaseMcpService {
       product: "Relaybase",
       version: RELAYBASE_VERSION,
       package: "@cameloo/relaybase",
+      daemon: {
+        instanceId: this.runtime.instanceId,
+        pid: process.pid,
+        startedAt: this.runtime.startedAt
+      },
       endpoints: {
         streamableHttp: `${baseUrl}/mcp`,
         legacySse: `${baseUrl}/sse`

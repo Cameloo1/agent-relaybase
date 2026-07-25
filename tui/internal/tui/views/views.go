@@ -5,6 +5,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -77,6 +78,7 @@ type ShellData struct {
 	PaneReopen          *PaneReopenData
 	Help                *HelpData
 	Usage               *usagecomponent.Snapshot
+	Settings            *SettingsData
 	ComposerView        string
 	ComposerRows        int
 	ComposerPasting     bool
@@ -86,8 +88,94 @@ type ShellData struct {
 	ResponseNewOutput   int
 	ResponseOffset      int
 	AgentPaneExpanded   bool
+	AgentChatFull       bool
 	ResponseDetails     bool
 	PrimaryFocus        string
+	AgentTranscript     []AgentTranscriptItem
+	TranscriptExpanded  map[string]bool
+	TranscriptSelected  string
+	TranscriptCache     *AgentTranscriptRenderCache
+	ActivityFrame       int
+	ActivityASCII       bool
+	ActivityAnimations  bool
+}
+
+type AgentTranscriptItem struct {
+	ID              string
+	RunID           string
+	Kind            string
+	State           string
+	Label           string
+	Detail          string
+	Output          string
+	OutputLineCount int
+	OutputTruncated bool
+	DurationMS      int64
+	Sequence        int64
+	UpdatedSequence int64
+}
+
+type SettingsData struct {
+	Page      string
+	Title     string
+	Rows      []SettingsRowData
+	Selected  int
+	Editing   bool
+	EditValue string
+	Notice    string
+	Saving    bool
+	TotalRows int
+	FirstRow  int
+}
+
+type SettingsRowData struct {
+	Index    int
+	Label    string
+	Value    string
+	Hint     string
+	Action   bool
+	ReadOnly bool
+}
+
+// AgentTranscriptRenderCache stores only derived, sanitized row indexes. The
+// daemon transcript remains authoritative; this cache lets the docked and
+// full-screen Agent surfaces render just the rows intersecting the viewport.
+// Bubble Tea renders on one goroutine, so the cache intentionally has no
+// synchronization or persisted state.
+type AgentTranscriptRenderCache struct {
+	clock  uint64
+	widths map[int]*agentTranscriptWidthCache
+}
+
+type agentTranscriptWidthCache struct {
+	touched uint64
+	items   map[string]*agentTranscriptOutputCache
+}
+
+type agentTranscriptOutputCache struct {
+	runID             string
+	kind              string
+	state             string
+	updatedSequence   int64
+	output            string
+	outputLineCount   int
+	outputTruncated   bool
+	lines             []string
+	wrappedRowOffsets []int
+}
+
+const maxAgentTranscriptCachedWidths = 4
+
+func NewAgentTranscriptRenderCache() *AgentTranscriptRenderCache {
+	return &AgentTranscriptRenderCache{widths: map[int]*agentTranscriptWidthCache{}}
+}
+
+func (cache *AgentTranscriptRenderCache) Reset() {
+	if cache == nil {
+		return
+	}
+	cache.widths = map[int]*agentTranscriptWidthCache{}
+	cache.clock = 0
 }
 
 type CommandPaletteData struct {
@@ -351,6 +439,9 @@ func buildOperatorShell(style styles.Styles, data ShellData) ShellFrame {
 		text := fixedRegion(style.Help, "Relaybase operator console needs at least 40×18 cells.\n\nResize the terminal; drafts, panes, and Agent state are preserved.", width, height)
 		return ShellFrame{Text: text, HitMap: components.HitMap{}}
 	}
+	if data.AgentChatFull {
+		return buildAgentChatShell(style, data, metrics)
+	}
 
 	rail := fixedRegion(style.Status, renderOperatorRail(style, data, metrics.Rail.Width), metrics.Rail.Width, metrics.Rail.Height)
 	base := operatorPaneProjection(data)
@@ -380,8 +471,11 @@ func buildOperatorShell(style styles.Styles, data ShellData) ShellFrame {
 
 	workspace := lipgloss.JoinVertical(lipgloss.Left, rail, panesText)
 	upper := workspace
+	agentRegions := []components.HitRegion{}
 	if metrics.AgentDocked {
-		upper = lipgloss.JoinHorizontal(lipgloss.Top, workspace, renderAgentDock(style, data, metrics.Agent))
+		agentDock, regions := renderAgentDockFrame(style, data, metrics.Agent)
+		agentRegions = regions
+		upper = lipgloss.JoinHorizontal(lipgloss.Top, workspace, agentDock)
 	}
 	frame := ShellFrame{Text: lipgloss.JoinVertical(lipgloss.Left, upper, composerText)}
 	for _, region := range paneHitRegions(style, base) {
@@ -391,6 +485,9 @@ func buildOperatorShell(style styles.Styles, data ShellData) ShellFrame {
 	}
 	if metrics.AgentDocked {
 		frame.HitMap.Add(components.HitRegion{Rect: metrics.Agent, Kind: components.HitResponse})
+		for _, region := range agentRegions {
+			frame.HitMap.Add(region)
+		}
 	}
 	frame.HitMap.Add(components.HitRegion{Rect: metrics.Composer, Kind: components.HitComposer})
 
@@ -432,6 +529,58 @@ func buildOperatorShell(style styles.Styles, data ShellData) ShellFrame {
 	return frame
 }
 
+func buildAgentChatShell(style styles.Styles, data ShellData, metrics layout.Metrics) ShellFrame {
+	width := maxInt(data.Width, 1)
+	chatBounds := components.Rect{Width: width, Height: maxInt(1, metrics.Composer.Y)}
+	responseFrame := renderAgentResponseFrame(style, data, chatBounds.Width, chatBounds.Height)
+
+	composer := strings.TrimSpace(data.ComposerView)
+	if composer == "" {
+		composer = "> " + cleanInlineText(data.AssistantPrompt)
+	}
+	composerHeader := "Composer " + style.ControlMuted.Render("[F6 workspace]") + " > _ • Enter submit • Ctrl+J newline"
+	if data.PrimaryFocus == "composer" {
+		composerHeader += " " + style.Control.Render("[focused]")
+	}
+	if data.ComposerPasting {
+		composerHeader = "Composer " + style.ControlMuted.Render("[F6 workspace]") + " > _ • Pasting… • Esc cancel"
+	}
+	composerText := framedFixedRegion(style.Assistant, composerHeader+"\n"+composer, width, metrics.Composer.Height)
+	frame := ShellFrame{Text: lipgloss.JoinVertical(lipgloss.Left, responseFrame.Text, composerText)}
+	frame.HitMap.Add(components.HitRegion{Rect: chatBounds, Kind: components.HitResponse})
+	for _, region := range responseFrame.HitRegions {
+		frame.HitMap.Add(region)
+	}
+	frame.HitMap.Add(components.HitRegion{Rect: metrics.Composer, Kind: components.HitComposer})
+
+	if overlay := operatorOverlay(style, data, metrics, frame.Text); overlay.Text != "" {
+		frame.HitMap.Add(components.HitRegion{Rect: overlay.Bounds, Kind: components.HitModal})
+		for _, region := range overlay.HitRegions {
+			frame.HitMap.Add(region)
+		}
+		frame.Text = overlay.Text
+		return frame
+	}
+	if data.StartCompletion != nil {
+		palette := renderStartCompletion(style, *data.StartCompletion, width)
+		bounds := components.Rect{Y: maxInt(0, metrics.Composer.Y-lipgloss.Height(palette)), Width: width, Height: lipgloss.Height(palette)}
+		frame.Text = composeOperatorLayer(frame.Text, palette, bounds, metrics.Bounds)
+		for _, region := range startCompletionHitRegions(*data.StartCompletion, palette, width) {
+			region.Rect = region.Rect.Translate(bounds.X, bounds.Y)
+			frame.HitMap.Add(region)
+		}
+	} else if data.CommandPalette != nil {
+		palette := renderCommandPalette(style, *data.CommandPalette, width)
+		bounds := components.Rect{Y: maxInt(0, metrics.Composer.Y-lipgloss.Height(palette)), Width: width, Height: lipgloss.Height(palette)}
+		frame.Text = composeOperatorLayer(frame.Text, palette, bounds, metrics.Bounds)
+		for _, region := range commandPaletteHitRegions(*data.CommandPalette, palette, width) {
+			region.Rect = region.Rect.Translate(bounds.X, bounds.Y)
+			frame.HitMap.Add(region)
+		}
+	}
+	return frame
+}
+
 func operatorPaneProjection(data ShellData) ShellData {
 	setupPanelOpen := strings.TrimSpace(data.SetupPanel) != ""
 	data.AssistantHistory = nil
@@ -460,17 +609,42 @@ func agentDockStyle(style styles.Styles) lipgloss.Style {
 }
 
 func renderAgentDock(style styles.Styles, data ShellData, bounds components.Rect) string {
+	text, _ := renderAgentDockFrame(style, data, bounds)
+	return text
+}
+
+func renderAgentDockFrame(style styles.Styles, data ShellData, bounds components.Rect) (string, []components.HitRegion) {
 	panelStyle := agentDockStyle(style)
 	innerWidth := maxInt(1, bounds.Width-panelStyle.GetHorizontalFrameSize())
 	innerHeight := maxInt(1, bounds.Height-panelStyle.GetVerticalFrameSize())
-	content := renderAgentResponseContent(style, data, innerWidth, innerHeight)
-	return panelStyle.Width(bounds.Width).Height(bounds.Height).Render(content)
+	responseFrame := renderAgentResponseFrame(style, data, innerWidth, innerHeight)
+	originX := bounds.X + panelStyle.GetBorderLeftSize() + panelStyle.GetPaddingLeft()
+	originY := bounds.Y + panelStyle.GetBorderTopSize() + panelStyle.GetPaddingTop()
+	regions := make([]components.HitRegion, 0, len(responseFrame.HitRegions))
+	for _, region := range responseFrame.HitRegions {
+		region.Rect = region.Rect.Translate(originX, originY)
+		regions = append(regions, region)
+	}
+	return panelStyle.Width(bounds.Width).Height(bounds.Height).Render(responseFrame.Text), regions
 }
 
 func renderAgentResponseContent(style styles.Styles, data ShellData, width int, height int) string {
+	return renderAgentResponseFrame(style, data, width, height).Text
+}
+
+type agentResponseFrame struct {
+	Text       string
+	HitRegions []components.HitRegion
+}
+
+func renderAgentResponseFrame(style styles.Styles, data ShellData, width int, height int) agentResponseFrame {
 	width = maxInt(1, width)
 	height = maxInt(1, height)
-	header := "Agent " + displayAgentStatus(valueOr(data.ResponseState, valueOr(data.AgentStatus, "unknown")))
+	header := "Agent "
+	if data.AgentChatFull {
+		header = "Agent Chat "
+	}
+	header += displayAgentStatus(valueOr(data.ResponseState, valueOr(data.AgentStatus, "unknown")))
 	if data.AgentThreadLabel != "" {
 		header += " • " + data.AgentThreadLabel
 	}
@@ -484,14 +658,617 @@ func renderAgentResponseContent(style styles.Styles, data ShellData, width int, 
 			state = fmt.Sprintf("%d new", data.ResponseNewOutput)
 		}
 	}
-	controls := state + " • [c] copy • [b] code • Ctrl+G close"
-	source := strings.TrimSpace(data.ResponseSource)
-	if source == "" {
-		source = "No Agent output yet. Submit a request in Composer."
+	controls := state + " • F6 full chat • [c] copy • [b] code • Ctrl+G close"
+	if data.AgentChatFull {
+		controls = state + " • F6/Esc workspace • Ctrl+E details • [c] copy • [b] code"
 	}
-	rendered := (safemarkdown.SafeMarkdownRenderer{}).Render(source, maxInt(20, width))
-	body := renderBodyViewportFrame(rendered.Text, maxInt(1, height-2), data.ResponseOffset, width)
-	return fixedRegion(style.Body, header+"\n"+controls+"\n"+body.Text, width, height)
+	if len(data.AgentTranscript) > 0 {
+		body := renderAgentTranscriptViewport(style, data, width, maxInt(1, height-2), data.ResponseOffset)
+		regions := make([]components.HitRegion, 0, len(body.HitRegions))
+		for _, region := range body.HitRegions {
+			region.Rect = region.Rect.Translate(0, 2)
+			regions = append(regions, region)
+		}
+		return agentResponseFrame{
+			Text:       fixedRegion(style.Body, header+"\n"+controls+"\n"+body.Text, width, height),
+			HitRegions: regions,
+		}
+	}
+	content := ""
+	contentRegions := []components.HitRegion{}
+	if strings.TrimSpace(content) == "" {
+		source := strings.TrimSpace(data.ResponseSource)
+		if source == "" {
+			source = "No Agent output yet. Submit a request in Composer."
+		}
+		content = (safemarkdown.SafeMarkdownRenderer{}).Render(source, maxInt(20, width)).Text
+	}
+	body := renderBodyViewportFrame(content, maxInt(1, height-2), data.ResponseOffset, width)
+	regions := []components.HitRegion{}
+	clip := components.Rect{Y: body.Offset, Width: width, Height: body.ContentHeight}
+	for _, region := range contentRegions {
+		transformed, ok := components.ClipAndTranslate(region.Rect, clip, 0, 2+body.IndicatorRows-body.Offset)
+		if !ok {
+			continue
+		}
+		region.Rect = transformed
+		regions = append(regions, region)
+	}
+	return agentResponseFrame{
+		Text:       fixedRegion(style.Body, header+"\n"+controls+"\n"+body.Text, width, height),
+		HitRegions: regions,
+	}
+}
+
+func renderAgentTranscript(style styles.Styles, data ShellData, width int) (string, []components.HitRegion) {
+	if len(data.AgentTranscript) == 0 {
+		return "", nil
+	}
+	foregroundID := ""
+	foregroundSequence := int64(-1)
+	for _, item := range data.AgentTranscript {
+		if item.State == "active" && item.Kind == "processing" && item.UpdatedSequence >= foregroundSequence {
+			foregroundID = item.ID
+			foregroundSequence = item.UpdatedSequence
+		}
+	}
+	lines := []string{}
+	regions := []components.HitRegion{}
+	for _, item := range data.AgentTranscript {
+		if len(lines) > 0 && lines[len(lines)-1] != "" {
+			lines = append(lines, "")
+		}
+		switch item.Kind {
+		case "user", "assistant":
+			title := "Agent"
+			if item.Kind == "user" {
+				title = "You"
+			}
+			lines = append(lines, style.Control.Render(title))
+			textLines := wrapAgentTranscriptText(item.Output, maxInt(1, width-2))
+			if len(textLines) == 0 {
+				textLines = []string{"(no text)"}
+			}
+			for _, line := range textLines {
+				lines = append(lines, "  "+line)
+			}
+		default:
+			start := len(lines)
+			animate := data.ActivityAnimations && item.ID == foregroundID
+			icon := activityIcon(item.State, data.ActivityASCII, data.ActivityFrame, animate)
+			label := cleanInlineText(item.Label)
+			if item.Detail != "" {
+				label += " — " + cleanInlineText(item.Detail)
+			}
+			if item.DurationMS > 0 && item.State != "active" {
+				label += " " + formatActivityDuration(item.DurationMS)
+			}
+			header := icon + " " + label
+			if item.ID == data.TranscriptSelected {
+				header = "> " + header
+			}
+			if animate && item.State == "active" {
+				header = style.Control.Render(icon+" "+activityShimmer(data.ActivityFrame, data.ActivityASCII)+" ") + label
+			} else if item.State == "failed" {
+				header = lipgloss.NewStyle().Foreground(style.Theme.Error).Render(header)
+			} else if item.State == "waiting_approval" || item.State == "cancelled" {
+				header = lipgloss.NewStyle().Foreground(style.Theme.Warning).Render(header)
+			} else if item.State == "completed" {
+				header = lipgloss.NewStyle().Foreground(style.Theme.Success).Render(header)
+			}
+			lines = append(lines, truncateStyledText(header, width))
+			outputLines := wrapAgentTranscriptText(item.Output, maxInt(1, width-4))
+			total := len(outputLines)
+			expanded := data.TranscriptExpanded[item.ID]
+			visible := len(outputLines)
+			if !expanded {
+				visible = minInt(5, visible)
+			}
+			if visible == 0 && (item.State == "completed" || item.State == "failed") {
+				lines = append(lines, style.ControlMuted.Render("  ⎿ (no output)"))
+			}
+			for index := 0; index < visible; index++ {
+				prefix := "    "
+				if index == 0 {
+					prefix = "  ⎿ "
+				}
+				lines = append(lines, prefix+truncateText(outputLines[index], maxInt(1, width-lipgloss.Width(prefix))))
+			}
+			hidden := maxInt(0, total-visible)
+			if hidden > 0 {
+				message := fmt.Sprintf("    … +%d rows — click or Enter to expand", hidden)
+				if expanded && (item.OutputTruncated || total > len(outputLines)) {
+					message = fmt.Sprintf("    … %d lines not retained — export the full result", hidden)
+				}
+				lines = append(lines, style.ControlMuted.Render(truncateText(message, width)))
+			} else if item.OutputTruncated {
+				lines = append(lines, style.ControlMuted.Render(truncateText("    … output was bounded — export the full result", width)))
+			} else if expanded && total > 5 {
+				lines = append(lines, style.ControlMuted.Render("    click or Enter to collapse"))
+			}
+			regions = append(regions, components.HitRegion{
+				Rect: components.Rect{Y: start, Width: width, Height: maxInt(1, len(lines)-start)},
+				Kind: components.HitAgentTranscript, ItemID: item.ID,
+			})
+		}
+	}
+	return strings.Join(lines, "\n"), regions
+}
+
+type agentTranscriptLayout struct {
+	Blocks       []agentTranscriptBlock
+	TotalRows    int
+	ForegroundID string
+}
+
+type agentTranscriptBlock struct {
+	ItemIndex int
+	Start     int
+	Rows      int
+	Output    *agentTranscriptOutputCache
+}
+
+type agentTranscriptViewportFrame struct {
+	Text          string
+	Offset        int
+	ContentHeight int
+	IndicatorRows int
+	TotalRows     int
+	HitRegions    []components.HitRegion
+}
+
+// renderAgentTranscriptViewport virtualizes both long conversations and large
+// expanded tool results. Only rows intersecting the current viewport are
+// materialized; an oversize transcript is never joined into one giant string.
+func renderAgentTranscriptViewport(style styles.Styles, data ShellData, width int, height int, offset int) agentTranscriptViewportFrame {
+	width = maxInt(1, width)
+	height = maxInt(1, height)
+	layout := layoutAgentTranscript(data, width)
+	contentHeight := height
+	showIndicator := layout.TotalRows > height
+	if showIndicator && height > 1 {
+		contentHeight--
+	}
+	maxOffset := maxInt(0, layout.TotalRows-contentHeight)
+	offset = clampInt(offset, 0, maxOffset)
+	lines, regions := renderAgentTranscriptRows(style, data, layout, width, offset, contentHeight)
+	for len(lines) < contentHeight {
+		lines = append(lines, "")
+	}
+	for index, line := range lines {
+		if line == "" {
+			lines[index] = strings.Repeat(" ", width)
+		}
+	}
+	indicatorRows := 0
+	if showIndicator && height > 1 {
+		indicator := fmt.Sprintf("scroll %d/%d  ↑/↓ PgUp/PgDn Home/End", offset, maxOffset)
+		lines = append([]string{truncateText(indicator, width)}, lines...)
+		indicatorRows = 1
+		for index := range regions {
+			regions[index].Rect = regions[index].Rect.Translate(0, 1)
+		}
+	}
+	return agentTranscriptViewportFrame{
+		Text: strings.Join(lines, "\n"), Offset: offset, ContentHeight: contentHeight,
+		IndicatorRows: indicatorRows, TotalRows: layout.TotalRows, HitRegions: regions,
+	}
+}
+
+func layoutAgentTranscript(data ShellData, width int) agentTranscriptLayout {
+	cache := data.TranscriptCache
+	if cache == nil {
+		cache = NewAgentTranscriptRenderCache()
+	}
+	widthCache := cache.cacheForWidth(maxInt(1, width))
+	layout := agentTranscriptLayout{Blocks: make([]agentTranscriptBlock, 0, len(data.AgentTranscript))}
+	foregroundSequence := int64(-1)
+	for index, item := range data.AgentTranscript {
+		if index > 0 {
+			layout.TotalRows++
+		}
+		outputWidth := maxInt(1, width-4)
+		if item.Kind == "user" || item.Kind == "assistant" {
+			outputWidth = maxInt(1, width-2)
+		}
+		output := widthCache.outputFor(item, outputWidth)
+		rows := agentTranscriptItemRowCount(item, output, data.TranscriptExpanded[item.ID])
+		layout.Blocks = append(layout.Blocks, agentTranscriptBlock{ItemIndex: index, Start: layout.TotalRows, Rows: rows, Output: output})
+		layout.TotalRows += rows
+		if item.State == "active" && item.Kind == "processing" && item.UpdatedSequence >= foregroundSequence {
+			layout.ForegroundID = item.ID
+			foregroundSequence = item.UpdatedSequence
+		}
+	}
+	return layout
+}
+
+func (cache *AgentTranscriptRenderCache) cacheForWidth(width int) *agentTranscriptWidthCache {
+	if cache.widths == nil {
+		cache.widths = map[int]*agentTranscriptWidthCache{}
+	}
+	cache.clock++
+	if current := cache.widths[width]; current != nil {
+		current.touched = cache.clock
+		return current
+	}
+	if len(cache.widths) >= maxAgentTranscriptCachedWidths {
+		oldestWidth := 0
+		oldestTouch := ^uint64(0)
+		for candidateWidth, candidate := range cache.widths {
+			if candidate.touched < oldestTouch {
+				oldestWidth, oldestTouch = candidateWidth, candidate.touched
+			}
+		}
+		delete(cache.widths, oldestWidth)
+	}
+	current := &agentTranscriptWidthCache{touched: cache.clock, items: map[string]*agentTranscriptOutputCache{}}
+	cache.widths[width] = current
+	return current
+}
+
+func (cache *agentTranscriptWidthCache) outputFor(item AgentTranscriptItem, width int) *agentTranscriptOutputCache {
+	current := cache.items[item.ID]
+	if current != nil && current.runID == item.RunID && current.kind == item.Kind && current.state == item.State &&
+		current.updatedSequence == item.UpdatedSequence && current.output == item.Output &&
+		current.outputLineCount == item.OutputLineCount && current.outputTruncated == item.OutputTruncated {
+		return current
+	}
+	lines := agentResponseLines(item.Output)
+	offsets := make([]int, len(lines)+1)
+	for index, line := range lines {
+		offsets[index+1] = offsets[index] + agentTranscriptLineRowCount(line, width)
+	}
+	current = &agentTranscriptOutputCache{
+		runID: item.RunID, kind: item.Kind, state: item.State, updatedSequence: item.UpdatedSequence,
+		output: item.Output, outputLineCount: item.OutputLineCount, outputTruncated: item.OutputTruncated,
+		lines: lines, wrappedRowOffsets: offsets,
+	}
+	cache.items[item.ID] = current
+	return current
+}
+
+func agentTranscriptItemRowCount(item AgentTranscriptItem, output *agentTranscriptOutputCache, expanded bool) int {
+	total := output.totalRows()
+	if item.Kind == "user" || item.Kind == "assistant" {
+		return 1 + maxInt(1, total)
+	}
+	visible := total
+	if !expanded {
+		visible = minInt(5, visible)
+	}
+	rows := 1 + visible
+	if visible == 0 && (item.State == "completed" || item.State == "failed") {
+		rows++
+	}
+	hidden := maxInt(0, total-visible)
+	if hidden > 0 || item.OutputTruncated || (expanded && total > 5) {
+		rows++
+	}
+	return rows
+}
+
+func (output *agentTranscriptOutputCache) totalRows() int {
+	if output == nil || len(output.wrappedRowOffsets) == 0 {
+		return 0
+	}
+	return output.wrappedRowOffsets[len(output.wrappedRowOffsets)-1]
+}
+
+func renderAgentTranscriptRows(style styles.Styles, data ShellData, layout agentTranscriptLayout, width int, start int, count int) ([]string, []components.HitRegion) {
+	if count <= 0 || start >= layout.TotalRows {
+		return nil, nil
+	}
+	end := minInt(layout.TotalRows, start+count)
+	lines := make([]string, end-start)
+	regions := []components.HitRegion{}
+	for _, block := range layout.Blocks {
+		blockEnd := block.Start + block.Rows
+		if blockEnd <= start || block.Start >= end {
+			continue
+		}
+		item := data.AgentTranscript[block.ItemIndex]
+		visibleStart := maxInt(start, block.Start)
+		visibleEnd := minInt(end, blockEnd)
+		localStart := visibleStart - block.Start
+		rows := renderAgentTranscriptItemRows(style, data, item, block.Output, layout.ForegroundID, width, localStart, visibleEnd-visibleStart)
+		copy(lines[visibleStart-start:], rows)
+		if item.Kind != "user" && item.Kind != "assistant" {
+			regions = append(regions, components.HitRegion{
+				Rect: components.Rect{Y: visibleStart - start, Width: width, Height: visibleEnd - visibleStart},
+				Kind: components.HitAgentTranscript, ItemID: item.ID,
+			})
+		}
+	}
+	return lines, regions
+}
+
+func renderAgentTranscriptItemRows(style styles.Styles, data ShellData, item AgentTranscriptItem, output *agentTranscriptOutputCache, foregroundID string, width int, start int, count int) []string {
+	rows := make([]string, 0, count)
+	end := start + count
+	for row := start; row < end; row++ {
+		if item.Kind == "user" || item.Kind == "assistant" {
+			if row == 0 {
+				title := "Agent"
+				if item.Kind == "user" {
+					title = "You"
+				}
+				rows = append(rows, style.Control.Render(title))
+				continue
+			}
+			if output.totalRows() == 0 {
+				rows = append(rows, "  (no text)")
+				continue
+			}
+			rows = append(rows, "  "+output.row(row-1, maxInt(1, width-2)))
+			continue
+		}
+
+		if row == 0 {
+			rows = append(rows, renderAgentTranscriptHeader(style, data, item, foregroundID, width))
+			continue
+		}
+		total := output.totalRows()
+		expanded := data.TranscriptExpanded[item.ID]
+		visible := total
+		if !expanded {
+			visible = minInt(5, visible)
+		}
+		contentRow := row - 1
+		if visible == 0 && (item.State == "completed" || item.State == "failed") {
+			if contentRow == 0 {
+				rows = append(rows, style.ControlMuted.Render("  ⎿ (no output)"))
+				continue
+			}
+			contentRow--
+		}
+		if contentRow >= 0 && contentRow < visible {
+			prefix := "    "
+			if contentRow == 0 {
+				prefix = "  ⎿ "
+			}
+			rows = append(rows, prefix+output.row(contentRow, maxInt(1, width-4)))
+			continue
+		}
+		hidden := maxInt(0, total-visible)
+		message := ""
+		if hidden > 0 {
+			message = fmt.Sprintf("    … +%d rows — click or Enter to expand", hidden)
+		} else if item.OutputTruncated {
+			message = "    … output was bounded — export the full result"
+		} else if expanded && total > 5 {
+			message = "    click or Enter to collapse"
+		}
+		rows = append(rows, style.ControlMuted.Render(truncateText(message, width)))
+	}
+	return rows
+}
+
+func renderAgentTranscriptHeader(style styles.Styles, data ShellData, item AgentTranscriptItem, foregroundID string, width int) string {
+	animate := data.ActivityAnimations && item.ID == foregroundID
+	icon := activityIcon(item.State, data.ActivityASCII, data.ActivityFrame, animate)
+	label := cleanInlineText(item.Label)
+	if item.Detail != "" {
+		label += " — " + cleanInlineText(item.Detail)
+	}
+	if item.DurationMS > 0 && item.State != "active" {
+		label += " " + formatActivityDuration(item.DurationMS)
+	}
+	header := icon + " " + label
+	if item.ID == data.TranscriptSelected {
+		header = "> " + header
+	}
+	if animate && item.State == "active" {
+		header = style.Control.Render(icon+" "+activityShimmer(data.ActivityFrame, data.ActivityASCII)+" ") + label
+	} else if item.State == "failed" {
+		header = lipgloss.NewStyle().Foreground(style.Theme.Error).Render(header)
+	} else if item.State == "waiting_approval" || item.State == "cancelled" {
+		header = lipgloss.NewStyle().Foreground(style.Theme.Warning).Render(header)
+	} else if item.State == "completed" {
+		header = lipgloss.NewStyle().Foreground(style.Theme.Success).Render(header)
+	}
+	return truncateStyledText(header, width)
+}
+
+func (output *agentTranscriptOutputCache) row(row int, width int) string {
+	if output == nil || row < 0 || row >= output.totalRows() || len(output.lines) == 0 {
+		return ""
+	}
+	lineIndex := sort.Search(len(output.lines), func(index int) bool {
+		return output.wrappedRowOffsets[index+1] > row
+	})
+	if lineIndex >= len(output.lines) {
+		return ""
+	}
+	wrapped := wrapAgentTranscriptLine(output.lines[lineIndex], width)
+	localRow := row - output.wrappedRowOffsets[lineIndex]
+	if localRow < 0 || localRow >= len(wrapped) {
+		return ""
+	}
+	return wrapped[localRow]
+}
+
+func agentResponseLines(value string) []string {
+	value = safemarkdown.SanitizeTerminalText(strings.ReplaceAll(value, "\r\n", "\n"))
+	value = strings.TrimRight(value, "\n")
+	if value == "" {
+		return nil
+	}
+	return strings.Split(value, "\n")
+}
+
+// wrapAgentTranscriptText is shared by the Ctrl+G dock and the F6 full Agent
+// page. It preserves explicit newlines, prefers word boundaries, and
+// hard-wraps a single long token so sanitized transcript text is never lost.
+func wrapAgentTranscriptText(value string, width int) []string {
+	if width <= 0 {
+		return nil
+	}
+	source := agentResponseLines(value)
+	if len(source) == 0 {
+		return nil
+	}
+	wrapped := make([]string, 0, len(source))
+	for _, line := range source {
+		if line == "" {
+			wrapped = append(wrapped, "")
+			continue
+		}
+		wrapped = append(wrapped, wrapAgentTranscriptLine(line, width)...)
+	}
+	return wrapped
+}
+
+func wrapAgentTranscriptLine(line string, width int) []string {
+	line = strings.ReplaceAll(line, "\t", "    ")
+	indentWidth := len(line) - len(strings.TrimLeft(line, " "))
+	indentWidth = minInt(indentWidth, maxInt(0, width-1))
+	indent := strings.Repeat(" ", indentWidth)
+	words := strings.Fields(strings.TrimLeft(line, " "))
+	if len(words) == 0 {
+		return []string{truncateText(line, width)}
+	}
+
+	result := []string{}
+	current := indent
+	for _, word := range words {
+		separator := ""
+		if strings.TrimSpace(current) != "" {
+			separator = " "
+		}
+		if lipgloss.Width(current+separator+word) <= width {
+			current += separator + word
+			continue
+		}
+		if strings.TrimSpace(current) != "" {
+			result = append(result, current)
+			current = indent
+		}
+		available := maxInt(1, width-lipgloss.Width(indent))
+		chunks := hardWrapVisibleToken(word, available)
+		for index, chunk := range chunks {
+			if index == len(chunks)-1 {
+				current = indent + chunk
+			} else {
+				result = append(result, indent+chunk)
+			}
+		}
+	}
+	if strings.TrimSpace(current) != "" {
+		result = append(result, current)
+	}
+	return result
+}
+
+// agentTranscriptLineRowCount mirrors wrapAgentTranscriptLine without
+// materializing every wrapped row. It is used to build the lazy row index once
+// per item and terminal width.
+func agentTranscriptLineRowCount(line string, width int) int {
+	line = strings.ReplaceAll(line, "\t", "    ")
+	indentWidth := len(line) - len(strings.TrimLeft(line, " "))
+	indentWidth = minInt(indentWidth, maxInt(0, width-1))
+	words := strings.Fields(strings.TrimLeft(line, " "))
+	if len(words) == 0 {
+		return 1
+	}
+	rows := 0
+	currentWidth := indentWidth
+	currentHasText := false
+	for _, word := range words {
+		separatorWidth := 0
+		if currentHasText {
+			separatorWidth = 1
+		}
+		wordWidth := lipgloss.Width(word)
+		if currentWidth+separatorWidth+wordWidth <= width {
+			currentWidth += separatorWidth + wordWidth
+			currentHasText = true
+			continue
+		}
+		if currentHasText {
+			rows++
+			currentWidth = indentWidth
+			currentHasText = false
+		}
+		available := maxInt(1, width-indentWidth)
+		chunks := hardWrapVisibleToken(word, available)
+		if len(chunks) == 0 {
+			continue
+		}
+		rows += maxInt(0, len(chunks)-1)
+		currentWidth = indentWidth + lipgloss.Width(chunks[len(chunks)-1])
+		currentHasText = true
+	}
+	if currentHasText {
+		rows++
+	}
+	return maxInt(1, rows)
+}
+
+func hardWrapVisibleToken(value string, width int) []string {
+	chunks := []string{}
+	var current strings.Builder
+	for _, character := range value {
+		candidate := current.String() + string(character)
+		if current.Len() > 0 && lipgloss.Width(candidate) > width {
+			chunks = append(chunks, current.String())
+			current.Reset()
+		}
+		current.WriteRune(character)
+	}
+	if current.Len() > 0 {
+		chunks = append(chunks, current.String())
+	}
+	return chunks
+}
+
+func activityIcon(state string, ascii bool, frame int, animate bool) string {
+	if ascii {
+		switch state {
+		case "completed":
+			return "+"
+		case "failed":
+			return "x"
+		case "waiting_approval", "cancelled":
+			return "!"
+		case "active":
+			if animate && frame%2 == 1 {
+				return "o"
+			}
+			return "*"
+		default:
+			return "o"
+		}
+	}
+	switch state {
+	case "completed":
+		return "✓"
+	case "failed":
+		return "×"
+	case "waiting_approval", "cancelled":
+		return "!"
+	case "active":
+		if animate && frame%2 == 1 {
+			return "◉"
+		}
+		return "●"
+	default:
+		return "○"
+	}
+}
+
+func activityShimmer(frame int, ascii bool) string {
+	if ascii {
+		return []string{"=..", ".=.", "..="}[frame%3]
+	}
+	return []string{"▰▱▱", "▱▰▱", "▱▱▰"}[frame%3]
+}
+
+func formatActivityDuration(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("(%dms)", ms)
+	}
+	return fmt.Sprintf("(%.1fs)", float64(ms)/1000)
 }
 
 func operatorInventoryViewport(data ShellData) bool {
@@ -892,6 +1669,7 @@ func operatorOverlay(style styles.Styles, data ShellData, metrics layout.Metrics
 	switch {
 	case data.Confirmation != nil:
 	case data.Usage != nil:
+	case data.Settings != nil:
 	case data.ContextMenu != nil:
 	case data.AppManager != nil:
 	case data.PackageManager != nil:
@@ -920,14 +1698,19 @@ func operatorOverlay(style styles.Styles, data ShellData, metrics layout.Metrics
 	helpProjection.Width = innerWidth + 4
 	helpProjection.Height = innerHeight + 8
 	content := operatorOverlayContent(style, helpProjection)
+	responseRegions := []components.HitRegion{}
 	if data.ThreadSwitcher != nil {
 		content = renderThreadSwitcher(style, *data.ThreadSwitcher, innerWidth)
 	} else if data.CodePicker != nil {
 		content = renderCodePicker(*data.CodePicker)
 	} else if data.Usage != nil {
 		content = usagecomponent.Render(*data.Usage, maxInt(20, innerWidth), time.Now())
+	} else if data.Settings != nil {
+		content = renderSettings(style, *data.Settings, innerWidth)
 	} else if data.ResponseDetails {
-		content = renderAgentResponseContent(style, data, innerWidth, innerHeight)
+		responseFrame := renderAgentResponseFrame(style, data, innerWidth, innerHeight)
+		content = responseFrame.Text
+		responseRegions = responseFrame.HitRegions
 	}
 
 	viewportFrame := bodyViewportFrame{
@@ -959,11 +1742,20 @@ func operatorOverlay(style styles.Styles, data ShellData, metrics layout.Metrics
 				Index: index,
 			})
 		}
+	case data.Settings != nil:
+		for rowIndex, row := range data.Settings.Rows {
+			localRegions = append(localRegions, components.HitRegion{
+				Rect:  components.Rect{Y: 3 + rowIndex*2, Width: innerWidth, Height: 2},
+				Kind:  components.HitSettingsRow,
+				Index: row.Index,
+			})
+		}
 	case data.ResponseDetails:
 		localRegions = append(localRegions, components.HitRegion{
 			Rect: components.Rect{Width: innerWidth, Height: innerHeight},
 			Kind: components.HitResponse,
 		})
+		localRegions = append(localRegions, responseRegions...)
 	case data.AppManager != nil:
 		localRegions = registeredAppHitRegions(helpProjection)
 	case data.PackageManager != nil:
@@ -1036,6 +1828,8 @@ func operatorOverlayContent(style styles.Styles, data ShellData) string {
 		return renderConfirmation(*data.Confirmation)
 	case data.Usage != nil:
 		return usagecomponent.Render(*data.Usage, 52, time.Now())
+	case data.Settings != nil:
+		return renderSettings(style, *data.Settings, maxInt(24, data.Width-8))
 	case data.ContextMenu != nil:
 		return renderContextMenu(*data.ContextMenu)
 	case data.AppManager != nil:
@@ -1059,6 +1853,59 @@ func operatorOverlayContent(style styles.Styles, data ShellData) string {
 	default:
 		return ""
 	}
+}
+
+func renderSettings(style styles.Styles, data SettingsData, width int) string {
+	width = maxInt(24, width)
+	title := style.Control.Render(cleanInlineText(data.Title))
+	breadcrumb := "Settings"
+	if data.Page != "" && data.Page != "categories" {
+		breadcrumb += " / " + strings.ToUpper(data.Page[:1]) + data.Page[1:]
+	}
+	lines := []string{title, style.Muted.Render(truncateText(breadcrumb, width)), ""}
+	if len(data.Rows) == 0 {
+		lines = append(lines, style.Muted.Render("No settings are available."))
+	}
+	for _, row := range data.Rows {
+		marker := "  "
+		label := cleanInlineText(row.Label)
+		value := cleanInlineText(row.Value)
+		if row.Index == data.Selected {
+			marker = "> "
+			label = style.PaletteSelected.Render(label)
+		}
+		if row.Action {
+			value = "open"
+		}
+		if row.ReadOnly {
+			value += " · read only"
+		}
+		valueWidth := maxInt(8, width-ansi.StringWidth(marker)-ansi.StringWidth(label)-3)
+		lines = append(lines, truncateText(marker+label+"  "+truncateText(value, valueWidth), width))
+		if strings.TrimSpace(row.Hint) != "" {
+			lines = append(lines, style.Muted.Render(truncateText("    "+row.Hint, width)))
+		} else {
+			lines = append(lines, "")
+		}
+	}
+	if data.Editing {
+		lines = append(lines, style.Control.Render("Edit value: ")+cleanInlineText(data.EditValue))
+	}
+	if data.Saving {
+		lines = append(lines, style.Muted.Render("Saving Agent configuration..."))
+	} else if strings.TrimSpace(data.Notice) != "" {
+		lines = append(lines, style.Muted.Render(truncateText(data.Notice, width)))
+	}
+	rangeLabel := ""
+	if data.TotalRows > len(data.Rows) {
+		rangeLabel = fmt.Sprintf(" · rows %d-%d of %d", data.FirstRow+1, data.FirstRow+len(data.Rows), data.TotalRows)
+	}
+	footer := "↑↓ select · Enter change/open · ←/Esc back · Q close" + rangeLabel
+	if data.Editing {
+		footer = "Enter save · Esc cancel edit"
+	}
+	lines = append(lines, "", style.Muted.Render(truncateText(footer, width)))
+	return strings.Join(lines, "\n")
 }
 
 func threadSwitcherBounds(style styles.Styles, metrics layout.Metrics, data ThreadSwitcherData) components.Rect {
@@ -1350,7 +2197,7 @@ func renderPane(style styles.Styles, pane panes.PaneSnapshot, width int, height 
 
 	lines := []string{
 		style.PaneTitle.Render(truncateText(pane.Title, width-4)),
-		truncateText(statusLine(pane), width-4),
+		renderPaneStatusLine(style, pane, width-4),
 	}
 	if pane.RouteLabel != "" {
 		lines = append(lines, truncateText("route "+pane.RouteLabel, width-4))
@@ -2172,7 +3019,10 @@ func ResponseScrollMax(style styles.Styles, data ShellData) int {
 	}
 	contentWidth := 0
 	contentHeight := 0
-	if data.ResponseDetails {
+	if data.AgentChatFull {
+		contentWidth = width
+		contentHeight = maxInt(1, metrics.Composer.Y)
+	} else if data.ResponseDetails {
 		content := overlayContentBounds(style.Help, metrics.Modal)
 		contentWidth = content.Width
 		contentHeight = content.Height
@@ -2183,18 +3033,141 @@ func ResponseScrollMax(style styles.Styles, data ShellData) int {
 	} else {
 		return 0
 	}
-	source := strings.TrimSpace(data.ResponseSource)
-	if source == "" {
-		source = "No Agent output yet. Submit a request in Composer."
+	if len(data.AgentTranscript) > 0 {
+		layout := layoutAgentTranscript(data, contentWidth)
+		viewportHeight := maxInt(1, contentHeight-2)
+		visibleHeight := viewportHeight
+		if layout.TotalRows > viewportHeight && viewportHeight > 1 {
+			visibleHeight--
+		}
+		return maxInt(0, layout.TotalRows-visibleHeight)
 	}
-	rendered := (safemarkdown.SafeMarkdownRenderer{}).Render(source, maxInt(20, contentWidth))
-	return renderBodyViewportFrame(rendered.Text, maxInt(1, contentHeight-2), maxIntValue(), contentWidth).Offset
+	content, _ := renderAgentTranscript(style, data, contentWidth)
+	if strings.TrimSpace(content) == "" {
+		source := strings.TrimSpace(data.ResponseSource)
+		if source == "" {
+			source = "No Agent output yet. Submit a request in Composer."
+		}
+		content = (safemarkdown.SafeMarkdownRenderer{}).Render(source, maxInt(20, contentWidth)).Text
+	}
+	return renderBodyViewportFrame(content, maxInt(1, contentHeight-2), maxIntValue(), contentWidth).Offset
 }
 
 // ResponseBottomOffset is an intention-revealing alias used when follow mode
 // anchors new Agent output to the bottom of the response viewport.
 func ResponseBottomOffset(style styles.Styles, data ShellData) int {
 	return ResponseScrollMax(style, data)
+}
+
+// ResponseOffsetForTranscriptItem keeps keyboard selection visible using the
+// exact transcript and viewport geometry used by the renderer.
+func ResponseOffsetForTranscriptItem(style styles.Styles, data ShellData, itemID string) int {
+	contentWidth, contentHeight, ok := responseViewportGeometry(style, data)
+	if !ok || itemID == "" {
+		return data.ResponseOffset
+	}
+	layout := layoutAgentTranscript(data, contentWidth)
+	viewportHeight := maxInt(1, contentHeight-2)
+	visibleHeight := viewportHeight
+	if layout.TotalRows > viewportHeight && viewportHeight > 1 {
+		visibleHeight--
+	}
+	maximum := maxInt(0, layout.TotalRows-visibleHeight)
+	offset := clampInt(data.ResponseOffset, 0, maximum)
+	for _, block := range layout.Blocks {
+		item := data.AgentTranscript[block.ItemIndex]
+		if item.ID != itemID {
+			continue
+		}
+		if block.Rows > visibleHeight {
+			return clampInt(block.Start, 0, maximum)
+		}
+		if block.Start < offset {
+			return clampInt(block.Start, 0, maximum)
+		}
+		bottom := block.Start + block.Rows
+		if bottom > offset+visibleHeight {
+			return clampInt(bottom-visibleHeight, 0, maximum)
+		}
+		return offset
+	}
+	return offset
+}
+
+type AgentTranscriptAnchor struct {
+	ItemID   string
+	LocalRow int
+}
+
+// ResponseTranscriptAnchor captures the transcript row currently at the top
+// of the active Agent viewport so terminal reflow can restore the same logical
+// reading position instead of preserving an obsolete absolute row number.
+func ResponseTranscriptAnchor(style styles.Styles, data ShellData) (AgentTranscriptAnchor, bool) {
+	contentWidth, _, ok := responseViewportGeometry(style, data)
+	if !ok || len(data.AgentTranscript) == 0 {
+		return AgentTranscriptAnchor{}, false
+	}
+	layout := layoutAgentTranscript(data, contentWidth)
+	offset := clampInt(data.ResponseOffset, 0, maxInt(0, layout.TotalRows-1))
+	for _, block := range layout.Blocks {
+		item := data.AgentTranscript[block.ItemIndex]
+		if offset < block.Start {
+			return AgentTranscriptAnchor{ItemID: item.ID}, true
+		}
+		if offset < block.Start+block.Rows {
+			return AgentTranscriptAnchor{ItemID: item.ID, LocalRow: offset - block.Start}, true
+		}
+	}
+	if len(layout.Blocks) == 0 {
+		return AgentTranscriptAnchor{}, false
+	}
+	last := layout.Blocks[len(layout.Blocks)-1]
+	item := data.AgentTranscript[last.ItemIndex]
+	return AgentTranscriptAnchor{ItemID: item.ID, LocalRow: maxInt(0, last.Rows-1)}, true
+}
+
+func ResponseOffsetForTranscriptAnchor(style styles.Styles, data ShellData, anchor AgentTranscriptAnchor) int {
+	contentWidth, contentHeight, ok := responseViewportGeometry(style, data)
+	if !ok || anchor.ItemID == "" {
+		return data.ResponseOffset
+	}
+	layout := layoutAgentTranscript(data, contentWidth)
+	viewportHeight := maxInt(1, contentHeight-2)
+	visibleHeight := viewportHeight
+	if layout.TotalRows > viewportHeight && viewportHeight > 1 {
+		visibleHeight--
+	}
+	maximum := maxInt(0, layout.TotalRows-visibleHeight)
+	for _, block := range layout.Blocks {
+		item := data.AgentTranscript[block.ItemIndex]
+		if item.ID != anchor.ItemID {
+			continue
+		}
+		localRow := clampInt(anchor.LocalRow, 0, maxInt(0, block.Rows-1))
+		return clampInt(block.Start+localRow, 0, maximum)
+	}
+	return clampInt(data.ResponseOffset, 0, maximum)
+}
+
+func responseViewportGeometry(style styles.Styles, data ShellData) (int, int, bool) {
+	width := maxInt(data.Width, 1)
+	height := maxInt(data.Height, 1)
+	metrics := layout.ComputeWithOptions(width, height, data.ComposerRows, layout.Options{AgentExpanded: data.AgentPaneExpanded})
+	if metrics.ResizeRequired {
+		return 0, 0, false
+	}
+	if data.AgentChatFull {
+		return width, maxInt(1, metrics.Composer.Y), true
+	}
+	if data.ResponseDetails {
+		content := overlayContentBounds(style.Help, metrics.Modal)
+		return content.Width, content.Height, true
+	}
+	if metrics.AgentDocked {
+		panelStyle := agentDockStyle(style)
+		return maxInt(1, metrics.Agent.Width-panelStyle.GetHorizontalFrameSize()), maxInt(1, metrics.Agent.Height-panelStyle.GetVerticalFrameSize()), true
+	}
+	return 0, 0, false
 }
 
 func maxIntValue() int {
@@ -2335,6 +3308,31 @@ func statusLine(pane panes.PaneSnapshot) string {
 		parts = append(parts, fmt.Sprintf("scroll +%d", pane.ScrollOffset))
 	}
 	return strings.Join(parts, " | ")
+}
+
+func renderPaneStatusLine(style styles.Styles, pane panes.PaneSnapshot, width int) string {
+	status := cleanInlineText(pane.Status)
+	if status == "" {
+		status = "unknown"
+	}
+	plain := statusLine(pane)
+	prefix := "status "
+	suffix := strings.TrimPrefix(plain, prefix+status)
+	styled := prefix + paneStatusTone(style, status).Render(status) + suffix
+	return truncateStyledText(styled, width)
+}
+
+func paneStatusTone(style styles.Styles, status string) lipgloss.Style {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "running", "ready", "healthy", "active":
+		return lipgloss.NewStyle().Foreground(style.Theme.Success)
+	case "stopped", "failed", "error", "errored", "conflict", "unavailable", "offline":
+		return lipgloss.NewStyle().Foreground(style.Theme.Error)
+	case "starting", "stopping", "restarting", "degraded", "warning", "pending", "unknown":
+		return lipgloss.NewStyle().Foreground(style.Theme.Warning)
+	default:
+		return lipgloss.NewStyle().Foreground(style.Theme.Muted)
+	}
 }
 
 func pidPortLine(pane panes.PaneSnapshot) string {

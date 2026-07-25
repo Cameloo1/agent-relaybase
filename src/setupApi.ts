@@ -1372,7 +1372,8 @@ export async function openSetupProject(
     host: runtime.host,
     port: runtime.port,
     stateDir: runtime.stateDir,
-    noBrowser: request.noBrowser ?? true
+    noBrowser: request.noBrowser ?? true,
+    sanitizeEnvironment: (environment) => runtime.agentGateway.sanitizeChildEnvironment(environment)
   });
   return sanitizeSetupValue({ plan, result }) as OpenProjectResult;
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -17,6 +18,13 @@ import (
 	"github.com/cameloo/relaybase/tui/internal/tui/model"
 )
 
+var (
+	buildVersion = "dev"
+	buildCommit  = "unknown"
+	buildTime    = "unknown"
+	buildSource  = "source"
+)
+
 func main() {
 	cfg := config.Load()
 
@@ -27,9 +35,21 @@ func main() {
 	smokeRender := flag.Bool("smoke-render", false, "render one deterministic smoke-evidence frame and exit")
 	smokeInput := flag.String("smoke-input", "", "optional command or assistant input for smoke-render")
 	smokeAgentSessionID := flag.String("smoke-agent-session-id", "", "optional Agent Gateway session id to render in smoke-render")
+	smokeAgentChat := flag.Bool("smoke-agent-chat", false, "open the full Agent Chat page during smoke-render")
+	smokeAgentTop := flag.Bool("smoke-agent-top", false, "scroll Agent transcript to its first item during smoke-render")
 	smokeWidth := flag.Int("smoke-width", 100, "smoke-render terminal width")
 	smokeHeight := flag.Int("smoke-height", 30, "smoke-render terminal height")
+	buildInfo := flag.Bool("build-info", false, "print safe build identity as JSON and exit")
 	flag.Parse()
+	if *buildInfo {
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]string{
+			"version": buildVersion,
+			"commit":  buildCommit,
+			"builtAt": buildTime,
+			"source":  buildSource,
+		})
+		return
+	}
 	stateDirExplicit := false
 	flag.Visit(func(parsed *flag.Flag) {
 		if parsed.Name == "state-dir" {
@@ -47,7 +67,7 @@ func main() {
 	client := relaybaseclient.New(cfg.BaseURL, cfg.Token, httpClient)
 	root := model.NewRoot(cfg, client)
 	if *smokeRender {
-		if err := renderSmokeFrame(root, client, *smokeInput, *smokeAgentSessionID, *smokeWidth, *smokeHeight, cfg.HTTPTimeout); err != nil {
+		if err := renderSmokeFrame(root, client, *smokeInput, *smokeAgentSessionID, *smokeAgentChat, *smokeAgentTop, *smokeWidth, *smokeHeight, cfg.HTTPTimeout); err != nil {
 			fmt.Fprintf(os.Stderr, "relaybase-tui smoke render: %v\n", err)
 			os.Exit(1)
 		}
@@ -61,7 +81,7 @@ func main() {
 	}
 }
 
-func renderSmokeFrame(root model.RootModel, client *relaybaseclient.Client, input string, agentSessionID string, width int, height int, timeout time.Duration) error {
+func renderSmokeFrame(root model.RootModel, client *relaybaseclient.Client, input string, agentSessionID string, agentChat bool, agentTop bool, width int, height int, timeout time.Duration) error {
 	if width <= 0 {
 		width = 100
 	}
@@ -126,6 +146,14 @@ func renderSmokeFrame(root model.RootModel, client *relaybaseclient.Client, inpu
 
 	if input != "" {
 		root = applySmokeInput(root, input)
+	}
+	if agentChat {
+		updated, _ = root.Update(tea.KeyPressMsg{Code: tea.KeyF6})
+		root = updated.(model.RootModel)
+	}
+	if agentTop {
+		updated, _ = root.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+		root = updated.(model.RootModel)
 	}
 
 	fmt.Fprintln(os.Stdout, root.Render())

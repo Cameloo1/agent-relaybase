@@ -8,6 +8,8 @@ import type { AgentFileWriteApproval, AgentManifestPatchApproval, TuiAgentContex
 import { coalesceAgentReplayEvents } from "../src/agent/api.ts";
 import type { AgentRunEvent } from "../src/agent/types.ts";
 import { createRelaybaseServer } from "../src/server.ts";
+import { loadRelaybaseEnvFile, relaybaseModelSource } from "../src/envFile.ts";
+import { relaybaseAgentToolNames } from "../src/agent/tools/index.ts";
 
 const AGENT_ENV_NAMES = [
   "OPENROUTER_API_KEY",
@@ -66,8 +68,10 @@ test("Agent Gateway config GET/PUT is token gated and never serializes raw OpenR
     assert.equal(config.statusCode, 200);
     assert.equal(config.json.agent.config.provider.provider, "openrouter");
     assert.equal(config.json.agent.config.enabled, false);
-    assert.equal(config.json.agent.config.provider.apiKeySource.configured, false);
+    assert.equal(config.json.agent.config.provider.apiKeySource.configured, true);
     assert.equal(config.json.agent.config.provider.modelSlug, undefined);
+    assert.equal(config.json.agent.config.provider.modelSource.kind, "unconfigured");
+    assert.equal(config.json.agent.config.toolAllowlistMode, "all_registered");
     assert.doesNotMatch(config.body, /sk-test-secret-value/);
 
     const diagnostics = await apiRequest(
@@ -80,7 +84,7 @@ test("Agent Gateway config GET/PUT is token gated and never serializes raw OpenR
     assert.equal(diagnostics.statusCode, 200);
     assert.deepEqual(
       diagnostics.json.agent.diagnostics.map((diagnostic: { code: string }) => diagnostic.code),
-      ["AGENT_DISABLED"]
+      ["AGENT_DISABLED", "AGENT_REMOTE_MODEL_DISABLED", "AGENT_MODEL_MISSING"]
     );
 
     const updated = await apiRequest(
@@ -94,6 +98,15 @@ test("Agent Gateway config GET/PUT is token gated and never serializes raw OpenR
           remoteModelEnabled: true,
           apiKeyEnvVar: "RELAYBASE_TEST_OPENROUTER_KEY_MISSING"
         },
+        execution: {
+          segmentMaxTurns: 10,
+          totalMaxTurns: 40,
+          inactivityTimeoutMs: 180000,
+          hardRunTimeoutMs: 1200000,
+          maxOutputTokens: 8192,
+          reasoningEffort: "high",
+          noProgressRepeatLimit: 4
+        },
         allowBrowserOpen: false,
         allowCopyRoute: false
       },
@@ -102,7 +115,49 @@ test("Agent Gateway config GET/PUT is token gated and never serializes raw OpenR
     assert.equal(updated.statusCode, 200);
     assert.equal(updated.json.agent.config.enabled, true);
     assert.equal(updated.json.agent.config.provider.modelSlug, "openrouter/test-model");
+    assert.equal(updated.json.agent.config.provider.modelSource.kind, "persisted_config");
     assert.equal(updated.json.agent.config.provider.apiKeySource.configured, false);
+    assert.deepEqual(updated.json.agent.config.execution, {
+      segmentMaxTurns: 10,
+      totalMaxTurns: 40,
+      inactivityTimeoutMs: 180000,
+      hardRunTimeoutMs: 1200000,
+      maxOutputTokens: 8192,
+      reasoningEffort: "high",
+      noProgressRepeatLimit: 4
+    });
+
+    const revisionConflict = await apiRequest(
+      port,
+      "PUT",
+      "/__hub/api/agent/config",
+      {
+        expectedRevisionId: config.json.agent.config.revision.id,
+        update: { enabled: false }
+      },
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(revisionConflict.statusCode, 409);
+    assert.equal(revisionConflict.json.code, "AGENT_CONFIG_REVISION_CONFLICT");
+    const afterConflict = await apiRequest(
+      port,
+      "GET",
+      "/__hub/api/agent/config",
+      undefined,
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(afterConflict.json.agent.config.enabled, true);
+    assert.equal(afterConflict.json.agent.config.revision.id, updated.json.agent.config.revision.id);
+
+    const invalidExecution = await apiRequest(
+      port,
+      "PUT",
+      "/__hub/api/agent/config",
+      { execution: { segmentMaxTurns: 20, totalMaxTurns: 10 } },
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(invalidExecution.statusCode, 400);
+    assert.equal(invalidExecution.json.code, "AGENT_EXECUTION_POLICY_INVALID");
 
     const rawKey = await apiRequest(
       port,
@@ -114,6 +169,71 @@ test("Agent Gateway config GET/PUT is token gated and never serializes raw OpenR
     assert.equal(rawKey.statusCode, 400);
     assert.equal(rawKey.json.code, "AGENT_RAW_API_KEY_NOT_ALLOWED");
     assert.doesNotMatch(rawKey.body, /sk-should-not-be-accepted/);
+
+    const providerConnect = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/agent/provider/openrouter/connect",
+      { openBrowser: false },
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(providerConnect.statusCode, 202);
+    assert.equal(providerConnect.json.agent.provider.attempt.status, "waiting_for_browser");
+    assert.match(providerConnect.headers["cache-control"] ?? "", /no-store/);
+    assert.doesNotMatch(providerConnect.body, /sk-test-secret-value/);
+
+    const providerStatus = await apiRequest(
+      port,
+      "GET",
+      `/__hub/api/agent/provider/openrouter/status?attemptId=${providerConnect.json.agent.provider.attempt.attemptId}`,
+      undefined,
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(providerStatus.statusCode, 200);
+    assert.equal(providerStatus.json.agent.provider.attempt.status, "waiting_for_browser");
+    assert.doesNotMatch(providerStatus.body, /sk-test-secret-value/);
+
+    const verificationOff = await apiRequest(
+      port,
+      "PUT",
+      "/__hub/api/agent/provider/openrouter/security-mode",
+      { mode: "off" },
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(verificationOff.statusCode, 200);
+    assert.equal(verificationOff.json.agent.provider.selectedMode, "off");
+    assert.equal(verificationOff.json.agent.provider.highSecurityMode, "unavailable");
+
+    const verificationRequired = await apiRequest(
+      port,
+      "PUT",
+      "/__hub/api/agent/provider/openrouter/security-mode",
+      { mode: "required" },
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(verificationRequired.statusCode, 409);
+    assert.equal(verificationRequired.json.code, "AGENT_WINDOWS_VERIFICATION_UNAVAILABLE");
+
+    const unconfirmedDisconnect = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/agent/provider/openrouter/disconnect",
+      {},
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(unconfirmedDisconnect.statusCode, 400);
+    assert.equal(unconfirmedDisconnect.json.code, "AGENT_PROVIDER_CONFIRMATION_REQUIRED");
+
+    const revokePreview = await apiRequest(
+      port,
+      "POST",
+      "/__hub/api/agent/provider/openrouter/revoke/preview",
+      {},
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(revokePreview.statusCode, 200);
+    assert.equal(revokePreview.json.agent.provider.supported, false);
+    assert.equal(revokePreview.json.agent.provider.localCredentialPreserved, true);
   } finally {
     restoreEnvValues(previous);
     await hub.close();
@@ -148,6 +268,7 @@ test("Agent Gateway daemon config starts ready from explicit env opt-in flags", 
     assert.equal(config.json.agent.config.enabled, true);
     assert.equal(config.json.agent.config.provider.remoteModelEnabled, true);
     assert.equal(config.json.agent.config.provider.modelSlug, "google/gemini-3.1-flash-lite");
+    assert.equal(config.json.agent.config.provider.modelSource.kind, "shell_environment");
     assert.equal(config.json.agent.config.provider.apiKeySource.configured, true);
     assert.doesNotMatch(config.body, /sk-or-daemon-env-secret/);
 
@@ -166,6 +287,103 @@ test("Agent Gateway daemon config starts ready from explicit env opt-in flags", 
   } finally {
     await hub.close();
     restoreEnvValues(previous);
+  }
+});
+
+test("Agent Gateway reports env-file model provenance and reloadable drift without exposing values", async () => {
+  const project = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-env-source-"));
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-env-source-state-"));
+  const envPath = path.join(project, ".env");
+  await fs.writeFile(
+    envPath,
+    "RELAYBASE_AGENT_MODEL=openrouter/source-model\nRELAYBASE_AGENT_ENABLED=1\nRELAYBASE_AGENT_REMOTE_MODEL_ENABLED=1\n",
+    "utf8"
+  );
+  const previous = saveEnv(AGENT_ENV_NAMES);
+  const loadedEnv: NodeJS.ProcessEnv = { OPENROUTER_API_KEY: "sk-or-source-secret" };
+  const loaded = loadRelaybaseEnvFile({ cwd: project, env: loadedEnv });
+  Object.assign(process.env, loadedEnv);
+  const hub = await createRelaybaseServer({
+    port: 0,
+    stateDir,
+    agentEnvironment: {
+      modelSource: relaybaseModelSource(loaded, loadedEnv),
+      envFilePath: loaded.path,
+      envFileFingerprint: loaded.fingerprint,
+      envFileAppliedKeys: loaded.appliedKeys,
+      envFileSkippedKeys: loaded.skippedKeys,
+      envFileSourceKind: loaded.sourceKind
+    }
+  });
+  try {
+    await hub.listen();
+    const initial = await apiRequest(
+      hub.address().port,
+      "GET",
+      "/__hub/api/agent/config",
+      undefined,
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(initial.json.agent.config.provider.modelSlug, "openrouter/source-model");
+    assert.deepEqual(initial.json.agent.config.provider.modelSource, { kind: "cwd_env_file", label: ".env" });
+    assert.equal(initial.json.agent.config.provider.restartRequired, false);
+    assert.doesNotMatch(initial.body, /sk-or-source-secret/);
+
+    await fs.appendFile(envPath, "OPENROUTER_TITLE=Changed\n", "utf8");
+    const drifted = await apiRequest(
+      hub.address().port,
+      "GET",
+      "/__hub/api/agent/config",
+      undefined,
+      tokenHeaders(hub.runtime.token)
+    );
+    assert.equal(drifted.json.agent.config.provider.modelSlug, "openrouter/source-model");
+    assert.equal(drifted.json.agent.config.provider.restartRequired, false);
+    assert.equal(drifted.json.agent.config.source.health, "changed");
+  } finally {
+    await hub.close();
+    restoreEnvValues(previous);
+  }
+});
+
+test("Agent Gateway migrates historical defaults to all-registered while preserving custom subsets", async () => {
+  const newTools = new Set([
+    "get_current_context",
+    "get_agent_capabilities",
+    "explain_app_problem",
+    "get_operation_status",
+    "list_operations",
+    "discover_project_roots"
+  ]);
+  const legacyDefaults = relaybaseAgentToolNames().filter((name) => !newTools.has(name));
+  const legacyState = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-legacy-tools-"));
+  await fs.mkdir(path.join(legacyState, "agent"), { recursive: true });
+  await fs.writeFile(
+    path.join(legacyState, "agent", "config.json"),
+    JSON.stringify({ schemaVersion: 1, toolAllowlist: legacyDefaults }),
+    "utf8"
+  );
+  const legacyHub = await createRelaybaseServer({ port: 0, stateDir: legacyState });
+  try {
+    assert.equal(legacyHub.runtime.agentGateway.getConfig().toolAllowlistMode, "all_registered");
+    assert.deepEqual(legacyHub.runtime.agentGateway.getConfig().toolAllowlist, relaybaseAgentToolNames());
+  } finally {
+    await legacyHub.close();
+  }
+
+  const customState = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-custom-tools-"));
+  await fs.mkdir(path.join(customState, "agent"), { recursive: true });
+  await fs.writeFile(
+    path.join(customState, "agent", "config.json"),
+    JSON.stringify({ schemaVersion: 1, toolAllowlist: ["list_apps", "tail_logs"] }),
+    "utf8"
+  );
+  const customHub = await createRelaybaseServer({ port: 0, stateDir: customState });
+  try {
+    assert.equal(customHub.runtime.agentGateway.getConfig().toolAllowlistMode, "explicit_allowlist");
+    assert.deepEqual(customHub.runtime.agentGateway.getConfig().toolAllowlist, ["list_apps", "tail_logs"]);
+  } finally {
+    await customHub.close();
   }
 });
 
@@ -524,7 +742,7 @@ test("Agent Gateway message returns diagnostics for disabled and missing-config 
       tokenHeaders(hub.runtime.token)
     );
     assert.equal(missingKey.statusCode, 202);
-    assert.equal(missingKey.json.agent.diagnostics[0].code, "OPENROUTER_API_KEY_MISSING");
+    assert.equal(missingKey.json.agent.diagnostics[0].code, "AGENT_CREDENTIAL_MISSING");
     assert.doesNotMatch(missingKey.body, /fake|pretend/i);
   } finally {
     restoreEnvValues(previous);
@@ -564,6 +782,15 @@ test("Agent Gateway session event stream connects and replays run events", async
   } finally {
     await hub.close();
   }
+});
+
+test("Relaybase server close releases the Agent SQLite store", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-close-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir });
+  await hub.listen();
+  await hub.close();
+  await fs.rm(stateDir, { recursive: true, force: true });
+  await assert.rejects(fs.access(stateDir));
 });
 
 test("Agent Gateway approval endpoints validate missing IDs", async () => {

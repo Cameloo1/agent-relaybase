@@ -22,8 +22,37 @@ permissions:
   id-token: write
 
 jobs:
+  windows-native:
+    name: Build Windows credential modules
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build x64 and ARM64 DPAPI modules
+        run: npm run native:build:all
+
+      - name: Upload Windows credential modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: relaybase-windows-native-${{ github.run_id }}
+          path: dist-runtime/native/relaybase_windows-win32-*.node
+          if-no-files-found: error
+          retention-days: 1
+
   prepare:
     name: Build, sign, and package
+    needs: windows-native
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -54,6 +83,12 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Download Windows credential modules
+        uses: actions/download-artifact@v4
+        with:
+          name: relaybase-windows-native-${{ github.run_id }}
+          path: dist-runtime/native
 
       - name: Verify release tool versions
         run: |
@@ -102,6 +137,8 @@ jobs:
           path: |
             bin/relaybase-tui/relaybase-tui-windows-amd64.exe
             bin/relaybase-tui/relaybase-tui-windows-arm64.exe
+            dist-runtime/native/relaybase_windows-win32-x64.node
+            dist-runtime/native/relaybase_windows-win32-arm64.node
           if-no-files-found: error
           retention-days: 1
 
@@ -123,7 +160,7 @@ jobs:
 
       - name: Accept signed Windows binaries
         if: github.event_name == 'push' || inputs.publish == true
-        run: node scripts/accept-signed-windows.mjs --source dist/signpath-signed --destination bin/relaybase-tui
+        run: node scripts/accept-signed-windows.mjs --source dist/signpath-signed --destination bin/relaybase-tui --native-destination dist-runtime/native
 
       - name: Verify Windows Authenticode certificate tables
         if: github.event_name == 'push' || inputs.publish == true

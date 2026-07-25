@@ -2,7 +2,7 @@
 
 This document defines the daemon-owned tool surface for Relaybase's own in-TUI Operator Agent. Tools are not arbitrary shell commands. They are typed Relaybase daemon contracts with policy gates, redaction, recovery hints, and operation/export/setup identifiers where applicable.
 
-As of RA010, the Agent Gateway API contract exists, the OpenRouter/OpenAI Agents SDK TypeScript Chat Completions adapter path is proven by an isolated provider module and live smoke command, the daemon Operator Agent runtime has a real Relaybase tool registry, and the Go TUI can create sessions, submit queued runs, stream events, inspect/cancel/retry runs, render approval/setup previews, and approve or reject pending daemon approvals. Read-only tools can inspect daemon state, grouped app/component state, diagnostics, bounded redacted logs, and setup previews. Mutating tools require explicit approval and route through existing daemon lifecycle, export, setup, manifest, and registry primitives. The Go TUI remains a client and approval/display surface; it does not spawn processes, write manifests, or manage lifecycle directly.
+The implemented Agent Gateway has a daemon-owned tool registry, queued and persisted runs, SSE replay, cancellation/retry, approval continuation, and Go TUI rendering for tool activity, setup previews, and approvals. Read-only tools can inspect current context, capabilities, daemon/app/group/component state, operations, bounded redacted logs, explicitly granted projects, and setup previews. Mutating tools require explicit approval and route through existing daemon lifecycle, export, setup, manifest, and registry primitives. The Go TUI remains a client and approval/display surface; it does not spawn processes, write manifests, or manage lifecycle directly.
 
 Provider availability and model behavior are external and volatile. Automated tests cover the provider/session/event contract without making network calls; any live-provider evidence must be refreshed locally before making a release claim.
 
@@ -43,14 +43,19 @@ The current tests cover the contract, queued/idempotent/cancel/retry behavior, r
 
 ## Read-Only App Tools
 
-| Tool              | Purpose                                                     | Approval                                                     |
-| ----------------- | ----------------------------------------------------------- | ------------------------------------------------------------ |
-| `list_apps`       | Return app, group, component, readiness, and route summary. | No                                                           |
-| `get_app_state`   | Return one app's daemon state.                              | No                                                           |
-| `get_app_group`   | Return one group and its components.                        | No                                                           |
-| `get_diagnostics` | Return safe daemon/TUI diagnostics.                         | No, unless including opt-in diagnostics for a model prompt   |
-| `tail_logs`       | Return bounded redacted recent logs.                        | No tool approval; prompt inclusion policy may gate model use |
-| `search_logs`     | Search bounded redacted logs.                               | No tool approval; prompt inclusion policy may gate model use |
+| Tool                     | Purpose                                                                                         | Approval                                                     |
+| ------------------------ | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `list_apps`              | Return app, group, component, readiness, and route summaries.                                   | No                                                           |
+| `get_app_state`          | Return one app's authoritative daemon state.                                                    | No                                                           |
+| `get_app_group`          | Return one group and its components.                                                            | No                                                           |
+| `get_current_context`    | Return the selected app/group/pane, route, cwd, daemon state, and active Agent thread context.  | No                                                           |
+| `get_agent_capabilities` | Report registered, effective, disabled, and stale unknown tools plus policy limits.             | No                                                           |
+| `explain_app_problem`    | Combine app state, operation state, and bounded diagnostics into an evidence-based explanation. | No                                                           |
+| `get_diagnostics`        | Return safe daemon/TUI diagnostics.                                                             | No                                                           |
+| `get_operation_status`   | Inspect one daemon operation by ID.                                                             | No                                                           |
+| `list_operations`        | List bounded recent operations and terminal/pending state.                                      | No                                                           |
+| `tail_logs`              | Return bounded redacted recent logs.                                                            | No tool approval; prompt inclusion policy may gate model use |
+| `search_logs`            | Search bounded redacted logs.                                                                   | No tool approval; prompt inclusion policy may gate model use |
 
 The implemented tools return redacted log payloads. They do not request unbounded history and do not expose raw token/password/secret/key-like values.
 
@@ -58,13 +63,14 @@ The implemented tools return redacted log payloads. They do not request unbounde
 
 These read-only tools give the Operator Agent bounded `rg`/`cat`-style project inspection without exposing arbitrary shell execution. They are used when commands such as `/add <path>`, `/configure <path>`, `/register <project-path>`, or natural phrases like `find how this server starts` are missing setup details.
 
-| Tool                              | Purpose                                                               | Approval      |
-| --------------------------------- | --------------------------------------------------------------------- | ------------- |
-| `project_list_files`              | List bounded project files while skipping vendor/build/cache folders. | No, read-only |
-| `project_search_files`            | Search bounded text files with redacted match snippets.               | No, read-only |
-| `project_read_file`               | Read one bounded redacted text file inside the selected project root. | No, read-only |
-| `project_detect_start_commands`   | Return Relaybase setup detection command candidates for the project.  | No, read-only |
-| `project_inspect_package_scripts` | Read package scripts and candidate package-manager commands safely.   | No, read-only |
+| Tool                              | Purpose                                                                    | Approval      |
+| --------------------------------- | -------------------------------------------------------------------------- | ------------- |
+| `project_list_files`              | List bounded project files while skipping vendor/build/cache folders.      | No, read-only |
+| `project_search_files`            | Search bounded text files with redacted match snippets.                    | No, read-only |
+| `project_read_file`               | Read one bounded redacted text file inside the selected project root.      | No, read-only |
+| `project_detect_start_commands`   | Return Relaybase setup detection command candidates for the project.       | No, read-only |
+| `project_inspect_package_scripts` | Read package scripts and candidate package-manager commands safely.        | No, read-only |
+| `discover_project_roots`          | Discover bounded candidate project roots inside an already granted folder. | No, read-only |
 
 Project inspection tools require a canonical project-root grant. The daemon derives grants only from trusted TUI current-directory context or a bounded list of user-selected roots attached to a parsed `/add`, `/configure`, or folder `/register` request; model-generated arguments cannot grant a new root. Grants are canonicalized, unavailable/stale grants fail closed, and the TUI clears its transient selected-root list after the request.
 
@@ -87,25 +93,26 @@ These tools wrap existing setup primitives in `src/setupApi.ts`, `src/setupEngin
 
 Current runtime coverage includes daemon-side runtime adapter metadata for JavaScript/TypeScript, Python, Go, Java, Kotlin/JVM, C#/.NET, Ruby, PHP, Docker Compose, Rust, Elixir, Scala, Clojure, Dart, native/C/C++, and Procfile projects. The adapter matrix is documented in `docs/tui-setup-runtime-matrix.md` and tested with disposable non-live fixtures. Operator Agent tools must still return diagnostics or setup questions when entrypoints, services, modules, processes, or port behavior are ambiguous.
 
-As of RA012C, the Operator Agent prompt and tool descriptions consume that matrix directly. For folder/current-directory setup the model must call `detect_project` first, then `plan_app_setup`, then `preview_setup_writes`; it must not assume `npm run dev`. Runtime preferences, command hints, and port strategy hints are accepted as hints, while daemon detection remains the source of truth.
+For folder/current-directory setup the model must call `detect_project` before selecting setup. It must not assume `npm run dev`. Runtime preferences, command hints, and port-strategy hints remain hints while daemon detection is the source of truth.
 
-| Tool                     | Purpose                                                                                                                                                                                                                        | Approval                        |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------- |
-| `detect_project`         | Inspect a project root and return package manager, scripts, framework, runtime matrix, primary runtime, command candidates, port strategies, setup questions, Docker hints, existing manifest, and health candidates.          | No, read-only                   |
-| `plan_app_setup`         | Generate setup plan candidates such as managed dynamic port, framework wrapper, pinned port, Docker Compose, static preview, MCP-only, and runtime-aware command candidates. Accepts runtime/command/port hints as hints only. | No, read-only                   |
-| `preview_setup_writes`   | Return manifest, wrapper, setup-profile, Docker profile, env, selected runtime command, port strategy, and redacted write previews/diffs.                                                                                      | No, read-only                   |
-| `apply_setup_plan`       | Apply approved setup file writes and optional registration. Approval previews include runtime/language, selected command, selected port strategy, file writes, and env keys with values hidden.                                | Yes                             |
-| `register_manifest`      | Register or update a manifest through daemon/registry APIs.                                                                                                                                                                    | Yes                             |
-| `inspect_manifest`       | Read and normalize a manifest without changing it.                                                                                                                                                                             | No                              |
-| `validate_manifest`      | Return manifest validation result and diagnostics.                                                                                                                                                                             | No                              |
-| `patch_manifest_fields`  | Prepare or apply approved edits to safe manifest fields.                                                                                                                                                                       | Yes for apply                   |
-| `set_health_route`       | Prepare or apply approved `healthUrl` changes.                                                                                                                                                                                 | Yes for apply                   |
-| `set_pinned_port`        | Prepare or apply approved `upstreamPort` changes across runtime types.                                                                                                                                                         | Yes for apply                   |
-| `set_component_metadata` | Prepare or apply approved `relaybase` grouping metadata changes.                                                                                                                                                               | Yes for apply                   |
-| `add_env_override_safe`  | Prepare or apply approved runtime-agnostic env overrides without revealing secret values.                                                                                                                                      | Yes                             |
-| `open_project_or_app`    | Start through daemon and open a route or return the URL. Browser open requires a real implementation and approval/diagnostic.                                                                                                  | Yes for start/browser open      |
-| `prove_app_health`       | Run safe health proof using setup/manifest runtime metadata; lifecycle proof requires explicit approval.                                                                                                                       | Yes when lifecycle is attempted |
-| `repair_app_setup`       | Propose or apply approved repair flow for ignored PORT, bad health route, stale manifest, or pinned port.                                                                                                                      | Yes for writes or lifecycle     |
+| Tool                      | Purpose                                                                                                                                                                                                                        | Approval                        |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------- |
+| `detect_project`          | Inspect a project root and return package manager, scripts, framework, runtime matrix, primary runtime, command candidates, port strategies, setup questions, Docker hints, existing manifest, and health candidates.          | No, read-only                   |
+| `plan_app_setup`          | Generate setup plan candidates such as managed dynamic port, framework wrapper, pinned port, Docker Compose, static preview, MCP-only, and runtime-aware command candidates. Accepts runtime/command/port hints as hints only. | No, read-only                   |
+| `preview_setup_writes`    | Return manifest, wrapper, setup-profile, Docker profile, env, selected runtime command, port strategy, and redacted write previews/diffs.                                                                                      | No, read-only                   |
+| `apply_setup_plan`        | Apply approved setup file writes and optional registration. Approval previews include runtime/language, selected command, selected port strategy, file writes, and env keys with values hidden.                                | Yes                             |
+| `register_manifest`       | Register or update a manifest through daemon/registry APIs.                                                                                                                                                                    | Yes                             |
+| `inspect_manifest`        | Read and normalize a manifest without changing it.                                                                                                                                                                             | No                              |
+| `validate_manifest`       | Return manifest validation result and diagnostics.                                                                                                                                                                             | No                              |
+| `patch_manifest_fields`   | Prepare or apply approved edits to safe manifest fields.                                                                                                                                                                       | Yes for apply                   |
+| `set_health_route`        | Prepare or apply approved `healthUrl` changes.                                                                                                                                                                                 | Yes for apply                   |
+| `set_pinned_port`         | Prepare or apply approved `upstreamPort` changes across runtime types.                                                                                                                                                         | Yes for apply                   |
+| `set_component_metadata`  | Prepare or apply approved `relaybase` grouping metadata changes.                                                                                                                                                               | Yes for apply                   |
+| `add_env_override_safe`   | Prepare or apply approved runtime-agnostic env overrides without revealing secret values.                                                                                                                                      | Yes                             |
+| `open_project_or_app`     | Start through daemon and open a route or return the URL. Browser open requires a real implementation and approval/diagnostic.                                                                                                  | Yes for start/browser open      |
+| `setup_and_start_project` | Coordinate detection, preview-bound setup apply, registration, start, operation polling, and health proof through existing daemon primitives. Each mutating phase retains its own approval and revision binding.               | Yes for mutating phases         |
+| `prove_app_health`        | Run safe health proof using setup/manifest runtime metadata; lifecycle proof requires explicit approval.                                                                                                                       | Yes when lifecycle is attempted |
+| `repair_app_setup`        | Propose or apply approved repair flow for ignored PORT, bad health route, stale manifest, or pinned port.                                                                                                                      | Yes for writes or lifecycle     |
 
 Current `repair_app_setup` returns repair choices, runtime repair candidates, and previews only. Applying repair writes still goes through `apply_setup_plan` and requires approval.
 

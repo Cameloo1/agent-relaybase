@@ -11,6 +11,7 @@ import {
   resolveOpenRouterProviderOptions
 } from "./openrouterProvider.ts";
 import type { AgentRunEvent, AgentSession } from "./types.ts";
+import { waitForAgentRunTerminal } from "./liveRunPolling.ts";
 
 const ARTIFACT_DIR = path.join(process.cwd(), "artifacts", "agent-live-smoke");
 const REPORT_PATH = path.join(process.cwd(), "reports", "agent", "RA012D-openrouter-live-smoke.md");
@@ -363,11 +364,27 @@ async function sendAgentPrompt(
       context: input.context
     }
   );
+  const runId = response.agent.run.id;
+  if (!runId) {
+    throw new Error(`RA012D_${input.label.replace(/\W+/g, "_").toUpperCase()}_RUN_ID_MISSING`);
+  }
+  await waitForAgentRunTerminal(
+    async () => {
+      const result = await apiRequest<{ agent: { run: AgentSession["runs"][number] } }>(
+        baseUrl,
+        token,
+        "GET",
+        `/__hub/api/agent/sessions/${sessionId}/runs/${runId}`
+      );
+      return result.agent.run;
+    },
+    { label: input.label }
+  );
   const session = await getSession(baseUrl, token, sessionId);
   const events = session.runs.flatMap((run) => run.events).filter((event) => !beforeSequences.has(event.sequence));
   return {
     label: input.label,
-    runId: response.agent.run.id,
+    runId,
     events,
     session
   };

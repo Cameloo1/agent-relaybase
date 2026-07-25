@@ -2,7 +2,7 @@
 
 This document defines how Relaybase explains and plans runtime port strategies for the TUI setup workflow. Current implementation lives in `src/setup.ts`, `src/setupApi.ts`, `src/processManager.ts`, the Go TUI setup commands, and the daemon Operator Agent setup tools.
 
-Runtime breadth note: RA012B adds daemon-side runtime adapters for JavaScript/TypeScript, Python, Go, Java, Kotlin/JVM, C#/.NET, Ruby, PHP, Docker Compose, Rust, Elixir, Scala, Clojure, Dart, native/C/C++, and Procfile projects. The adapters expose runtime command candidates, port strategies, health candidates, setup questions, and repair candidates through setup API metadata. Existing Node/package-manager, Docker Compose, static preview, MCP-only, and manifest setup behavior remains the compatibility path for actual file writes.
+Daemon-side runtime adapters cover JavaScript/TypeScript, Python, Go, Java, Kotlin/JVM, C#/.NET, Ruby, PHP, Docker Compose, Rust, Elixir, Scala, Clojure, Dart, native/C/C++, and Procfile projects. The adapters expose runtime command candidates, port strategies, health candidates, setup questions, and repair candidates through setup API metadata. Existing Node/package-manager, Docker Compose, static preview, MCP-only, and manifest setup behavior remains the compatibility path for actual file writes.
 
 ## Core Explanation
 
@@ -188,7 +188,7 @@ Then it should offer daemon-produced repair choices rather than guessing.
 
 ## Runtime Matrix Port Strategies
 
-`docs/tui-setup-runtime-matrix.md` defines the RA012B strategy matrix for JavaScript/TypeScript, Python, Go, Java, Kotlin/JVM, .NET, Ruby, PHP, Docker Compose, Rust, Elixir, Scala, Clojure, Dart, generic native/C/C++, and Procfile projects.
+`docs/tui-setup-runtime-matrix.md` defines the implemented strategy matrix for JavaScript/TypeScript, Python, Go, Java, Kotlin/JVM, .NET, Ruby, PHP, Docker Compose, Rust, Elixir, Scala, Clojure, Dart, generic native/C/C++, and Procfile projects.
 
 The daemon maps those strategies into runtime-aware setup metadata while preserving the existing setup primitives:
 

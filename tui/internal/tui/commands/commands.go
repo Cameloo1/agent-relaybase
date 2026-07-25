@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"sync/atomic"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -12,12 +13,16 @@ import (
 )
 
 type StateLoadedMsg struct {
-	State *relaybaseclient.RelaybaseState
+	State      *relaybaseclient.RelaybaseState
+	Generation uint64
 }
 
 type StateFailedMsg struct {
-	Err error
+	Err        error
+	Generation uint64
 }
+
+var stateFetchGeneration atomic.Uint64
 
 type LogsLoadedMsg struct {
 	Target   panes.LogTarget
@@ -40,6 +45,10 @@ type DaemonBootstrapStatusMsg struct {
 }
 
 type DaemonBootstrapEnsureMsg struct {
+	Result *bootstrap.DaemonResult
+}
+
+type DaemonBootstrapRestartMsg struct {
 	Result *bootstrap.DaemonResult
 }
 
@@ -207,6 +216,77 @@ type AgentConfigFailedMsg struct {
 	Err error
 }
 
+type AgentConfigUpdatedMsg struct {
+	Config *relaybaseclient.AgentConfig
+}
+
+type AgentConfigUpdateFailedMsg struct {
+	Err error
+}
+
+type AgentConfigReloadedMsg struct {
+	Result *relaybaseclient.AgentConfigReloadResult
+}
+
+type AgentConfigReloadFailedMsg struct {
+	Err error
+}
+
+type AgentProviderStatusLoadedMsg struct {
+	Status *relaybaseclient.AgentProviderStatus
+}
+
+type AgentProviderStatusFailedMsg struct {
+	Err error
+}
+
+type AgentProviderConnectionStartedMsg struct {
+	Attempt *relaybaseclient.AgentProviderAttempt
+}
+
+type AgentProviderActionCompletedMsg struct {
+	Action string
+	Config *relaybaseclient.AgentConfig
+}
+
+type AgentProviderActionFailedMsg struct {
+	Action string
+	Err    error
+}
+
+type AgentProviderRevokePreviewLoadedMsg struct {
+	Preview *relaybaseclient.AgentProviderRevokePreview
+}
+
+type AgentLegacyCredentialRemovalPreviewLoadedMsg struct {
+	Preview *relaybaseclient.AgentLegacyCredentialRemovalPreview
+}
+
+type AgentLegacyCredentialRemovalCompletedMsg struct {
+	Result *relaybaseclient.AgentLegacyCredentialRemovalResult
+}
+
+type AgentSecurityStatusLoadedMsg struct {
+	Status *relaybaseclient.AgentSecurityStatus
+}
+
+type AgentSecurityRepairPreviewLoadedMsg struct {
+	Preview *relaybaseclient.AgentSecurityRepairPreview
+}
+
+type AgentSecurityRepairOperationLoadedMsg struct {
+	Operation *relaybaseclient.AgentSecurityRepairOperation
+}
+
+type AgentSecurityLatestOperationLoadedMsg struct {
+	Operation *relaybaseclient.AgentSecurityRepairOperation
+}
+
+type AgentSecurityActionFailedMsg struct {
+	Action string
+	Err    error
+}
+
 type AgentDiagnosticsLoadedMsg struct {
 	Diagnostics []relaybaseclient.AgentDiagnostic
 }
@@ -339,12 +419,13 @@ type AgentApprovalResolveFailedMsg struct {
 }
 
 func FetchStateCmd(ctx context.Context, client *relaybaseclient.Client) tea.Cmd {
+	generation := stateFetchGeneration.Add(1)
 	return func() tea.Msg {
 		state, err := client.GetState(ctx)
 		if err != nil {
-			return StateFailedMsg{Err: err}
+			return StateFailedMsg{Err: err, Generation: generation}
 		}
-		return StateLoadedMsg{State: state}
+		return StateLoadedMsg{State: state, Generation: generation}
 	}
 }
 
@@ -355,6 +436,156 @@ func FetchAgentConfigCmd(ctx context.Context, client *relaybaseclient.Client) te
 			return AgentConfigFailedMsg{Err: err}
 		}
 		return AgentConfigLoadedMsg{Config: config}
+	}
+}
+
+func UpdateAgentConfigCmd(ctx context.Context, client *relaybaseclient.Client, request relaybaseclient.AgentConfigUpdateRequest) tea.Cmd {
+	return func() tea.Msg {
+		config, err := client.UpdateAgentConfig(ctx, request)
+		if err != nil {
+			return AgentConfigUpdateFailedMsg{Err: err}
+		}
+		return AgentConfigUpdatedMsg{Config: config}
+	}
+}
+
+func ReloadAgentConfigCmd(ctx context.Context, client *relaybaseclient.Client) tea.Cmd {
+	return func() tea.Msg {
+		result, err := client.ReloadAgentConfig(ctx)
+		if err != nil {
+			return AgentConfigReloadFailedMsg{Err: err}
+		}
+		return AgentConfigReloadedMsg{Result: result}
+	}
+}
+
+func FetchAgentProviderStatusCmd(ctx context.Context, client *relaybaseclient.Client) tea.Cmd {
+	return func() tea.Msg {
+		status, err := client.GetAgentProviderStatus(ctx)
+		if err != nil {
+			return AgentProviderStatusFailedMsg{Err: err}
+		}
+		return AgentProviderStatusLoadedMsg{Status: status}
+	}
+}
+
+func StartAgentProviderConnectionCmd(ctx context.Context, client *relaybaseclient.Client, mode string) tea.Cmd {
+	return func() tea.Msg {
+		attempt, err := client.StartAgentProviderConnection(ctx, mode)
+		if err != nil {
+			return AgentProviderActionFailedMsg{Action: mode, Err: err}
+		}
+		return AgentProviderConnectionStartedMsg{Attempt: attempt}
+	}
+}
+
+func DisconnectAgentProviderCmd(ctx context.Context, client *relaybaseclient.Client) tea.Cmd {
+	return func() tea.Msg {
+		result, err := client.DisconnectAgentProvider(ctx)
+		if err != nil {
+			return AgentProviderActionFailedMsg{Action: "disconnect", Err: err}
+		}
+		return AgentProviderActionCompletedMsg{Action: "disconnect", Config: &result.Config}
+	}
+}
+
+func MigrateAgentProviderCmd(ctx context.Context, client *relaybaseclient.Client) tea.Cmd {
+	return func() tea.Msg {
+		result, err := client.MigrateAgentProvider(ctx)
+		if err != nil {
+			return AgentProviderActionFailedMsg{Action: "migrate", Err: err}
+		}
+		return AgentProviderActionCompletedMsg{Action: "migrate", Config: &result.Config}
+	}
+}
+
+func ValidateAgentProviderCmd(ctx context.Context, client *relaybaseclient.Client) tea.Cmd {
+	return func() tea.Msg {
+		result, err := client.ValidateAgentProvider(ctx)
+		if err != nil {
+			return AgentProviderActionFailedMsg{Action: "validation", Err: err}
+		}
+		return AgentProviderActionCompletedMsg{Action: "validate", Config: &result.Config}
+	}
+}
+
+func PreviewAgentProviderRevokeCmd(ctx context.Context, client *relaybaseclient.Client) tea.Cmd {
+	return func() tea.Msg {
+		preview, err := client.PreviewAgentProviderRevoke(ctx)
+		if err != nil {
+			return AgentProviderActionFailedMsg{Action: "revoke", Err: err}
+		}
+		return AgentProviderRevokePreviewLoadedMsg{Preview: preview}
+	}
+}
+
+func PreviewLegacyAgentCredentialRemovalCmd(ctx context.Context, client *relaybaseclient.Client) tea.Cmd {
+	return func() tea.Msg {
+		preview, err := client.PreviewLegacyAgentCredentialRemoval(ctx)
+		if err != nil {
+			return AgentProviderActionFailedMsg{Action: "legacy cleanup preview", Err: err}
+		}
+		return AgentLegacyCredentialRemovalPreviewLoadedMsg{Preview: preview}
+	}
+}
+
+func ApplyLegacyAgentCredentialRemovalCmd(ctx context.Context, client *relaybaseclient.Client, previewID string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := client.ApplyLegacyAgentCredentialRemoval(ctx, previewID)
+		if err != nil {
+			return AgentProviderActionFailedMsg{Action: "legacy cleanup", Err: err}
+		}
+		return AgentLegacyCredentialRemovalCompletedMsg{Result: result}
+	}
+}
+
+func DiagnoseAgentSecurityCmd(ctx context.Context, client *relaybaseclient.Client, online bool) tea.Cmd {
+	return func() tea.Msg {
+		status, err := client.DiagnoseAgentSecurity(ctx, online)
+		if err != nil {
+			return AgentSecurityActionFailedMsg{Action: "security check", Err: err}
+		}
+		return AgentSecurityStatusLoadedMsg{Status: status}
+	}
+}
+
+func PreviewAgentSecurityRepairCmd(
+	ctx context.Context,
+	client *relaybaseclient.Client,
+	request relaybaseclient.AgentSecurityRepairPreviewRequest,
+) tea.Cmd {
+	return func() tea.Msg {
+		preview, err := client.PreviewAgentSecurityRepair(ctx, request)
+		if err != nil {
+			return AgentSecurityActionFailedMsg{Action: "repair preview", Err: err}
+		}
+		return AgentSecurityRepairPreviewLoadedMsg{Preview: preview}
+	}
+}
+
+func ApplyAgentSecurityRepairCmd(
+	ctx context.Context,
+	client *relaybaseclient.Client,
+	previewID string,
+	idempotencyKey string,
+	confirmation string,
+) tea.Cmd {
+	return func() tea.Msg {
+		operation, err := client.ApplyAgentSecurityRepair(ctx, previewID, idempotencyKey, confirmation)
+		if err != nil {
+			return AgentSecurityActionFailedMsg{Action: "repair apply", Err: err}
+		}
+		return AgentSecurityRepairOperationLoadedMsg{Operation: operation}
+	}
+}
+
+func FetchLatestAgentSecurityRepairOperationCmd(ctx context.Context, client *relaybaseclient.Client) tea.Cmd {
+	return func() tea.Msg {
+		operation, err := client.GetLatestAgentSecurityRepairOperation(ctx)
+		if err != nil {
+			return AgentSecurityActionFailedMsg{Action: "repair receipt recovery", Err: err}
+		}
+		return AgentSecurityLatestOperationLoadedMsg{Operation: operation}
 	}
 }
 
@@ -562,6 +793,16 @@ func DaemonBootstrapEnsureCmd(ctx context.Context, client *bootstrap.Client) tea
 			return DaemonBootstrapFailedMsg{Action: "daemon repair", Err: err}
 		}
 		return DaemonBootstrapEnsureMsg{Result: result}
+	}
+}
+
+func DaemonBootstrapRestartCmd(ctx context.Context, client *bootstrap.Client) tea.Cmd {
+	return func() tea.Msg {
+		result, err := client.Restart(ctx)
+		if err != nil {
+			return DaemonBootstrapFailedMsg{Action: "daemon restart", Err: err}
+		}
+		return DaemonBootstrapRestartMsg{Result: result}
 	}
 }
 

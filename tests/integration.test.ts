@@ -339,7 +339,7 @@ test("proxy tears down partial HTTP responses on upstream stream failure", async
 test("manages process lifecycle and injects hub env", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-process-"));
   const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18100, portRangeEnd: 18120 });
-  const logEvents: Array<{ line: string; stream: string }> = [];
+  const logEvents: Array<{ line: string; stream: string; source: string; level: string }> = [];
   let unsubscribeLogs = () => {};
   let startedManaged = false;
 
@@ -362,7 +362,19 @@ test("manages process lifecycle and injects hub env", async () => {
     assert.equal(runtime.health, "healthy");
     assert.ok(runtime.assignedPort);
     const managedPort = runtime.assignedPort;
-    assert.ok(logEvents.some((event) => event.stream === "stdout" && event.line.includes("fake app listening")));
+    assert.ok(
+      logEvents.some(
+        (event) =>
+          event.stream === "system" &&
+          event.source === "lifecycle_starting" &&
+          event.line.startsWith("[relaybase] starting managed")
+      )
+    );
+    assert.ok(
+      logEvents.some(
+        (event) => event.stream === "stdout" && event.source === "process" && event.line.includes("fake app listening")
+      )
+    );
 
     const response = await httpRequest(hub.address().port, "/env", {
       "x-relaybase-app": "managed",
@@ -426,6 +438,10 @@ test("manages process lifecycle and injects hub env", async () => {
     assert.equal(stopped.status, "stopped");
     assert.equal(stopped.stopVerification?.ok, true);
     assert.equal(await canConnect(managedPort), false);
+    assert.ok(
+      logEvents.some((event) => event.source === "lifecycle_stopping" && event.line === "[relaybase] stopping")
+    );
+    assert.ok(logEvents.some((event) => event.source === "lifecycle_stopped" && event.line === "[relaybase] stopped"));
   } finally {
     if (startedManaged) {
       await hub.runtime.processes.stop("managed").catch(() => undefined);
@@ -877,6 +893,7 @@ test("does not report stopped when stopCommand fails, times out, or verifyStoppe
     const marker = path.join(stateDir, "hook-marker.txt");
     const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18180, portRangeEnd: 18199 });
     let started = false;
+    let childPid: number | undefined;
 
     try {
       await hub.listen();
@@ -900,6 +917,7 @@ test("does not report stopped when stopCommand fails, times out, or verifyStoppe
       assert.equal(runtime.status, "running");
       started = true;
       const stopped = await hub.runtime.processes.stop(scenario.id);
+      childPid = stopped.pid;
       assert.equal(stopped.status, "errored");
       assert.equal(stopped.phase, scenario.expectedPhase);
       assert.equal(stopped.cleanupStatus, scenario.expectedCleanup);
@@ -907,9 +925,18 @@ test("does not report stopped when stopCommand fails, times out, or verifyStoppe
       assert.equal(stopped.lastStopAttempt?.status, "failed");
     } finally {
       if (started) {
-        await hub.close();
+        await hub.close().catch((error) => {
+          assert.match(String(error), new RegExp(`safely stop.*${scenario.id}`));
+        });
       } else {
         await hub.close();
+      }
+      if (childPid) {
+        try {
+          process.kill(childPid);
+        } catch {
+          // The child may exit while the shutdown failure is being reported.
+        }
       }
     }
   }
@@ -1246,7 +1273,7 @@ test("HTTP lifecycle operations expose async polling and keep synchronous compat
     assert.equal(typeof startBody.operationId, "string");
     assert.ok(["queued", "running"].includes(startBody.operation.status));
 
-    const startedOperation = await waitForOperation(hub.address().port, startBody.operationId);
+    const startedOperation = await waitForOperation(hub.address().port, hub.runtime.token, startBody.operationId);
     assert.equal(startedOperation.status, "succeeded");
     assert.equal(startedOperation.result.runtime.status, "running");
     assert.equal(startedOperation.result.state.routeReachable, true);
@@ -1261,7 +1288,11 @@ test("HTTP lifecycle operations expose async polling and keep synchronous compat
       }
     );
     assert.equal(stopResponse.statusCode, 202);
-    const stoppedOperation = await waitForOperation(hub.address().port, JSON.parse(stopResponse.body).operationId);
+    const stoppedOperation = await waitForOperation(
+      hub.address().port,
+      hub.runtime.token,
+      JSON.parse(stopResponse.body).operationId
+    );
     assert.equal(stoppedOperation.status, "succeeded");
     assert.equal(stoppedOperation.result.runtime.status, "stopped");
 
@@ -1456,7 +1487,11 @@ test("HTTP restart operation reports daemon stop-start phase and final running s
       }
     );
     assert.equal(response.statusCode, 202);
-    const operation = await waitForOperation(hub.address().port, JSON.parse(response.body).operationId);
+    const operation = await waitForOperation(
+      hub.address().port,
+      hub.runtime.token,
+      JSON.parse(response.body).operationId
+    );
     assert.equal(operation.status, "succeeded");
     assert.equal(operation.result.runtime.status, "running");
     assert.ok(operation.messages.some((message: string) => message.includes("stop phase followed by a start phase")));
@@ -1472,8 +1507,14 @@ test("HTTP operation polling returns normalized not-found errors", async () => {
 
   try {
     await hub.listen();
-    const response = await apiRequest(hub.address().port, "GET", "/__hub/api/operations/op_missing", undefined, {
+    const unauthorized = await apiRequest(hub.address().port, "GET", "/__hub/api/operations/op_missing", undefined, {
       "x-relaybase-correlation-id": "missing-operation"
+    });
+    assert.equal(unauthorized.statusCode, 401);
+    assert.equal(JSON.parse(unauthorized.body).code, "UNAUTHORIZED_OPERATION_READ");
+    const response = await apiRequest(hub.address().port, "GET", "/__hub/api/operations/op_missing", undefined, {
+      "x-relaybase-correlation-id": "missing-operation",
+      "x-relaybase-token": hub.runtime.token
     });
     assert.equal(response.statusCode, 404);
     const body = JSON.parse(response.body);
@@ -1503,7 +1544,11 @@ test("HTTP lifecycle operations capture failures and timeouts as Relaybase error
       }
     );
     assert.equal(unknownResponse.statusCode, 202);
-    const failedOperation = await waitForOperation(hub.address().port, JSON.parse(unknownResponse.body).operationId);
+    const failedOperation = await waitForOperation(
+      hub.address().port,
+      hub.runtime.token,
+      JSON.parse(unknownResponse.body).operationId
+    );
     assert.equal(failedOperation.status, "failed");
     assert.equal(failedOperation.error.code, "LIFECYCLE_OPERATION_FAILED");
     assert.equal(failedOperation.error.correlationId, "missing-start");
@@ -1531,7 +1576,11 @@ test("HTTP lifecycle operations capture failures and timeouts as Relaybase error
       }
     );
     assert.equal(timeoutResponse.statusCode, 202);
-    const timedOutOperation = await waitForOperation(hub.address().port, JSON.parse(timeoutResponse.body).operationId);
+    const timedOutOperation = await waitForOperation(
+      hub.address().port,
+      hub.runtime.token,
+      JSON.parse(timeoutResponse.body).operationId
+    );
     assert.equal(timedOutOperation.status, "timed_out");
     assert.equal(timedOutOperation.error.code, "LIFECYCLE_TIMED_OUT");
     assert.equal(timedOutOperation.error.correlationId, "timeout-start");
@@ -1601,7 +1650,7 @@ test("HTTP lifecycle operations deduplicate duplicate requests and reject confli
     assert.equal(conflictBody.code, "OPERATION_CONFLICT");
     assert.equal(conflictBody.relaybaseError.detail.activeOperation.operationId, firstBody.operationId);
 
-    const operation = await waitForOperation(hub.address().port, firstBody.operationId);
+    const operation = await waitForOperation(hub.address().port, hub.runtime.token, firstBody.operationId);
     assert.equal(operation.status, "succeeded");
   } finally {
     await hub.runtime.processes.stop("concurrent").catch(() => undefined);
@@ -1898,12 +1947,18 @@ async function createHttpUpstream(
   };
 }
 
-async function waitForOperation(port: number, operationId: string, timeoutMs = 12_000): Promise<any> {
+async function waitForOperation(port: number, token: string, operationId: string, timeoutMs = 12_000): Promise<any> {
   const deadline = Date.now() + timeoutMs;
   let lastOperation: any;
 
   while (Date.now() < deadline) {
-    const response = await apiRequest(port, "GET", `/__hub/api/operations/${encodeURIComponent(operationId)}`);
+    const response = await apiRequest(
+      port,
+      "GET",
+      `/__hub/api/operations/${encodeURIComponent(operationId)}`,
+      undefined,
+      { "x-relaybase-token": token }
+    );
     assert.equal(response.statusCode, 200);
     lastOperation = JSON.parse(response.body).operation;
     if (["succeeded", "failed", "timed_out", "cancelled"].includes(lastOperation.status)) {

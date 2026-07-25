@@ -490,6 +490,19 @@ test("CLI rejects unknown options and serves command scoped help", async () => {
   assert.equal(prefixRepairHelp.code, 0);
   assert.match(prefixRepairHelp.stdout, /relaybase repair-prefix \[--plan\|--diagnose\]/);
   assert.match(prefixRepairHelp.stdout, /Ordinary start and check commands never perform this repair/);
+
+  const daemonHelp = await runRelaybaseCli(["daemon", "--help"]);
+  assert.equal(daemonHelp.code, 0);
+  assert.match(daemonHelp.stdout, /relaybase daemon restart \[--json\]/);
+  assert.match(daemonHelp.stdout, /Active Agent, lifecycle, or package work blocks restart/);
+
+  const misorderedDaemonRestart = await runRelaybaseCli(["daemon", "--json", "restart"]);
+  assert.notEqual(misorderedDaemonRestart.code, 0);
+  assert.match(JSON.parse(misorderedDaemonRestart.stdout).error, /Usage: relaybase daemon restart/);
+
+  const extraDaemonRestartArgument = await runRelaybaseCli(["daemon", "restart", "unexpected"]);
+  assert.notEqual(extraDaemonRestartArgument.code, 0);
+  assert.match(extraDaemonRestartArgument.stderr, /Unsupported daemon restart argument: unexpected/);
 });
 
 test("CLI diagnose-token proves state identity without exposing token contents", async () => {

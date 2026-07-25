@@ -81,19 +81,44 @@ func ClassifyLogTone(event relaybaseclient.LogEvent) LogTone {
 		return LogToneMuted
 	}
 
-	// These values are the daemon's durable LifecycleHookName vocabulary.
+	// These values are the daemon's durable lifecycle and hook vocabulary.
 	// Apply lifecycle tone only after explicit severity so stderr/error output
 	// from a start or stop command remains visibly diagnostic.
 	switch source {
-	case "prestart", "start", "lifecycle_start_command", "start_command":
+	case "prestart", "lifecycle_starting", "lifecycle_start_command", "start_command":
 		return LogToneStart
-	case "stop", "verifystopped", "lifecycle_stop_command", "stop_command":
+	case "stop", "verifystopped", "lifecycle_stopping", "lifecycle_stopped", "lifecycle_stop_command", "stop_command":
 		return LogToneStop
+	case "lifecycle_stop_failed":
+		return LogToneError
+	}
+	if tone, ok := classifyTrustedLegacyLifecycleTone(event, source, level); ok {
+		return tone
 	}
 	if strings.EqualFold(strings.TrimSpace(event.Stream), "stderr") {
 		return LogToneWarning
 	}
 	return LogToneNeutral
+}
+
+func classifyTrustedLegacyLifecycleTone(event relaybaseclient.LogEvent, source string, level string) (LogTone, bool) {
+	if source != "system" || !strings.EqualFold(strings.TrimSpace(event.Stream), "system") || (level != "" && level != "info") {
+		return LogToneNeutral, false
+	}
+	message := strings.TrimSpace(event.Message)
+	if message == "" {
+		message = strings.TrimSpace(event.Line)
+	}
+	if strings.HasPrefix(message, "[relaybase] starting ") {
+		return LogToneStart, true
+	}
+	if message == "[relaybase] stopping" || message == "[relaybase] stopped" {
+		return LogToneStop, true
+	}
+	if strings.HasPrefix(message, "[relaybase] stop failed: ") {
+		return LogToneError, true
+	}
+	return LogToneNeutral, false
 }
 
 func SanitizeLogDisplayLine(event relaybaseclient.LogEvent) string {

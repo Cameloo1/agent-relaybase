@@ -11,6 +11,7 @@ MVP.md
 coverage/
 dist/
 dist-runtime/
+native/**/build/
 node_modules/
 npm-debug.log*
 *.tgz

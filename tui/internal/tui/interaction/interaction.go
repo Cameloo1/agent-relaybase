@@ -21,6 +21,7 @@ const (
 	TransientResponseDetails TransientKind = "response_details"
 	TransientCodePicker      TransientKind = "code_picker"
 	TransientDiagnostics     TransientKind = "diagnostics"
+	TransientSettings        TransientKind = "settings"
 	ModalNone                ModalKind     = ""
 	ModalAgentApproval       ModalKind     = "agent_approval"
 	ModalConfirmation        ModalKind     = "confirmation"

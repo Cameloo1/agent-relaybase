@@ -825,16 +825,54 @@ type RepairSetupResult struct {
 type AgentProviderConfig struct {
 	Provider           string            `json:"provider"`
 	ModelSlug          string            `json:"modelSlug,omitempty"`
+	ModelSource        AgentModelSource  `json:"modelSource"`
+	RestartRequired    bool              `json:"restartRequired,omitempty"`
 	APIKeySource       AgentAPIKeySource `json:"apiKeySource"`
 	HTTPRefererEnvVar  string            `json:"httpRefererEnvVar,omitempty"`
 	TitleEnvVar        string            `json:"titleEnvVar,omitempty"`
 	RemoteModelEnabled bool              `json:"remoteModelEnabled"`
 }
 
+type AgentModelSource struct {
+	Kind  string `json:"kind"`
+	Label string `json:"label"`
+}
+
 type AgentAPIKeySource struct {
-	Type       string `json:"type"`
-	EnvVar     string `json:"envVar"`
-	Configured bool   `json:"configured"`
+	Type         string `json:"type"`
+	EnvVar       string `json:"envVar,omitempty"`
+	CredentialID string `json:"credentialId,omitempty"`
+	Configured   bool   `json:"configured"`
+}
+
+type AgentConfigRevision struct {
+	ID         string `json:"id"`
+	Generation int    `json:"generation"`
+	LoadedAt   string `json:"loadedAt"`
+}
+
+type AgentConfigSourceState struct {
+	Mode          string           `json:"mode"`
+	Health        string           `json:"health"`
+	Label         string           `json:"label"`
+	LastCheckedAt string           `json:"lastCheckedAt,omitempty"`
+	LastAppliedAt string           `json:"lastAppliedAt,omitempty"`
+	LastError     *AgentDiagnostic `json:"lastError,omitempty"`
+}
+
+type AgentCredentialState struct {
+	Provider          string   `json:"provider"`
+	Connection        string   `json:"connection"`
+	Source            string   `json:"source"`
+	Protection        string   `json:"protection"`
+	CredentialID      string   `json:"credentialId,omitempty"`
+	LastValidatedAt   string   `json:"lastValidatedAt,omitempty"`
+	KeyLabel          string   `json:"keyLabel,omitempty"`
+	LimitUSD          *float64 `json:"limitUsd,omitempty"`
+	LimitRemainingUSD *float64 `json:"limitRemainingUsd,omitempty"`
+	LimitReset        string   `json:"limitReset,omitempty"`
+	ExpiresAt         *string  `json:"expiresAt,omitempty"`
+	HighSecurityMode  string   `json:"highSecurityMode"`
 }
 
 type AgentBudgets struct {
@@ -843,34 +881,218 @@ type AgentBudgets struct {
 	SessionLimitUSD float64 `json:"sessionLimitUsd,omitempty"`
 }
 
+type AgentExecutionPolicy struct {
+	SegmentMaxTurns       int    `json:"segmentMaxTurns"`
+	TotalMaxTurns         int    `json:"totalMaxTurns"`
+	InactivityTimeoutMS   int    `json:"inactivityTimeoutMs"`
+	HardRunTimeoutMS      int    `json:"hardRunTimeoutMs"`
+	MaxOutputTokens       int    `json:"maxOutputTokens"`
+	ReasoningEffort       string `json:"reasoningEffort"`
+	NoProgressRepeatLimit int    `json:"noProgressRepeatLimit"`
+}
+
 type AgentConfig struct {
-	Enabled              bool                `json:"enabled"`
-	Provider             AgentProviderConfig `json:"provider"`
-	ToolAllowlist        []string            `json:"toolAllowlist,omitempty"`
-	ApprovalPolicy       string              `json:"approvalPolicy,omitempty"`
-	SetupFileWritePolicy string              `json:"setupFileWritePolicy,omitempty"`
-	AllowBrowserOpen     bool                `json:"allowBrowserOpen,omitempty"`
-	AllowCopyRoute       bool                `json:"allowCopyRoute,omitempty"`
-	Budgets              *AgentBudgets       `json:"budgets,omitempty"`
-	UpdatedAt            string              `json:"updatedAt,omitempty"`
+	Enabled                    bool                    `json:"enabled"`
+	Provider                   AgentProviderConfig     `json:"provider"`
+	Execution                  AgentExecutionPolicy    `json:"execution"`
+	ToolAllowlist              []string                `json:"toolAllowlist,omitempty"`
+	ToolAllowlistMode          string                  `json:"toolAllowlistMode,omitempty"`
+	ApprovalPolicy             string                  `json:"approvalPolicy,omitempty"`
+	SetupFileWritePolicy       string                  `json:"setupFileWritePolicy,omitempty"`
+	AllowBrowserOpen           bool                    `json:"allowBrowserOpen,omitempty"`
+	AllowCopyRoute             bool                    `json:"allowCopyRoute,omitempty"`
+	Budgets                    *AgentBudgets           `json:"budgets,omitempty"`
+	UpdatedAt                  string                  `json:"updatedAt,omitempty"`
+	Revision                   *AgentConfigRevision    `json:"revision,omitempty"`
+	Source                     *AgentConfigSourceState `json:"source,omitempty"`
+	Readiness                  string                  `json:"readiness,omitempty"`
+	Credential                 *AgentCredentialState   `json:"credential,omitempty"`
+	ActiveRunUsesOlderRevision bool                    `json:"activeRunUsesOlderRevision,omitempty"`
+}
+
+type AgentConfigUpdateRequest struct {
+	ExpectedRevisionID string            `json:"expectedRevisionId,omitempty"`
+	Update             AgentConfigUpdate `json:"update"`
+}
+
+type AgentConfigReloadResult struct {
+	Status        string           `json:"status"`
+	OldRevisionID string           `json:"oldRevisionId"`
+	NewRevisionID string           `json:"newRevisionId"`
+	ChangedFields []string         `json:"changedFields,omitempty"`
+	Diagnostic    *AgentDiagnostic `json:"diagnostic,omitempty"`
+}
+
+type AgentProviderAttempt struct {
+	AttemptID        string           `json:"attemptId"`
+	Mode             string           `json:"mode"`
+	Status           string           `json:"status"`
+	AuthorizationURL string           `json:"authorizationUrl,omitempty"`
+	BrowserOpen      string           `json:"browserOpen,omitempty"`
+	ExpiresAt        string           `json:"expiresAt,omitempty"`
+	CompletedAt      string           `json:"completedAt,omitempty"`
+	Diagnostic       *AgentDiagnostic `json:"diagnostic,omitempty"`
+}
+
+type AgentProviderStatus struct {
+	Config  AgentConfig           `json:"config"`
+	Attempt *AgentProviderAttempt `json:"attempt,omitempty"`
+}
+
+type AgentProviderDisconnectResult struct {
+	Disconnected                bool        `json:"disconnected"`
+	RemoteCredentialStillActive bool        `json:"remoteCredentialStillActive"`
+	Config                      AgentConfig `json:"config"`
+}
+
+type AgentProviderMigrationResult struct {
+	Migrated bool        `json:"migrated"`
+	Config   AgentConfig `json:"config"`
+}
+
+type AgentProviderValidationResult struct {
+	Validated bool        `json:"validated"`
+	Config    AgentConfig `json:"config"`
+}
+
+type AgentProviderRevokePreview struct {
+	Action                   string `json:"action"`
+	Supported                bool   `json:"supported"`
+	RequiresExternalAction   bool   `json:"requiresExternalAction"`
+	ManagementURL            string `json:"managementUrl"`
+	LocalCredentialPreserved bool   `json:"localCredentialPreserved"`
+}
+
+type AgentLegacyCredentialRemovalPreview struct {
+	PreviewID        string `json:"previewId"`
+	SourceLabel      string `json:"sourceLabel"`
+	KeyName          string `json:"keyName"`
+	LineNumber       int    `json:"lineNumber"`
+	ChangedLineCount int    `json:"changedLineCount"`
+	ExpiresAt        string `json:"expiresAt"`
+	Warning          string `json:"warning"`
+}
+
+type AgentLegacyCredentialRemovalResult struct {
+	Removed          bool                    `json:"removed"`
+	SourceLabel      string                  `json:"sourceLabel"`
+	ChangedLineCount int                     `json:"changedLineCount"`
+	Reload           AgentConfigReloadResult `json:"reload"`
+	Config           AgentConfig             `json:"config"`
+}
+
+type AgentSecurityFinding struct {
+	ID                  string         `json:"id"`
+	Code                string         `json:"code"`
+	Severity            string         `json:"severity"`
+	State               string         `json:"state"`
+	Title               string         `json:"title"`
+	Message             string         `json:"message"`
+	CheckedAt           string         `json:"checkedAt"`
+	Evidence            map[string]any `json:"evidence,omitempty"`
+	Repairability       string         `json:"repairability"`
+	RecommendedActionID string         `json:"recommendedActionId,omitempty"`
+	AlternateActionIDs  []string       `json:"alternateActionIds,omitempty"`
+	RequiresNetwork     bool           `json:"requiresNetwork"`
+	RequiresRestart     bool           `json:"requiresRestart"`
+	Reversible          bool           `json:"reversible"`
+	UserAction          string         `json:"userAction,omitempty"`
+}
+
+type AgentSecurityStatus struct {
+	Scope             string                     `json:"scope"`
+	State             string                     `json:"state"`
+	Healthy           bool                       `json:"healthy"`
+	CheckedAt         string                     `json:"checkedAt"`
+	Online            bool                       `json:"online"`
+	ConfigRevisionID  string                     `json:"configRevisionId"`
+	Findings          []AgentSecurityFinding     `json:"findings"`
+	LastSecurityEvent *AgentSecurityEventSummary `json:"lastSecurityEvent,omitempty"`
+}
+
+type AgentSecurityEventSummary struct {
+	At   string `json:"at"`
+	Type string `json:"type"`
+}
+
+type AgentSecurityRepairAction struct {
+	ID              string   `json:"id"`
+	Title           string   `json:"title"`
+	RiskClass       string   `json:"riskClass"`
+	Changes         []string `json:"changes"`
+	Preserves       []string `json:"preserves"`
+	RequiresNetwork bool     `json:"requiresNetwork"`
+	RequiresRestart bool     `json:"requiresRestart"`
+	Reversible      bool     `json:"reversible"`
+}
+
+type AgentSecurityRepairConfirmation struct {
+	Required bool   `json:"required"`
+	Value    string `json:"value"`
+	Phrase   string `json:"phrase,omitempty"`
+	Warning  string `json:"warning,omitempty"`
+}
+
+type AgentSecurityRepairPreview struct {
+	PreviewID              string                          `json:"previewId"`
+	Scope                  string                          `json:"scope"`
+	CreatedAt              string                          `json:"createdAt"`
+	ExpiresAt              string                          `json:"expiresAt"`
+	Findings               []AgentSecurityFinding          `json:"findings"`
+	Actions                []AgentSecurityRepairAction     `json:"actions"`
+	Confirmation           AgentSecurityRepairConfirmation `json:"confirmation"`
+	ExpectedConfigRevision string                          `json:"expectedConfigRevision"`
+}
+
+type AgentSecurityRepairPreviewRequest struct {
+	ActionIDs  []string `json:"actionIds,omitempty"`
+	IssueCodes []string `json:"issueCodes,omitempty"`
+	Safe       bool     `json:"safe,omitempty"`
+	Online     bool     `json:"online,omitempty"`
+}
+
+type AgentSecurityRepairOperation struct {
+	OperationID            string   `json:"operationId"`
+	PreviewID              string   `json:"previewId"`
+	State                  string   `json:"state"`
+	Outcome                string   `json:"outcome"`
+	StartedAt              string   `json:"startedAt"`
+	CompletedAt            string   `json:"completedAt,omitempty"`
+	AppliedActionIDs       []string `json:"appliedActionIds"`
+	RemainingIssueCodes    []string `json:"remainingIssueCodes"`
+	RequiresRestart        bool     `json:"requiresRestart"`
+	RequiresExternalAction bool     `json:"requiresExternalAction"`
+	ErrorCode              string   `json:"errorCode,omitempty"`
 }
 
 type AgentConfigUpdate struct {
-	Enabled          *bool                      `json:"enabled,omitempty"`
-	Provider         *AgentProviderConfigUpdate `json:"provider,omitempty"`
-	ToolAllowlist    []string                   `json:"toolAllowlist,omitempty"`
-	ApprovalPolicy   string                     `json:"approvalPolicy,omitempty"`
-	AllowBrowserOpen *bool                      `json:"allowBrowserOpen,omitempty"`
-	AllowCopyRoute   *bool                      `json:"allowCopyRoute,omitempty"`
-	Budgets          *AgentBudgets              `json:"budgets,omitempty"`
+	Enabled           *bool                       `json:"enabled,omitempty"`
+	Provider          *AgentProviderConfigUpdate  `json:"provider,omitempty"`
+	Execution         *AgentExecutionPolicyUpdate `json:"execution,omitempty"`
+	ToolAllowlist     *[]string                   `json:"toolAllowlist,omitempty"`
+	ToolAllowlistMode string                      `json:"toolAllowlistMode,omitempty"`
+	ApprovalPolicy    string                      `json:"approvalPolicy,omitempty"`
+	AllowBrowserOpen  *bool                       `json:"allowBrowserOpen,omitempty"`
+	AllowCopyRoute    *bool                       `json:"allowCopyRoute,omitempty"`
+	Budgets           *AgentBudgets               `json:"budgets,omitempty"`
+}
+
+type AgentExecutionPolicyUpdate struct {
+	SegmentMaxTurns       *int   `json:"segmentMaxTurns,omitempty"`
+	TotalMaxTurns         *int   `json:"totalMaxTurns,omitempty"`
+	InactivityTimeoutMS   *int   `json:"inactivityTimeoutMs,omitempty"`
+	HardRunTimeoutMS      *int   `json:"hardRunTimeoutMs,omitempty"`
+	MaxOutputTokens       *int   `json:"maxOutputTokens,omitempty"`
+	ReasoningEffort       string `json:"reasoningEffort,omitempty"`
+	NoProgressRepeatLimit *int   `json:"noProgressRepeatLimit,omitempty"`
 }
 
 type AgentProviderConfigUpdate struct {
-	ModelSlug          string `json:"modelSlug,omitempty"`
-	APIKeyEnvVar       string `json:"apiKeyEnvVar,omitempty"`
-	RemoteModelEnabled *bool  `json:"remoteModelEnabled,omitempty"`
-	HTTPRefererEnvVar  string `json:"httpRefererEnvVar,omitempty"`
-	TitleEnvVar        string `json:"titleEnvVar,omitempty"`
+	ModelSlug          *string `json:"modelSlug,omitempty"`
+	APIKeyEnvVar       *string `json:"apiKeyEnvVar,omitempty"`
+	RemoteModelEnabled *bool   `json:"remoteModelEnabled,omitempty"`
+	HTTPRefererEnvVar  *string `json:"httpRefererEnvVar,omitempty"`
+	TitleEnvVar        *string `json:"titleEnvVar,omitempty"`
 }
 
 type TerminalCapabilities struct {
@@ -880,6 +1102,7 @@ type TerminalCapabilities struct {
 }
 
 type TuiAgentContext struct {
+	CapturedAt             string                `json:"capturedAt,omitempty"`
 	SelectedPaneID         string                `json:"selectedPaneId,omitempty"`
 	SelectedAppID          string                `json:"selectedAppId,omitempty"`
 	SelectedGroupID        string                `json:"selectedGroupId,omitempty"`
@@ -1000,6 +1223,22 @@ type AgentRunEvent struct {
 	Data      json.RawMessage `json:"data,omitempty"`
 }
 
+// AgentActivity is a sanitized observable projection embedded in an event.
+// It never contains model reasoning or raw tool arguments.
+type AgentActivity struct {
+	ID              string `json:"id"`
+	Kind            string `json:"kind"`
+	State           string `json:"state"`
+	Label           string `json:"label"`
+	Detail          string `json:"detail,omitempty"`
+	Output          string `json:"output,omitempty"`
+	OutputLineCount int    `json:"outputLineCount,omitempty"`
+	OutputTruncated bool   `json:"outputTruncated,omitempty"`
+	StartedAt       string `json:"startedAt,omitempty"`
+	CompletedAt     string `json:"completedAt,omitempty"`
+	DurationMS      int64  `json:"durationMs,omitempty"`
+}
+
 type AgentDiagnostic struct {
 	ID         string          `json:"id,omitempty"`
 	Severity   string          `json:"severity,omitempty"`
@@ -1036,6 +1275,7 @@ type AgentApproval struct {
 }
 
 type AgentApprovalPreview struct {
+	Phase                   string                  `json:"phase,omitempty"`
 	Action                  string                  `json:"action"`
 	Target                  string                  `json:"target,omitempty"`
 	CurrentStatus           string                  `json:"currentStatus,omitempty"`
@@ -1053,6 +1293,14 @@ type AgentApprovalPreview struct {
 	PortStrategyCandidates  []string                `json:"portStrategyCandidates,omitempty"`
 	SetupQuestions          []string                `json:"setupQuestions,omitempty"`
 	HealthRoute             string                  `json:"healthRoute,omitempty"`
+	WhyApproval             string                  `json:"whyApproval,omitempty"`
+	WillChange              []string                `json:"willChange,omitempty"`
+	WillPreserve            []string                `json:"willPreserve,omitempty"`
+	WillRun                 []string                `json:"willRun,omitempty"`
+	Proof                   []string                `json:"proof,omitempty"`
+	Revision                string                  `json:"revision,omitempty"`
+	ExpiresAt               string                  `json:"expiresAt,omitempty"`
+	BlockedReasons          []string                `json:"blockedReasons,omitempty"`
 	MayIncludeSensitiveData bool                    `json:"mayIncludeSensitiveData,omitempty"`
 }
 

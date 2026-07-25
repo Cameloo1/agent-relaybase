@@ -1,6 +1,6 @@
-# TUI Operator Agent Testing Plan
+# TUI Operator Agent Testing
 
-This document defines the testing strategy for Relaybase's in-TUI Operator Agent. As of RA010, the daemon Agent Gateway, OpenRouter compatibility adapter, runtime, daemon-owned tool registry, session/audit redaction storage, budget block, approval continuation, and Go TUI Agent Gateway client/rendering path have unit/integration coverage. Live OpenRouter readiness still requires the explicit live smoke command with a configured key and model.
+This document describes the current verification layers for Relaybase's in-TUI Operator Agent. Offline tests cover the daemon Agent Gateway, provider adapter boundary, runtime, tool registry, SQLite threads/audits, redaction, approvals, bounded continuation, spend and no-progress guards, run polling/cancellation/retry, public activity projection, and Go TUI rendering. Live compatibility of a selected OpenRouter model still requires an explicit live command with a configured key, model, and cost boundary.
 
 ## Test Layers
 
@@ -20,6 +20,17 @@ Cover:
 - session and audit storage
 - SDK-facing tool schema construction
 - approval-gated daemon tool execution
+- bounded continuation, inactivity, hard deadline, and no-progress enforcement
+- live-spend guard accounting and fail-closed provider usage checks
+- current-context, capability, app-explanation, and operation-observability tools
+- activity projection redaction and terminal-state finalization
+- stable external-source reads, single-flight reload, atomic revisions, and last-known-good failure behavior
+- credential lease disposal, Windows DPAPI round trip, ACL application, corruption, and replacement rollback
+- OAuth PKCE state, expiry, replay, bounded response, validation, and unverified-provider behavior
+- child process and child MCP environment credential exclusion
+- Agent security doctor local/online probe separation and secret-free evidence
+- repair-journal preview expiry, revision/credential/source binding, idempotency, serialization, restart interruption, and durable receipt recovery
+- repair-service safe, guarded, destructive, external, manual, partial, stale, and verification outcomes
 
 ### Daemon Integration Tests
 
@@ -37,6 +48,11 @@ Cover:
 - daemon restart and session/audit recovery
 - redacted chat/session export
 - budget block before remote model calls
+- queued run polling, cancellation, retry, and idempotency
+- daemon restart interruption and recovered-approval behavior
+- authenticated no-store Agent security diagnosis/preview/apply/operation routes
+- `relaybase repair` diagnosis, plan, apply, operation recovery, JSON, exit codes, daemon-unavailable behavior, and `.env` hydration isolation
+- Security and credentials navigation, findings, preview, destructive phrase, result, reconnect receipt, and non-shimmering control-plane behavior
 
 ### TUI Headless Tests
 
@@ -55,6 +71,9 @@ Cover:
 - session event handling for model deltas, answers, diagnostics, setup previews, file-write approvals, repair choices, prove results, and TUI proposed actions
 - approval approve/reject commands for pending daemon approvals
 - no direct lifecycle or file-write execution from TUI code
+- docked and full-page transcript virtualization
+- tool-trace selection, expansion, replay, and same-length content invalidation
+- settings category navigation and Agent configuration validation
 
 ### Provider Tests
 
@@ -104,7 +123,9 @@ Smoke should use isolated temporary state directories and disposable sample apps
 Required live evidence:
 
 - TUI starts with Agent Gateway unavailable and shows diagnostic
-- TUI starts with missing OpenRouter key and shows diagnostic
+- TUI starts with missing OpenRouter credential and shows diagnostic
+- settings draft saves atomically against its opened revision
+- tool execution and settings/provider operations remain static while authoritative model processing shimmers
 - daemon streams assistant response events to TUI
 - setup plan preview is rendered for a sample app
 - manifest and wrapper diffs are rendered before approval
@@ -129,14 +150,22 @@ npm.cmd run tui:smoke
 Agent-focused Node tests run through the main Node test command:
 
 ```powershell
-node --experimental-strip-types --test tests\agent-api.test.ts tests\agent-runtime.test.ts tests\agent-tools.test.ts
+npm.cmd run agent:test
 npm.cmd test
 ```
 
-The live provider proof remains explicit and may be blocked by missing credentials:
+Focused Go tests are part of:
+
+```powershell
+npm.cmd run tui:test
+```
+
+The live provider and semantic checks remain explicit and may be blocked by missing credentials:
 
 ```powershell
 npm.cmd run agent:smoke:openrouter
+npm.cmd run agent:live:correctness
+npm.cmd run agent:live:activity
 ```
 
-If `OPENROUTER_API_KEY` or `RELAYBASE_AGENT_MODEL` is missing, the smoke command must fail as blocked. It must not fake provider or setup success.
+If a usable managed/legacy credential or `RELAYBASE_AGENT_MODEL` is missing, the smoke command must fail as blocked. It must not fake provider or setup success. Offline tests use generated fixture credentials only and never read a user's real `.env` or contact OpenRouter.

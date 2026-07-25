@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -39,6 +39,7 @@ import {
   runOpenRouterLiveSmoke
 } from "./agent/openrouterLiveSmoke.ts";
 import {
+  agentLiveCorrectnessPreflight,
   formatAgentLiveAcceptanceError,
   printAgentLiveAcceptanceResult,
   runAgentLiveAcceptance
@@ -53,10 +54,17 @@ import {
   printAgentFolderStartLiveResult,
   runAgentFolderStartLive
 } from "./agent/liveFolderStart.ts";
-import { formatRelaybaseEnvFileDiagnostics, loadRelaybaseEnvFile } from "./envFile.ts";
+import { formatRelaybaseEnvFileDiagnostics, loadRelaybaseEnvFile, relaybaseModelSource } from "./envFile.ts";
 import { formatRegistrationPlan } from "./registrationPlanFormat.ts";
+import { restartDaemon } from "./daemonRestartClient.ts";
 import { formatMissingTuiBinaryDiagnostic, resolveTuiBinary, runRelaybaseTui } from "./tuiBridge.ts";
 import { removeRecognizedRelaybasePowerShellShim } from "./prefixShim.ts";
+import type {
+  AgentSecurityRepairActionId,
+  AgentSecurityRepairOperation,
+  AgentSecurityRepairPreview,
+  AgentSecurityStatus
+} from "./agent/types.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGE_NAME = "@cameloo/relaybase";
@@ -94,11 +102,33 @@ interface CliOptions {
   all: boolean;
   race: boolean;
   diagnose: boolean;
+  preflight: boolean;
+  agentSecurity: boolean;
+  online: boolean;
+  safe: boolean;
   daemonStartPolicy: "auto" | "never";
+  restartDaemonOnLaunch: boolean;
   listFilter: AppListFilter;
   profile?: string;
   answersPath?: string;
+  agentConfigPath?: string;
+  repairIssue?: string;
+  repairAction?: string;
+  repairPreviewId?: string;
+  repairOperationId?: string;
   docker: DockerSetupOptions;
+  agentEnvironment?: import("./types.ts").ServerOptions["agentEnvironment"];
+}
+
+class AgentRepairCliError extends Error {
+  readonly statusCode: number;
+  readonly code?: string;
+
+  constructor(statusCode: number, message: string, code?: string) {
+    super(message);
+    this.statusCode = statusCode;
+    this.code = code;
+  }
 }
 
 void main().catch((error) => {
@@ -127,15 +157,30 @@ async function main(): Promise<void> {
     return;
   }
 
-  const envFile = loadRelaybaseEnvFile();
-  if (envFile.diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
-    throw new Error(formatRelaybaseEnvFileDiagnostics(envFile));
-  }
-
   const isBundledStart = command === "start" && isBundledStartArgs(args);
   const { cliArgs, passthroughArgs } =
     command === "tui" || isBundledStart ? splitPassthroughArgs(args) : { cliArgs: args, passthroughArgs: [] };
   const options = parseOptions(cliArgs);
+  if (options.restartDaemonOnLaunch && command !== "tui" && !(command === "start" && isBundledStart)) {
+    throw new Error("--restart-daemon is supported only by relaybase start (without an app id) and relaybase tui.");
+  }
+  if (commandNeedsAgentEnvironment(command, args, isBundledStart)) {
+    const envFile = loadRelaybaseEnvFile({
+      cwd: options.cwd,
+      ...(options.agentConfigPath ? { filePath: options.agentConfigPath } : {})
+    });
+    if (envFile.diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
+      throw new Error(formatRelaybaseEnvFileDiagnostics(envFile));
+    }
+    options.agentEnvironment = {
+      modelSource: relaybaseModelSource(envFile),
+      ...(envFile.loaded && envFile.path ? { envFilePath: envFile.path } : {}),
+      ...(envFile.fingerprint ? { envFileFingerprint: envFile.fingerprint } : {}),
+      ...(envFile.loaded ? { envFileAppliedKeys: [...envFile.appliedKeys] } : {}),
+      ...(envFile.loaded ? { envFileSkippedKeys: [...envFile.skippedKeys] } : {}),
+      ...(envFile.loaded ? { envFileSourceKind: envFile.sourceKind } : {})
+    };
+  }
 
   switch (command) {
     case "agent":
@@ -163,6 +208,9 @@ async function main(): Promise<void> {
     case "repair-prefix":
       process.exitCode = repairRelaybaseCommandPrefix(options);
       return;
+    case "repair":
+      process.exitCode = await repairRelaybase(options);
+      return;
     case "list":
       await listApps(options);
       return;
@@ -171,6 +219,9 @@ async function main(): Promise<void> {
       return;
     case "mcp":
       await mcp(options);
+      return;
+    case "daemon":
+      process.exitCode = await daemonCommand(args, options);
       return;
     case "register":
       await register(args[0], options);
@@ -198,6 +249,16 @@ async function main(): Promise<void> {
     default:
       throw new Error(`Unknown command: ${command}`);
   }
+}
+
+function commandNeedsAgentEnvironment(command: string, args: string[], isBundledStart: boolean): boolean {
+  if (command === "repair" || command === "daemon" || command === "diagnose-token" || command === "diagnose_token") {
+    return false;
+  }
+  if (command === "agent") {
+    return !["config", "provider", "threads"].includes(args[0] ?? "");
+  }
+  return command !== "start" || isBundledStart;
 }
 
 export function packageVersion(packageRoot = ROOT): string {
@@ -237,6 +298,45 @@ async function startRelaybase(options: CliOptions, passthroughArgs: string[]): P
   return runRelaybaseTui(options, passthroughArgs);
 }
 
+async function daemonCommand(args: string[], options: CliOptions): Promise<number> {
+  if (args[0] !== "restart") {
+    throw new Error("Usage: relaybase daemon restart [--json]");
+  }
+  for (let index = 1; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--json") {
+      continue;
+    }
+    if (arg === "--host" || arg === "--port" || arg === "--state-dir") {
+      requiredArg(args[++index], arg);
+      continue;
+    }
+    throw new Error(`Unsupported daemon restart argument: ${arg ?? ""}`);
+  }
+  const result = await restartDaemon(options);
+  if (options.json) {
+    console.log(JSON.stringify({ restart: result }, null, 2));
+  } else {
+    console.log(result.userAction);
+    if (result.oldInstanceId && result.newInstanceId) {
+      console.log(`Instance: ${result.oldInstanceId} -> ${result.newInstanceId}`);
+    }
+    for (const app of result.appResults ?? []) {
+      console.log(`${app.status === "restored" ? "restored" : "attention"}: ${app.appId}`);
+    }
+    for (const warning of result.warnings ?? []) {
+      console.log(`warning: ${warning}`);
+    }
+    if (result.reportPath) {
+      console.log(`Restart report: ${result.reportPath}`);
+    }
+    if (result.error) {
+      console.error(`Restart detail: ${result.error}`);
+    }
+  }
+  return result.restarted || result.code === "daemon_started" ? 0 : 1;
+}
+
 async function checkRelaybase(options: CliOptions): Promise<number> {
   const sourceDoctor = scriptPath("tui-go.mjs");
   const sourceCheckout = existsSync(sourceDoctor);
@@ -262,13 +362,20 @@ async function checkRelaybase(options: CliOptions): Promise<number> {
         exitCode = status;
       }
     }
+    const resolution = await resolveTuiBinary();
+    if (resolution.ok && resolution.path) {
+      console.log(`TUI build: ${formatTuiBuildIdentity(resolution.path, resolution.source ?? "source checkout")}.`);
+    } else {
+      process.stderr.write(formatMissingTuiBinaryDiagnostic(resolution));
+      exitCode = 1;
+    }
   } else {
     console.log("");
     console.log("==> Installed TUI");
     const resolution = await resolveTuiBinary();
     if (resolution.ok && resolution.path) {
       console.log(
-        `Installed TUI: ready (${resolution.source ?? "packaged binary"}; build ${tuiBuildIdentity(resolution.path)}).`
+        `Installed TUI: ready (${formatTuiBuildIdentity(resolution.path, resolution.source ?? "packaged binary")}).`
       );
     } else {
       process.stderr.write(formatMissingTuiBinaryDiagnostic(resolution));
@@ -356,6 +463,44 @@ function tuiBuildIdentity(binaryPath: string): string {
   } catch {
     return "unavailable";
   }
+}
+
+interface TuiEmbeddedBuildInfo {
+  version: string;
+  commit: string;
+  builtAt: string;
+  source: string;
+}
+
+function readTuiEmbeddedBuildInfo(binaryPath: string): TuiEmbeddedBuildInfo | undefined {
+  const result = spawnSync(binaryPath, ["--build-info"], {
+    encoding: "utf8",
+    shell: false,
+    windowsHide: true,
+    timeout: 3000,
+    stdio: ["ignore", "pipe", "ignore"]
+  });
+  if (result.error || result.status !== 0 || typeof result.stdout !== "string") {
+    return undefined;
+  }
+  try {
+    const value = JSON.parse(result.stdout) as Partial<TuiEmbeddedBuildInfo>;
+    if (![value.version, value.commit, value.builtAt, value.source].every((entry) => typeof entry === "string")) {
+      return undefined;
+    }
+    return value as TuiEmbeddedBuildInfo;
+  } catch {
+    return undefined;
+  }
+}
+
+function formatTuiBuildIdentity(binaryPath: string, resolvedSource: string): string {
+  const hash = tuiBuildIdentity(binaryPath);
+  const embedded = readTuiEmbeddedBuildInfo(binaryPath);
+  if (!embedded) {
+    return `${resolvedSource}; build ${hash}; embedded identity unavailable`;
+  }
+  return `${resolvedSource}; build ${hash}; version ${embedded.version}; source ${embedded.source}; commit ${embedded.commit}; built ${embedded.builtAt}`;
 }
 
 async function verifyRelaybase(options: CliOptions): Promise<number> {
@@ -743,6 +888,26 @@ async function mcp(options: CliOptions): Promise<void> {
 
 async function agent(args: string[], options: CliOptions): Promise<void> {
   const subcommand = args[0];
+  if (subcommand === "config") {
+    const action = args[1] ?? "status";
+    if (action !== "status" && action !== "reload") {
+      throw new Error("Usage: relaybase agent config <status|reload> [--json]");
+    }
+    const response = await agentApiRequest(
+      options,
+      action === "status" ? "GET" : "POST",
+      action === "status" ? "/__hub/api/agent/config" : "/__hub/api/agent/config/reload",
+      action === "reload" ? {} : undefined
+    );
+    printAgentApiResponse(response, options);
+    return;
+  }
+
+  if (subcommand === "provider") {
+    await agentProvider(args.slice(1), options);
+    return;
+  }
+
   if (subcommand === "smoke-openrouter") {
     try {
       const result = await runOpenRouterLiveSmoke();
@@ -757,8 +922,13 @@ async function agent(args: string[], options: CliOptions): Promise<void> {
     }
   }
 
-  if (subcommand === "live-acceptance") {
+  if (subcommand === "live-acceptance" || subcommand === "live-correctness") {
     try {
+      if (args.includes("--preflight")) {
+        const preflight = agentLiveCorrectnessPreflight();
+        console.log(JSON.stringify(preflight, null, 2));
+        return;
+      }
       const result = await runAgentLiveAcceptance();
       if (options.json) {
         console.log(JSON.stringify(result, null, 2));
@@ -805,8 +975,124 @@ async function agent(args: string[], options: CliOptions): Promise<void> {
   }
 
   throw new Error(
-    "Usage: relaybase agent <smoke-openrouter|live-acceptance|live-command-matrix|live-folder-start|threads>"
+    "Usage: relaybase agent <config|provider|smoke-openrouter|live-correctness|live-acceptance|live-command-matrix|live-folder-start|threads>"
   );
+}
+
+async function agentProvider(args: string[], options: CliOptions): Promise<void> {
+  const action = args[0] ?? "status";
+  if (action === "status") {
+    printAgentApiResponse(
+      await agentApiRequest(options, "GET", "/__hub/api/agent/provider/openrouter/status"),
+      options
+    );
+    return;
+  }
+  if (action === "connect" || action === "replace") {
+    const response = await agentApiRequest(options, "POST", `/__hub/api/agent/provider/openrouter/${action}`, {
+      openBrowser: !options.noBrowser
+    });
+    printAgentApiResponse(response, options);
+    if (!options.json && !options.noBrowser) {
+      const authorizationUrl = nestedString(response, ["agent", "provider", "attempt", "authorizationUrl"]);
+      const browserOpen = nestedString(response, ["agent", "provider", "attempt", "browserOpen"]);
+      if (browserOpen === "opened") {
+        console.log("Opened OpenRouter authorization in the default browser.");
+      } else if (authorizationUrl) {
+        console.log(`Open this URL to continue: ${authorizationUrl}`);
+      }
+    }
+    return;
+  }
+  if (action === "disconnect") {
+    if (!options.yes) {
+      throw new Error(
+        "Disconnect is local-only and leaves the OpenRouter key active. Re-run with --yes after reviewing this effect."
+      );
+    }
+    printAgentApiResponse(
+      await agentApiRequest(options, "POST", "/__hub/api/agent/provider/openrouter/disconnect", {
+        confirm: "disconnect_local_only"
+      }),
+      options
+    );
+    return;
+  }
+  if (action === "validate") {
+    printAgentApiResponse(
+      await agentApiRequest(options, "POST", "/__hub/api/agent/provider/openrouter/validate", {}),
+      options
+    );
+    return;
+  }
+  if (action === "migrate") {
+    if (!options.yes) {
+      throw new Error(
+        "Migration copies the legacy credential into Windows DPAPI storage without editing .env. Re-run with --yes."
+      );
+    }
+    printAgentApiResponse(
+      await agentApiRequest(options, "POST", "/__hub/api/agent/provider/openrouter/migrate", {
+        confirm: "migrate_to_windows_dpapi"
+      }),
+      options
+    );
+    return;
+  }
+  if (action === "revoke") {
+    if (!options.yes) {
+      printAgentApiResponse(
+        await agentApiRequest(options, "POST", "/__hub/api/agent/provider/openrouter/revoke/preview", {}),
+        options
+      );
+      return;
+    }
+    printAgentApiResponse(
+      await agentApiRequest(options, "POST", "/__hub/api/agent/provider/openrouter/revoke", {
+        confirm: "open_provider_key_management"
+      }),
+      options
+    );
+    return;
+  }
+  if (action === "cleanup-legacy") {
+    const preview = await agentApiRequest(
+      options,
+      "POST",
+      "/__hub/api/agent/provider/openrouter/legacy-removal/preview",
+      {}
+    );
+    if (!options.yes) {
+      printAgentApiResponse(preview, options);
+      return;
+    }
+    const previewId = nestedString(preview, ["agent", "provider", "legacyRemoval", "previewId"]);
+    if (!previewId) {
+      throw new Error("The daemon did not return a bound legacy credential removal preview.");
+    }
+    printAgentApiResponse(
+      await agentApiRequest(options, "POST", "/__hub/api/agent/provider/openrouter/legacy-removal/apply", {
+        confirm: "remove_legacy_external_credential",
+        previewId
+      }),
+      options
+    );
+    return;
+  }
+  throw new Error(
+    "Usage: relaybase agent provider <status|connect|replace|validate|migrate|cleanup-legacy|disconnect|revoke> [--yes] [--json]"
+  );
+}
+
+function nestedString(body: unknown, keys: string[]): string | undefined {
+  let value: unknown = body;
+  for (const key of keys) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+    value = (value as Record<string, unknown>)[key];
+  }
+  return typeof value === "string" && value ? value : undefined;
 }
 
 async function agentThreads(args: string[], options: CliOptions): Promise<void> {
@@ -897,9 +1183,17 @@ async function agentApiRequest(
   options: CliOptions,
   method: string,
   pathName: string,
-  body?: unknown
+  body?: unknown,
+  timeoutMs = DEFAULT_API_TIMEOUT_MS
 ): Promise<Record<string, unknown>> {
-  const response = await apiRequest(options, method, pathName, body, await getOrCreateSessionToken(options.stateDir));
+  const response = await apiRequest(
+    options,
+    method,
+    pathName,
+    body,
+    await getOrCreateSessionToken(options.stateDir),
+    timeoutMs
+  );
   if (!response.ok) {
     throw new Error(response.body || `Relaybase Agent Gateway request failed: ${method} ${pathName}`);
   }
@@ -912,6 +1206,414 @@ function printAgentApiResponse(response: Record<string, unknown>, options: CliOp
     return;
   }
   console.log(JSON.stringify(response, null, 2));
+}
+
+async function repairRelaybase(options: CliOptions): Promise<number> {
+  try {
+    validateRepairOptions(options);
+    if (options.repairOperationId) {
+      const operation = repairOperationFromResponse(
+        await repairApiRequest(
+          options,
+          "GET",
+          `/__hub/api/agent/security/repair/operations/${encodeURIComponent(options.repairOperationId)}`
+        )
+      );
+      printRepairOperation(operation, options);
+      return repairOperationExitCode(operation);
+    }
+
+    if (options.repairPreviewId) {
+      const preview = repairPreviewFromResponse(
+        await repairApiRequest(
+          options,
+          "GET",
+          `/__hub/api/agent/security/repair/previews/${encodeURIComponent(options.repairPreviewId)}`
+        )
+      );
+      return applyRepairPreview(preview, options);
+    }
+
+    if (options.repairAction || options.safe) {
+      const preview = repairPreviewFromResponse(
+        await repairApiRequest(options, "POST", "/__hub/api/agent/security/repair/preview", {
+          ...(options.repairAction ? { actionIds: [options.repairAction] } : {}),
+          ...(options.repairIssue ? { issueCodes: [options.repairIssue] } : {}),
+          safe: options.safe,
+          online: options.online
+        })
+      );
+      if (options.plan || !options.yes) {
+        printRepairPreview(preview, options);
+        return preview.actions.some((action) => action.riskClass === "manual" || action.riskClass === "external")
+          ? 3
+          : 2;
+      }
+      return applyRepairPreview(preview, options);
+    }
+
+    const status = repairStatusFromResponse(
+      await repairApiRequest(options, "POST", "/__hub/api/agent/security/diagnose", {
+        online: options.online
+      })
+    );
+    const filtered = options.repairIssue
+      ? { ...status, findings: status.findings.filter((finding) => finding.code === options.repairIssue) }
+      : status;
+    if (options.repairIssue && filtered.findings.length === 0) {
+      throw new AgentRepairCliError(404, `No Agent security finding matched ${options.repairIssue}.`);
+    }
+
+    if (
+      !options.json &&
+      !options.plan &&
+      !options.yes &&
+      !options.repairIssue &&
+      process.stdin.isTTY &&
+      process.stdout.isTTY
+    ) {
+      const interactive = await interactiveRepair(filtered, options);
+      if (interactive !== undefined) {
+        return interactive;
+      }
+    }
+    printRepairStatus(filtered, options);
+    return repairStatusExitCode(filtered);
+  } catch (error) {
+    const cliError = repairCliError(error);
+    const exitCode = repairErrorExitCode(cliError);
+    const outcome = exitCode === 4 ? "stale" : exitCode === 2 ? "findings" : "error";
+    if (options.json) {
+      console.log(
+        JSON.stringify(
+          {
+            outcome,
+            healthy: false,
+            issueCount: 0,
+            remainingIssueCodes: [],
+            operationId: null,
+            error: { code: cliError.code ?? "RELAYBASE_REPAIR_FAILED", message: cliError.message }
+          },
+          null,
+          2
+        )
+      );
+    } else {
+      console.error(`${cliError.code ? `${cliError.code}: ` : ""}${cliError.message}`);
+    }
+    return exitCode;
+  }
+}
+
+function validateRepairOptions(options: CliOptions): void {
+  if (
+    options.repairOperationId &&
+    (options.repairPreviewId || options.repairAction || options.safe || options.repairIssue)
+  ) {
+    throw new Error("--operation cannot be combined with --apply, --action, --safe, or --issue.");
+  }
+  if (options.repairPreviewId && (options.repairAction || options.safe || options.repairIssue || options.online)) {
+    throw new Error("--apply cannot be combined with --action, --safe, --issue, or --online.");
+  }
+  if (options.repairAction && options.safe) {
+    throw new Error("Use either --action or --safe, not both.");
+  }
+  if (options.repairPreviewId && !options.yes) {
+    throw new AgentRepairCliError(
+      400,
+      "--apply requires --yes because it authorizes the exact stored preview.",
+      "AGENT_SECURITY_REPAIR_CONFIRMATION_REQUIRED"
+    );
+  }
+  if (options.json && !options.yes && (options.repairAction || options.safe)) {
+    options.plan = true;
+  }
+}
+
+async function repairApiRequest(
+  options: CliOptions,
+  method: string,
+  pathName: string,
+  body?: unknown
+): Promise<Record<string, unknown>> {
+  const response = await apiRequest(
+    options,
+    method,
+    pathName,
+    body,
+    await getOrCreateSessionToken(options.stateDir),
+    STATE_API_TIMEOUT_MS
+  );
+  if (!response.ok) {
+    const parsed = safeJsonObject(response.body);
+    const detail = objectAt(parsed, ["relaybaseError"]) ?? objectAt(parsed, ["error"]) ?? parsed;
+    const code = stringAt(detail, ["code"]);
+    const message =
+      stringAt(detail, ["message"]) ??
+      stringAt(parsed, ["message"]) ??
+      (response.statusCode === 0
+        ? "Relaybase daemon is unavailable. Start it through the existing Relaybase launcher, then retry."
+        : `Relaybase Agent security request failed: ${method} ${pathName}`);
+    throw new AgentRepairCliError(response.statusCode, message, code);
+  }
+  return safeJsonObject(response.body);
+}
+
+async function interactiveRepair(status: AgentSecurityStatus, options: CliOptions): Promise<number | undefined> {
+  const findings = status.findings.filter((finding) => finding.state !== "healthy");
+  if (findings.length === 0) {
+    return undefined;
+  }
+  printRepairStatus(status, options);
+  const findingIndex = await arrowSelect(
+    "Choose an Agent security finding",
+    findings.map((finding) => `${finding.state.toUpperCase()} ${finding.title} · ${finding.repairability}`),
+    0
+  );
+  const finding = findings[findingIndex]!;
+  const actions = [finding.recommendedActionId, ...(finding.alternateActionIds ?? [])].filter(
+    (action): action is AgentSecurityRepairActionId => Boolean(action)
+  );
+  if (actions.length === 0) {
+    console.log(finding.userAction ?? "This finding requires a manual action.");
+    return 3;
+  }
+  const actionIndex =
+    actions.length === 1
+      ? 0
+      : await arrowSelect(
+          "Choose a repair or recovery action",
+          actions.map((action) => action.replaceAll("_", " ")),
+          0
+        );
+  const preview = repairPreviewFromResponse(
+    await repairApiRequest(options, "POST", "/__hub/api/agent/security/repair/preview", {
+      actionIds: [actions[actionIndex]],
+      issueCodes: [finding.code],
+      online: options.online
+    })
+  );
+  printRepairPreview(preview, options);
+  const confirmed = preview.confirmation.phrase
+    ? (await askText(`Type ${preview.confirmation.phrase} to continue`, "")) === preview.confirmation.phrase
+    : await askConfirmation("Apply this exact Agent security repair?");
+  if (!confirmed) {
+    console.log("Repair cancelled before apply; no state changed.");
+    return 2;
+  }
+  return applyRepairPreview(preview, { ...options, yes: true });
+}
+
+async function applyRepairPreview(preview: AgentSecurityRepairPreview, options: CliOptions): Promise<number> {
+  if (!options.yes) {
+    printRepairPreview(preview, options);
+    return 2;
+  }
+  const operation = repairOperationFromResponse(
+    await repairApiRequest(options, "POST", "/__hub/api/agent/security/repair/apply", {
+      previewId: preview.previewId,
+      idempotencyKey: randomUUID(),
+      confirmation: preview.confirmation.value
+    })
+  );
+  printRepairOperation(operation, options);
+  return repairOperationExitCode(operation);
+}
+
+function repairStatusFromResponse(response: Record<string, unknown>): AgentSecurityStatus {
+  return requiredNestedObject(
+    response,
+    ["agent", "security"],
+    "Agent security diagnosis"
+  ) as unknown as AgentSecurityStatus;
+}
+
+function repairPreviewFromResponse(response: Record<string, unknown>): AgentSecurityRepairPreview {
+  return requiredNestedObject(
+    response,
+    ["agent", "security", "repair", "preview"],
+    "Agent security repair preview"
+  ) as unknown as AgentSecurityRepairPreview;
+}
+
+function repairOperationFromResponse(response: Record<string, unknown>): AgentSecurityRepairOperation {
+  return requiredNestedObject(
+    response,
+    ["agent", "security", "repair", "operation"],
+    "Agent security repair operation"
+  ) as unknown as AgentSecurityRepairOperation;
+}
+
+function requiredNestedObject(value: Record<string, unknown>, keys: string[], label: string): Record<string, unknown> {
+  const result = objectAt(value, keys);
+  if (!result) {
+    throw new AgentRepairCliError(500, `${label} was missing from the daemon response.`);
+  }
+  return result;
+}
+
+function printRepairStatus(status: AgentSecurityStatus, options: CliOptions): void {
+  const remaining = status.findings.filter((finding) => finding.state !== "healthy");
+  const result = {
+    outcome: status.healthy && remaining.length === 0 ? "healthy" : "findings",
+    healthy: status.healthy && remaining.length === 0,
+    issueCount: remaining.length,
+    remainingIssueCodes: remaining.map((finding) => finding.code),
+    operationId: null,
+    scope: status.scope,
+    checkedAt: status.checkedAt,
+    online: status.online,
+    findings: status.findings
+  };
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(`Relaybase repair · Agent security · ${result.outcome}`);
+  console.log(`Checked: ${status.checkedAt} · ${remaining.length} issue${remaining.length === 1 ? "" : "s"}`);
+  for (const finding of status.findings) {
+    console.log(`${finding.state.toUpperCase()} ${finding.code}: ${finding.title}`);
+    console.log(`  ${finding.message}`);
+    if (finding.userAction) {
+      console.log(`  Next: ${finding.userAction}`);
+    }
+  }
+}
+
+function printRepairPreview(preview: AgentSecurityRepairPreview, options: CliOptions): void {
+  const issueCodes = preview.findings.filter((finding) => finding.state !== "healthy").map((finding) => finding.code);
+  const result = {
+    outcome: "confirmation_required",
+    healthy: false,
+    issueCount: issueCodes.length,
+    remainingIssueCodes: issueCodes,
+    operationId: null,
+    preview
+  };
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(`Agent security repair preview ${preview.previewId}`);
+  console.log(`Expires: ${preview.expiresAt}`);
+  for (const action of preview.actions) {
+    console.log(`${action.title} · ${action.riskClass}`);
+    console.log(`  Changes: ${action.changes.join(" ")}`);
+    console.log(`  Preserves: ${action.preserves.join(" ")}`);
+    console.log(
+      `  Network: ${action.requiresNetwork ? "yes" : "no"} · Restart: ${
+        action.requiresRestart ? "yes" : "no"
+      } · Reversible: ${action.reversible ? "yes" : "no"}`
+    );
+  }
+  if (preview.confirmation.warning) {
+    console.log(`Warning: ${preview.confirmation.warning}`);
+  }
+  console.log(`Apply: relaybase repair --agent-security --apply ${preview.previewId} --yes`);
+}
+
+function printRepairOperation(operation: AgentSecurityRepairOperation, options: CliOptions): void {
+  const result = {
+    outcome: operation.outcome,
+    healthy: operation.outcome === "verified",
+    issueCount: operation.remainingIssueCodes.length,
+    remainingIssueCodes: operation.remainingIssueCodes,
+    operationId: operation.operationId,
+    operation
+  };
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(`Agent security repair ${operation.outcome}`);
+  console.log(`Operation: ${operation.operationId}`);
+  console.log(`Applied: ${operation.appliedActionIds.join(", ") || "none"}`);
+  console.log(`Remaining: ${operation.remainingIssueCodes.join(", ") || "none"}`);
+  if (operation.requiresExternalAction) {
+    console.log("A provider-owned or manual action is still required.");
+  }
+  if (operation.requiresRestart) {
+    console.log("A safe daemon restart is still required.");
+  }
+}
+
+function repairStatusExitCode(status: AgentSecurityStatus): number {
+  const remaining = status.findings.filter((finding) => finding.state !== "healthy");
+  if (remaining.length === 0) {
+    return 0;
+  }
+  return remaining.some((finding) => finding.repairability === "manual" || finding.repairability === "external")
+    ? 3
+    : 2;
+}
+
+function repairOperationExitCode(operation: AgentSecurityRepairOperation): number {
+  if (operation.outcome === "verified") {
+    return 0;
+  }
+  if (operation.requiresExternalAction || operation.outcome === "blocked") {
+    return 3;
+  }
+  return operation.outcome === "failed" ? 1 : 2;
+}
+
+function repairCliError(error: unknown): AgentRepairCliError {
+  if (error instanceof AgentRepairCliError) {
+    return error;
+  }
+  return new AgentRepairCliError(500, error instanceof Error ? error.message : String(error));
+}
+
+function repairErrorExitCode(error: AgentRepairCliError): number {
+  if (error.code === "AGENT_SECURITY_REPAIR_PREVIEW_STALE") {
+    return 4;
+  }
+  if (
+    [
+      "AGENT_SECURITY_REPAIR_ACTION_REQUIRED",
+      "AGENT_SECURITY_REPAIR_ACTION_NOT_APPLICABLE",
+      "AGENT_SECURITY_REPAIR_SAFE_SCOPE_INVALID",
+      "AGENT_SECURITY_REPAIR_CONFIRMATION_REQUIRED",
+      "AGENT_SECURITY_REPAIR_CONFLICT",
+      "AGENT_SECURITY_REPAIR_NOT_CANCELLABLE"
+    ].includes(error.code ?? "")
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+function safeJsonObject(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function objectAt(value: unknown, keys: string[]): Record<string, unknown> | undefined {
+  let current = value;
+  for (const key of keys) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current && typeof current === "object" && !Array.isArray(current)
+    ? (current as Record<string, unknown>)
+    : undefined;
+}
+
+function stringAt(value: unknown, keys: string[]): string | undefined {
+  let current = value;
+  for (const key of keys) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[key];
+  }
+  return typeof current === "string" && current ? current : undefined;
 }
 
 async function register(manifestPath: string | undefined, options: CliOptions): Promise<void> {
@@ -1258,7 +1960,12 @@ function parseOptions(args: string[]): CliOptions {
     all: false,
     race: false,
     diagnose: false,
+    preflight: false,
+    agentSecurity: false,
+    online: false,
+    safe: false,
     daemonStartPolicy: "auto",
+    restartDaemonOnLaunch: false,
     listFilter: "all",
     docker: {}
   };
@@ -1291,10 +1998,28 @@ function parseOptions(args: string[]): CliOptions {
       options.race = true;
     } else if (arg === "--diagnose") {
       options.diagnose = true;
+    } else if (arg === "--preflight") {
+      options.preflight = true;
+    } else if (arg === "--agent-security") {
+      options.agentSecurity = true;
+    } else if (arg === "--online") {
+      options.online = true;
+    } else if (arg === "--safe") {
+      options.safe = true;
+    } else if (arg === "--issue") {
+      options.repairIssue = requiredArg(args[++index], "--issue");
+    } else if (arg === "--action") {
+      options.repairAction = requiredArg(args[++index], "--action");
+    } else if (arg === "--apply") {
+      options.repairPreviewId = requiredArg(args[++index], "--apply");
+    } else if (arg === "--operation") {
+      options.repairOperationId = requiredArg(args[++index], "--operation");
     } else if (arg === "--no-daemon-start") {
       options.daemonStartPolicy = "never";
     } else if (arg === "--daemon-start-policy") {
       options.daemonStartPolicy = requiredDaemonStartPolicy(requiredArg(args[++index], "--daemon-start-policy"));
+    } else if (arg === "--restart-daemon") {
+      options.restartDaemonOnLaunch = true;
     } else if (arg === "--running") {
       setListFilter(options, "running");
     } else if (arg === "--active") {
@@ -1325,6 +2050,8 @@ function parseOptions(args: string[]): CliOptions {
       options.profile = requiredArg(args[++index], "--profile");
     } else if (arg === "--answers") {
       options.answersPath = requiredArg(args[++index], "--answers");
+    } else if (arg === "--agent-config") {
+      options.agentConfigPath = requiredArg(args[++index], "--agent-config");
     } else if (arg === "--service") {
       options.docker.service = requiredArg(args[++index], "--service");
     } else if (arg === "--target-port") {
@@ -1559,6 +2286,7 @@ With an app id, starts that registered app through the running Relaybase daemon.
 
 Options:
   --plan                         Print the bundled command plan without launching the TUI
+  --restart-daemon              Safely restart the daemon before launching the TUI
   --no-daemon-start              Do not auto-start the Relaybase daemon before launching the TUI
   --daemon-start-policy <mode>   auto or never
 `);
@@ -1572,6 +2300,17 @@ Usage:
   relaybase ${topic} <app-id> [--port <number>] [--host <host>] [--state-dir <path>]
 
 ${topic} calls the running Relaybase daemon and requires the local mutation token.
+`);
+    return;
+  }
+
+  if (topic === "daemon") {
+    console.log(`Relaybase daemon controls
+
+Usage:
+  relaybase daemon restart [--json]
+
+Safely quiesces active work, stops daemon-owned apps, starts a distinct authenticated daemon instance, and restores previously running apps. Active Agent, lifecycle, or package work blocks restart.
 `);
     return;
   }
@@ -1598,6 +2337,43 @@ Explicitly repairs the source-checkout command prefix with npm link, then remove
 Options:
   --plan                         Print the exact repair plan without changing anything
   --diagnose                     Inspect command visibility and target without changing anything
+`);
+    return;
+  }
+
+  if (topic === "repair") {
+    console.log(`Relaybase repair
+
+Usage:
+  relaybase repair [--agent-security] [--online] [--json]
+  relaybase repair --agent-security --issue <code>
+  relaybase repair --agent-security --action <action-id> --plan
+  relaybase repair --agent-security --action <action-id> --yes
+  relaybase repair --agent-security --safe --plan
+  relaybase repair --agent-security --safe --yes
+  relaybase repair --agent-security --apply <preview-id> --yes
+  relaybase repair --operation <operation-id> [--json]
+
+Runs the daemon-owned repair doctor. The initial repair registry contains Agent security. Diagnosis is local-only unless --online explicitly permits provider validation. Mutations are bound to a short-lived preview and require --yes outside the interactive TTY flow.
+
+Options:
+  --agent-security               Select the Agent credential-security doctor
+  --online                       Permit an explicit provider validation request
+  --issue <code>                 Filter diagnosis and action choices to one finding
+  --action <action-id>           Preview or apply one daemon-registered repair
+  --safe                         Preview or apply currently applicable safe-local repairs
+  --apply <preview-id>           Apply an existing bound preview; requires --yes
+  --operation <operation-id>     Resolve a durable repair receipt
+  --plan                         Print a bound preview without applying it
+  --yes                          Authorize the exact preview non-interactively
+  --json                         Emit one stable JSON document and never prompt
+
+Exit codes:
+  0 healthy or verified
+  1 transport, authentication, or execution failure
+  2 findings remain or confirmation is required
+  3 manual or provider-owned action is required
+  4 preview or state binding is stale
 `);
     return;
   }
@@ -1642,6 +2418,7 @@ Usage:
 Launches the Go Bubble Tea TUI as a daemon client. By default, the Node bridge starts the Relaybase daemon first when it is not reachable.
 
 Options:
+  --restart-daemon              Safely restart the daemon before launching the TUI
   --no-daemon-start              Do not auto-start the Relaybase daemon before launching the TUI
   --daemon-start-policy <mode>   auto or never
 
@@ -1659,8 +2436,19 @@ Binary resolution order:
     console.log(`Relaybase Agent
 
 Usage:
+  relaybase agent config status [--json]
+  relaybase agent config reload [--json]
+  relaybase agent provider status [--json]
+  relaybase agent provider connect [--no-browser] [--json]
+  relaybase agent provider replace [--no-browser] [--json]
+  relaybase agent provider validate [--json]
+  relaybase agent provider migrate --yes [--json]
+  relaybase agent provider cleanup-legacy [--yes] [--json]
+  relaybase agent provider disconnect --yes [--json]
+  relaybase agent provider revoke [--yes] [--json]
   relaybase agent smoke-openrouter [--json]
-  relaybase agent live-acceptance [--json]
+  relaybase agent live-correctness [--json]
+  relaybase agent live-acceptance [--json]  Compatibility alias for live-correctness.
   relaybase agent live-command-matrix [--json]
   relaybase agent live-folder-start [--json]
   relaybase agent threads list [--json]
@@ -1672,11 +2460,13 @@ Usage:
   relaybase agent threads clear <session-id> [--json]
   relaybase agent threads export <session-id> [--markdown|--json]
 
-Runs a live OpenRouter smoke through the daemon Agent Gateway, Operator Agent runtime, and OpenAI Agents SDK TypeScript Chat Completions path.
-Requires OPENROUTER_API_KEY and RELAYBASE_AGENT_MODEL in the daemon/CLI environment.
-The live-acceptance command runs the stricter RA013 daemon/TUI/setup acceptance flow with exact google/gemini-3.1-flash-lite.
-The live-command-matrix command runs the AGENT-TUI-MATRIX-006 diagnostic, safety, acceptance, and artifact gate with exact google/gemini-3.1-flash-lite.
-The live-folder-start command runs the AGENT-FOLDER-START-006 natural-language setup/register/start loop with exact google/gemini-3.1-flash-lite.
+Config and provider commands use the authenticated daemon API. Connect and replace use a daemon-owned one-use OpenRouter PKCE callback. Disconnect is local-only; revoke remains unconfirmed unless OpenRouter confirms it.
+For diagnosis and recovery, use relaybase repair --agent-security. Existing provider management commands remain compatible.
+Use --agent-config <path> at daemon/TUI launch to select one external non-secret Agent configuration file. Shell-only changes still require restart.
+The smoke command runs a live OpenRouter request through the Agent Gateway and remains an explicit legacy environment-backed diagnostic.
+The live-correctness command runs the independent daemon/filesystem/process/route correctness flow with the model selected by RELAYBASE_AGENT_MODEL. It enforces the configured eight-cent phase ceiling. live-acceptance remains a compatibility alias.
+The live-command-matrix command runs the AGENT-TUI-MATRIX-006 diagnostic, safety, acceptance, and artifact gate with the selected model.
+The live-folder-start command runs the AGENT-FOLDER-START-006 natural-language setup/register/start loop with the selected model.
 Thread commands call the daemon Agent Gateway session API; they do not read or mutate the SQLite store directly.
 `);
     return;
@@ -1686,6 +2476,7 @@ Thread commands call the daemon Agent Gateway session API; they do not read or m
 
 Commands:
   agent                        Agent Gateway diagnostics and live provider smokes
+  repair                       Diagnose and repair registered Relaybase domains
   start                        Launch Relaybase daemon/TUI, or start an app when given <app-id>
   check                        Diagnose local Relaybase, TUI, project, and app state
   diagnose-token               Compare client and daemon state identity without printing tokens
@@ -1700,6 +2491,7 @@ Advanced:
   repair-prefix                 Diagnose or explicitly repair the source-checkout command prefix
   serve                         Start the localhost hub daemon
   mcp                           Run Relaybase as a stdio MCP server
+  daemon restart                Safely restart the Relaybase daemon
   register <folder|manifest>    Preview, register, and run one bounded launch proof
   stop <app-id>                  Stop an app through the daemon
   restart <app-id>               Restart an app through the daemon
@@ -1711,6 +2503,7 @@ Options:
   --host <host>                  Hub host, default 127.0.0.1
   --state-dir <path>             Relaybase state directory
   --cwd <path>                   Project root, default current directory
+  --agent-config <path>          Explicit Agent configuration source checked at each new run
   --json                         Print machine-readable output
   --verbose                      Include expanded detail for supported commands
 

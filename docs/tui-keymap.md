@@ -2,6 +2,8 @@
 
 This is the required keymap for the Relaybase Bubble Tea TUI.
 
+For task-oriented usage, start with [Operator console](operator-console.md). This document is the complete keyboard, command, target-resolution, and confirmation contract.
+
 ## Global Keys
 
 | Key             | Behavior                                                                                                                                 |
@@ -24,6 +26,7 @@ This is the required keymap for the Relaybase Bubble Tea TUI.
 | Ctrl+O          | Open the contextual menu as the guaranteed fallback.                                                                                     |
 | Ctrl+R          | From pane navigation, open a confirmation to stop the selected pane's app/component.                                                     |
 | Ctrl+G          | Toggle the Agent output surface; use the dedicated Agent modal when the terminal cannot fit the right-side pane.                         |
+| F6              | Open the full-width Agent Chat page; F6 or Esc restores the exact prior workspace state.                                                 |
 | Ctrl+D          | Toggle the diagnostics drawer when diagnostics are present.                                                                              |
 | `?`             | Open help.                                                                                                                               |
 | `q`             | Start the quit flow.                                                                                                                     |
@@ -56,11 +59,11 @@ On the dashboard, PageUp and PageDown move between pane pages. This is how 9+ pa
 
 Inside a focused pane, PageUp and PageDown scroll logs. PageUp may request older logs from the daemon when the current pane has older scrollback available. They must not start lifecycle actions, dismiss modal state, or bypass confirmation gates.
 
-In diagnostics, setup, confirmation, stopped-app inventory, and the Agent surface, Up/Down scroll by line, PageUp/PageDown scroll by a viewport page, and Home/End move to the beginning/end. Searchable help owns those keys for its result list as described above. The composer remains pinned while the active surface scrolls.
+In diagnostics, setup, confirmation, and stopped-app inventory, Up/Down scroll by line, PageUp/PageDown scroll by a viewport page, and Home/End move to the beginning/end. In the Agent transcript, Up/Down select tool traces, Enter or Space expands the selected trace, Ctrl+E toggles all tool details, and PageUp/PageDown/Home/End scroll the transcript. Searchable help owns those keys for its result list as described above. The composer remains pinned while the active surface scrolls.
 
 At supported terminal sizes, the Agent output pane occupies the rightmost one-third of the terminal above the composer, including its left divider. App panes retain the other two-thirds. The composer remains full width and independently grows from one to three visible input rows. Collapsing the Agent pane returns its width to the app workspace without changing the selected app pane or moving the composer.
 
-The dock is used only when the Agent side can retain at least 36 columns and the app workspace at least 80 columns. At smaller usable widths, Ctrl+G opens a dedicated Agent modal instead of compressing either surface. Growing or shrinking the terminal transfers an open Agent surface between the dock and modal while preserving the selected pane, valid dashboard page, Agent scroll/follow state, and prior keyboard focus. Esc returns focus to the surface that owned input before the Agent pane; Ctrl+G closes either presentation. The Composer header keeps the visible `[Ctrl+G agent pane]` pointer in both layouts.
+The dock is used only when the Agent side can retain at least 36 columns and the app workspace at least 80 columns. At smaller usable widths, Ctrl+G opens a dedicated Agent modal instead of compressing either surface. Growing or shrinking the terminal transfers an open Agent surface between the dock and modal while preserving the selected pane, valid dashboard page, Agent scroll/follow state, and prior keyboard focus. Esc returns focus to the surface that owned input before the Agent pane; Ctrl+G closes either presentation. F6 opens the full Agent Chat page without destroying app panes or replacing the Composer; its transcript scroll is independent of the dock. The Composer header keeps the visible `[Ctrl+G agent pane]` pointer in the workspace and `[F6 workspace]` on the full page.
 
 ## Contextual Menu
 
@@ -113,6 +116,9 @@ Implemented deterministic slash commands:
 - `/help`
 - `/manage`
 - `/usage`
+- `/settings`
+- `/settings agent`
+- `/settings agent security`
 - `/thread list`
 - `/thread new [title]`
 - `/thread switch <id|number>`
@@ -123,6 +129,7 @@ Implemented deterministic slash commands:
 - `/daemon status`
 - `/daemon repair`
 - `/daemon retry`
+- `/daemon restart`
 - `/create-package {'Registered App','Other App'} 'package-name'`
 - `/packages`
 - `/launch-package <package-name>`
@@ -147,7 +154,7 @@ Implemented deterministic slash commands:
 - `/component group <app> <groupId>`
 - `/component label <app> <label>`
 
-Pane targets may use `current`, the exact pane/app label, or the visible pane number on the current page. Targeted start, launch, stop, restart, log export, package launch/delete/run retry/run abort, setup apply, manifest registration, project open/prove, and safe manifest patch commands require a confirmation preview unless the command includes `--confirm`. Bare `/start` is read-only and opens the chooser. `/configure <path> --dry-run`, `/repair <app-or-path>`, and `/manifest inspect <app-or-path>` are read-only daemon requests and do not require confirmation. The preview shows action, target, risk, and expected result. Ambiguous targets ask the user to choose a more specific app id, group id, or pane id; unknown targets return an actionable error.
+Pane targets may use `current`, the exact pane/app label, or the visible pane number on the current page. Targeted start, launch, stop, app restart, daemon restart, log export, package launch/delete/run retry/run abort, setup apply, manifest registration, project open/prove, and safe manifest patch commands require a confirmation preview unless the command includes `--confirm`. Bare `/start` is read-only and opens the chooser. `/configure <path> --dry-run`, `/repair <app-or-path>`, and `/manifest inspect <app-or-path>` are read-only daemon requests and do not require confirmation. The preview shows action, target, risk, and expected result. Ambiguous targets ask the user to choose a more specific app id, group id, or pane id; unknown targets return an actionable error.
 
 `/manage` and bare `/start` reuse the same `Name` / shortened `Project` / `Status` table but enter it in different modes. Bare `/start` is the fast picker: Enter opens a running app's monitoring pane or reviews a stopped app's confirmation-gated start. `/manage` opens an action view for the selected stable app id with open, start, stop, restart, rename, copy-route, redacted log-export, repair, unregister, and final **Add to package** choices. Clipped action lists show their visible range and above/below counts; Up/Down, wheel, PageUp/PageDown, Home, and End keep the selection visible. Every disabled choice includes a text reason, and color is never the only status signal. `R` refreshes daemon state; Esc returns from nested editors or pickers to actions, from actions to the table, and then closes the window. Selection and drafts survive refresh, resize, cancellation, and retry while their stable IDs still exist.
 
@@ -167,9 +174,15 @@ Thread commands call daemon Agent Gateway session APIs. The TUI does not store c
 
 Daemon repair commands use the local launch bridge created by `relaybase tui`. `/daemon repair`, `/daemon retry`, `fix daemon`, `retry daemon`, and `start relaybase daemon` may ask the bridge to start or reconnect the Relaybase control-plane daemon after confirmation. They do not start user apps. If the TUI was launched directly as `relaybase-tui` without the Node bridge, these commands stay local and print the safe recovery path: relaunch with `relaybase tui`, or start `relaybase serve` in another terminal with the current state directory and port, then retry from the TUI.
 
+`/daemon restart` and `restart relaybase daemon` use the same launch bridge and require confirmation. The bridge performs the preview/quiesce/replace/verify/restore workflow; the Go TUI contains no daemon or app lifecycle implementation. Active Agent, lifecycle, or package work blocks the restart. The result names the old and new daemon instance IDs, reports every owned-app restore outcome, reconnects daemon and Agent streams, and links the redacted restart report.
+
+`/settings` opens a centered transient settings modal with General, Appearance, Interaction, and Agent categories. Up/Down or the mouse selects a row; Enter opens, cycles, toggles, or edits it; Esc/Left goes back; `q` closes the modal. General includes the confirmation-gated daemon restart action. Appearance and Interaction persist only local TUI preferences. `/settings agent` opens the dedicated daemon-backed Agent page directly. It exposes Status, Provider, Security and credentials, Configuration, Safety and permissions, Execution, Budgets, and Recovery.
+
+`/settings agent security` opens Security and credentials directly. Provider retains initial OAuth PKCE connect and replace plus a Manage security link. Security and credentials owns local diagnosis, safe status, provider validation, DPAPI/ACL status, migration, exact legacy-assignment cleanup, local disconnect, provider key-management guidance, findings, bound previews, destructive confirmation phrases, verified results, and durable receipt recovery. It never renders a raw key, ciphertext, raw source path, or provider response body. Settings and repair work remain static; only authoritative active model processing drives the thinking shimmer.
+
 ## Natural Assistant Input
 
-Ordinary dashboard text first checks deterministic assistant phrases. This mode is local-only and uses no LLM, remote provider, or assistant-side network call while parsing. Supported phrases include launch/start/run, stop/shut down, restart/reboot/reload, show/tail/view logs, export logs, pin/unpin pane, pane color, page next/previous, diagnostics, daemon status, daemon repair/retry, and help. Supported deterministic phrases map to the same target resolver, confirmation gates, and daemon API calls as slash commands; unsupported text may be sent to the daemon Agent Gateway only when that gateway is explicitly enabled.
+Ordinary dashboard text first checks deterministic assistant phrases. This mode is local-only and uses no LLM, remote provider, or assistant-side network call while parsing. Supported phrases include launch/start/run, stop/shut down, app restart/reboot/reload, show/tail/view logs, export logs, pin/unpin pane, pane color, page next/previous, diagnostics, daemon status, daemon repair/retry/restart, settings, Agent settings, and help. Supported deterministic phrases map to the same target resolver, confirmation gates, and daemon API calls as slash commands; unsupported text may be sent to the daemon Agent Gateway only when that gateway is explicitly enabled.
 
 Path-rich setup phrases are treated as daemon Agent Gateway setup input instead of local lifecycle targets when the Operator Agent is enabled. Examples include `go start the server in C:\path\to\app`, `start project .\apps\notes`, `configure <path> and start it`, `add <path>`, `add <path> using npm run dev`, `use npm run dev in <path>`, `open <path>`, and `repair <path>`. The TUI strips common prompt artifacts such as a trailing PowerShell `>` and preserves Windows paths, relative paths, quoted paths, and `current folder`/`cwd` wording. If the daemon or Agent Gateway is unavailable, the TUI shows the exact `relaybase serve ...` recovery command when relevant plus a slash fallback such as `/configure <path> --dry-run`, `/add <path> using npm run dev`, `/open <path>`, or `/repair <path>`.
 

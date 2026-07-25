@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -618,7 +619,7 @@ func TestAgentGatewayClientMethodsUseDaemonRoutes(t *testing.T) {
 		case "POST /__hub/api/agent/approvals/approval-1/reject":
 			_, _ = w.Write([]byte(`{"agent":{"approval":{"id":"approval-1","sessionId":"session-1","runId":"run-1","status":"rejected","action":"start_app","target":"notes","risk":"medium"}}}`))
 		case "GET /__hub/api/agent/diagnostics":
-			_, _ = w.Write([]byte(`{"agent":{"diagnostics":[{"id":"agent.key","severity":"warning","code":"OPENROUTER_API_KEY_MISSING","message":"Set OPENROUTER_API_KEY.","checkedAt":"2026-06-02T00:00:00Z"}]}}`))
+			_, _ = w.Write([]byte(`{"agent":{"diagnostics":[{"id":"agent.key","severity":"warning","code":"AGENT_CREDENTIAL_MISSING","message":"Connect OpenRouter.","checkedAt":"2026-06-02T00:00:00Z"}]}}`))
 		case "GET /__hub/api/agent/sessions/session-1/events":
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = w.Write([]byte("id: event-2\n"))
@@ -636,7 +637,10 @@ func TestAgentGatewayClientMethodsUseDaemonRoutes(t *testing.T) {
 	if err != nil || !config.Enabled || config.Provider.ModelSlug != "openrouter/test" {
 		t.Fatalf("GetAgentConfig result=%#v err=%v", config, err)
 	}
-	updated, err := client.UpdateAgentConfig(ctx, AgentConfigUpdate{Provider: &AgentProviderConfigUpdate{ModelSlug: "openrouter/new"}})
+	modelSlug := "openrouter/new"
+	updated, err := client.UpdateAgentConfig(ctx, AgentConfigUpdateRequest{
+		Update: AgentConfigUpdate{Provider: &AgentProviderConfigUpdate{ModelSlug: &modelSlug}},
+	})
 	if err != nil || updated.Provider.ModelSlug != "openrouter/new" {
 		t.Fatalf("UpdateAgentConfig result=%#v err=%v", updated, err)
 	}
@@ -685,7 +689,7 @@ func TestAgentGatewayClientMethodsUseDaemonRoutes(t *testing.T) {
 		t.Fatalf("RejectAgentToolCall result=%#v err=%v", rejected, err)
 	}
 	diagnostics, err := client.GetAgentDiagnostics(ctx)
-	if err != nil || len(diagnostics) != 1 || diagnostics[0].Code != "OPENROUTER_API_KEY_MISSING" {
+	if err != nil || len(diagnostics) != 1 || diagnostics[0].Code != "AGENT_CREDENTIAL_MISSING" {
 		t.Fatalf("GetAgentDiagnostics result=%#v err=%v", diagnostics, err)
 	}
 	stream, err := client.StreamAgentSessionEvents(ctx, "session-1")
@@ -722,5 +726,193 @@ func TestAgentGatewayClientMethodsUseDaemonRoutes(t *testing.T) {
 		if request != expected[index] {
 			t.Fatalf("request %d: expected %s, got %s", index, expected[index], request)
 		}
+	}
+}
+
+func TestAgentProviderClientRoutesPreserveBrowserAndConfirmationBindings(t *testing.T) {
+	requests := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Fatalf("missing authorization header for %s", r.URL.Path)
+		}
+		var body map[string]any
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/__hub/api/agent/provider/openrouter/connect":
+			if body["openBrowser"] != true {
+				t.Fatalf("connect must request daemon-owned browser launch: %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"agent":{"provider":{"attempt":{"attemptId":"attempt-1","status":"waiting_for_browser","browserOpen":"opened"}}}}`))
+		case "/__hub/api/agent/provider/openrouter/validate":
+			_, _ = w.Write([]byte(`{"agent":{"provider":{"validated":true,"config":{"provider":{"provider":"openrouter","apiKeySource":{"type":"managed_windows_dpapi","configured":true},"remoteModelEnabled":true}}}}}`))
+		case "/__hub/api/agent/provider/openrouter/legacy-removal/preview":
+			_, _ = w.Write([]byte(`{"agent":{"provider":{"legacyRemoval":{"previewId":"preview-1","sourceLabel":".env","keyName":"OPENROUTER_API_KEY","lineNumber":4,"changedLineCount":1}}}}`))
+		case "/__hub/api/agent/provider/openrouter/legacy-removal/apply":
+			if body["confirm"] != "remove_legacy_external_credential" || body["previewId"] != "preview-1" {
+				t.Fatalf("legacy removal binding mismatch: %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"agent":{"provider":{"legacyRemoval":{"removed":true,"sourceLabel":".env","changedLineCount":1,"reload":{"status":"applied"},"config":{"provider":{"provider":"openrouter","apiKeySource":{"type":"managed_windows_dpapi","configured":true},"remoteModelEnabled":true}}}}}}`))
+		default:
+			t.Fatalf("unexpected provider route: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "test-token", server.Client())
+	ctx := context.Background()
+	attempt, err := client.StartAgentProviderConnection(ctx, "connect")
+	if err != nil || attempt.BrowserOpen != "opened" {
+		t.Fatalf("connect result=%#v err=%v", attempt, err)
+	}
+	validated, err := client.ValidateAgentProvider(ctx)
+	if err != nil || !validated.Validated {
+		t.Fatalf("validate result=%#v err=%v", validated, err)
+	}
+	preview, err := client.PreviewLegacyAgentCredentialRemoval(ctx)
+	if err != nil || preview.PreviewID != "preview-1" || preview.LineNumber != 4 {
+		t.Fatalf("preview result=%#v err=%v", preview, err)
+	}
+	applied, err := client.ApplyLegacyAgentCredentialRemoval(ctx, preview.PreviewID)
+	if err != nil || !applied.Removed {
+		t.Fatalf("apply result=%#v err=%v", applied, err)
+	}
+	expected := []string{
+		"POST /__hub/api/agent/provider/openrouter/connect",
+		"POST /__hub/api/agent/provider/openrouter/validate",
+		"POST /__hub/api/agent/provider/openrouter/legacy-removal/preview",
+		"POST /__hub/api/agent/provider/openrouter/legacy-removal/apply",
+	}
+	if !reflect.DeepEqual(requests, expected) {
+		t.Fatalf("unexpected provider routes: %#v", requests)
+	}
+}
+
+func TestAgentSecurityClientUsesBoundDaemonRepairRoutesWithoutSecrets(t *testing.T) {
+	requests := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Fatalf("missing authorization header for %s", r.URL.Path)
+		}
+		var body map[string]any
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+		}
+		for key, value := range body {
+			if strings.Contains(strings.ToLower(key), "api_key") || strings.Contains(fmt.Sprint(value), "sk-or-") {
+				t.Fatalf("secret-shaped repair payload: %#v", body)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST /__hub/api/agent/security/diagnose":
+			if body["online"] != false {
+				t.Fatalf("default diagnosis must remain local-only: %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"agent":{"security":{"scope":"agent-security","state":"blocked","healthy":false,"checkedAt":"2026-07-24T00:00:00Z","online":false,"configRevisionId":"revision-1","findings":[{"id":"finding-1","code":"AGENT_CREDENTIAL_MISSING","severity":"error","state":"blocked","title":"Credential missing","message":"Connect in Provider.","repairability":"manual","recommendedActionId":"route_to_provider_connect","requiresNetwork":false,"requiresRestart":false,"reversible":true}]}}}`))
+		case "POST /__hub/api/agent/security/repair/preview":
+			_, _ = w.Write([]byte(`{"agent":{"security":{"repair":{"preview":{"previewId":"preview-1","scope":"agent-security","createdAt":"2026-07-24T00:00:00Z","expiresAt":"2026-07-24T00:10:00Z","findings":[],"actions":[{"id":"refresh_managed_credential_state","title":"Refresh","riskClass":"safe_local","changes":["Refresh safe state."],"preserves":["Credential."],"requiresNetwork":false,"requiresRestart":false,"reversible":true}],"confirmation":{"required":true,"value":"apply_agent_security_repair"},"expectedConfigRevision":"revision-1"}}}}}`))
+		case "POST /__hub/api/agent/security/repair/apply":
+			if body["previewId"] != "preview-1" || body["idempotencyKey"] != "idempotency-1" || body["confirmation"] != "apply_agent_security_repair" {
+				t.Fatalf("repair apply binding mismatch: %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"agent":{"security":{"repair":{"operation":{"operationId":"operation-1","previewId":"preview-1","state":"completed","outcome":"verified","startedAt":"2026-07-24T00:00:01Z","completedAt":"2026-07-24T00:00:02Z","appliedActionIds":["refresh_managed_credential_state"],"remainingIssueCodes":[],"requiresRestart":false,"requiresExternalAction":false}}}}}`))
+		case "GET /__hub/api/agent/security/repair/operations/operation-1":
+			_, _ = w.Write([]byte(`{"agent":{"security":{"repair":{"operation":{"operationId":"operation-1","previewId":"preview-1","state":"completed","outcome":"verified","startedAt":"2026-07-24T00:00:01Z","appliedActionIds":["refresh_managed_credential_state"],"remainingIssueCodes":[],"requiresRestart":false,"requiresExternalAction":false}}}}}`))
+		case "GET /__hub/api/agent/security/repair/operations/latest":
+			_, _ = w.Write([]byte(`{"agent":{"security":{"repair":{"operation":{"operationId":"operation-1","previewId":"preview-1","state":"completed","outcome":"verified","startedAt":"2026-07-24T00:00:01Z","appliedActionIds":["refresh_managed_credential_state"],"remainingIssueCodes":[],"requiresRestart":false,"requiresExternalAction":false}}}}}`))
+		default:
+			t.Fatalf("unexpected security route: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "test-token", server.Client())
+	ctx := context.Background()
+	status, err := client.DiagnoseAgentSecurity(ctx, false)
+	if err != nil || status.Healthy || len(status.Findings) != 1 {
+		t.Fatalf("diagnosis result=%#v err=%v", status, err)
+	}
+	preview, err := client.PreviewAgentSecurityRepair(ctx, AgentSecurityRepairPreviewRequest{
+		ActionIDs: []string{"refresh_managed_credential_state"},
+	})
+	if err != nil || preview.PreviewID != "preview-1" {
+		t.Fatalf("preview result=%#v err=%v", preview, err)
+	}
+	operation, err := client.ApplyAgentSecurityRepair(ctx, preview.PreviewID, "idempotency-1", preview.Confirmation.Value)
+	if err != nil || operation.Outcome != "verified" {
+		t.Fatalf("apply result=%#v err=%v", operation, err)
+	}
+	resolved, err := client.GetAgentSecurityRepairOperation(ctx, operation.OperationID)
+	if err != nil || resolved.OperationID != operation.OperationID {
+		t.Fatalf("operation result=%#v err=%v", resolved, err)
+	}
+	latest, err := client.GetLatestAgentSecurityRepairOperation(ctx)
+	if err != nil || latest == nil || latest.OperationID != operation.OperationID {
+		t.Fatalf("latest operation result=%#v err=%v", latest, err)
+	}
+	expected := []string{
+		"POST /__hub/api/agent/security/diagnose",
+		"POST /__hub/api/agent/security/repair/preview",
+		"POST /__hub/api/agent/security/repair/apply",
+		"GET /__hub/api/agent/security/repair/operations/operation-1",
+		"GET /__hub/api/agent/security/repair/operations/latest",
+	}
+	if !reflect.DeepEqual(requests, expected) {
+		t.Fatalf("unexpected security routes: %#v", requests)
+	}
+}
+
+func TestUpdateAgentConfigPreservesExplicitEmptyValues(t *testing.T) {
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/__hub/api/agent/config" {
+			t.Fatalf("unexpected route: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"agent":{"config":{"enabled":true,"provider":{"provider":"openrouter","modelSlug":"","apiKeySource":{"type":"environment","envVar":"OPENROUTER_API_KEY","configured":false},"remoteModelEnabled":true},"toolAllowlist":[]}}}`))
+	}))
+	defer server.Close()
+
+	empty := ""
+	allowlist := []string{}
+	client := New(server.URL, "test-token", server.Client())
+	_, err := client.UpdateAgentConfig(context.Background(), AgentConfigUpdateRequest{
+		Update: AgentConfigUpdate{
+			Provider: &AgentProviderConfigUpdate{
+				ModelSlug:         &empty,
+				HTTPRefererEnvVar: &empty,
+				TitleEnvVar:       &empty,
+			},
+			ToolAllowlist: &allowlist,
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpdateAgentConfig returned error: %v", err)
+	}
+	updateBody, ok := requestBody["update"].(map[string]any)
+	if !ok {
+		t.Fatalf("config update wrapper missing from request: %#v", requestBody)
+	}
+	provider, ok := updateBody["provider"].(map[string]any)
+	if !ok {
+		t.Fatalf("provider update missing from request: %#v", requestBody)
+	}
+	for _, field := range []string{"modelSlug", "httpRefererEnvVar", "titleEnvVar"} {
+		if value, present := provider[field]; !present || value != "" {
+			t.Fatalf("expected explicit empty %s, got %#v", field, value)
+		}
+	}
+	if encoded, present := updateBody["toolAllowlist"]; !present {
+		t.Fatalf("explicit empty tool allowlist was omitted: %#v", requestBody)
+	} else if values, ok := encoded.([]any); !ok || len(values) != 0 {
+		t.Fatalf("expected empty tool allowlist array, got %#v", encoded)
 	}
 }

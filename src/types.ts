@@ -1,6 +1,6 @@
 export type AppProtocol = "http" | "http+ws" | "tcp";
 
-export type RuntimeStatus = "stopped" | "starting" | "running" | "stopping" | "errored" | "conflict";
+export type RuntimeStatus = "stopped" | "starting" | "running" | "stopping" | "degraded" | "errored" | "conflict";
 
 export type HealthStatus = "unknown" | "healthy" | "unhealthy";
 
@@ -36,6 +36,7 @@ export type LifecyclePhase =
   | "waiting_for_health"
   | "running"
   | "stopping"
+  | "degraded"
   | "cleanup_failed"
   | "stop_verification_failed"
   | "errored"
@@ -246,6 +247,15 @@ export interface ServerOptions {
   portRangeStart?: number;
   portRangeEnd?: number;
   stopPortOpenProbe?: (port: number, host: string) => Promise<boolean>;
+  agentEnvironment?: {
+    modelSource?: import("./agent/types.ts").AgentModelSource;
+    envFilePath?: string;
+    envFileFingerprint?: string;
+    envFileAppliedKeys?: string[];
+    envFileSkippedKeys?: string[];
+    envFileSourceKind?: "explicit_env_file" | "cwd_env_file";
+  };
+  agentRuntime?: import("./agent/runtime.ts").OperatorAgentRuntime;
 }
 
 export type ChildMcpRuntimeStatus = "stopped" | "starting" | "connected" | "draining" | "errored" | "restarting";

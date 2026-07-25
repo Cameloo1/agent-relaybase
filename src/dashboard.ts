@@ -28,7 +28,10 @@ export function dashboardInventory(apps: AppStatusView[]): DashboardAppView[] {
       ...(configuredPort === undefined ? {} : { configuredPort }),
       backendPortKind: configuredPort !== undefined ? "fixed" : assignedPort !== undefined ? "ephemeral" : "none",
       needsAttention:
-        app.runtime.status === "errored" || app.runtime.status === "conflict" || app.runtime.health === "unhealthy"
+        app.runtime.status === "errored" ||
+        app.runtime.status === "conflict" ||
+        app.runtime.status === "degraded" ||
+        app.runtime.health === "unhealthy"
     };
   });
 }

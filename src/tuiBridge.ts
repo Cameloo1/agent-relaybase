@@ -8,6 +8,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { discovery, ensureDaemon, type DaemonEnsureResult, type RelaybaseCommandOptions } from "./daemonLauncher.ts";
+import { restartDaemon, type DaemonRestartResult } from "./daemonRestartClient.ts";
 import { redactDiagnosticText } from "./redaction.ts";
 
 export interface TuiBridgeOptions {
@@ -17,6 +18,7 @@ export interface TuiBridgeOptions {
   cwd?: string;
   theme?: string;
   daemonStartPolicy?: "auto" | "never";
+  restartDaemonOnLaunch?: boolean;
   env?: NodeJS.ProcessEnv;
   packageRoot?: string;
   platform?: NodeJS.Platform;
@@ -63,6 +65,7 @@ export interface TuiBridgeDependencies {
   ) => Promise<string | undefined>;
   checkDaemon?: (baseURL: string) => Promise<DaemonReachability>;
   ensureDaemon?: (options: RelaybaseCommandOptions, allowStart: boolean) => Promise<DaemonEnsureResult>;
+  restartDaemon?: (options: RelaybaseCommandOptions) => Promise<DaemonRestartResult>;
   spawn?: SpawnTui;
   stderr?: Pick<NodeJS.WriteStream, "write">;
 }
@@ -234,6 +237,14 @@ export async function runRelaybaseTui(
     return 1;
   }
 
+  if (options.restartDaemonOnLaunch) {
+    const restart = await (dependencies.restartDaemon ?? restartDaemon)(daemonLaunchOptions(options));
+    if (!restart.restarted && restart.code !== "daemon_started") {
+      stderr.write(formatDaemonRestartDiagnostic(restart));
+      return 1;
+    }
+  }
+
   const discoveryResult = dependencies.checkDaemon ? undefined : await discovery(daemonLaunchOptions(options));
   const daemon = dependencies.checkDaemon
     ? await dependencies.checkDaemon(baseURL)
@@ -392,6 +403,18 @@ export function formatDaemonBootstrapDiagnostic(baseURL: string, result: DaemonE
     .concat("\n");
 }
 
+export function formatDaemonRestartDiagnostic(result: DaemonRestartResult): string {
+  return [
+    `relaybase: daemon restart did not complete (${result.code}).`,
+    result.error ? `Detail: ${result.error}` : undefined,
+    `Next action: ${result.userAction}`,
+    result.reportPath ? `Restart report: ${result.reportPath}` : undefined
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n")
+    .concat("\n");
+}
+
 export function formatTuiLaunchFailure(
   binaryPath: string | undefined,
   error: unknown,
@@ -485,7 +508,7 @@ function forwardPipedTuiOutput(child: ChildProcess, stdio: "inherit" | ["ignore"
 
 async function startTuiBootstrapServer(
   options: TuiBridgeOptions,
-  dependencies: Pick<TuiBridgeDependencies, "ensureDaemon"> = {}
+  dependencies: Pick<TuiBridgeDependencies, "ensureDaemon" | "restartDaemon"> = {}
 ): Promise<TuiBootstrapServer> {
   const token = randomBytes(32).toString("hex");
   const server = http.createServer((request, response) => {
@@ -521,7 +544,7 @@ async function handleTuiBootstrapRequest(
   token: string,
   request: http.IncomingMessage,
   response: http.ServerResponse,
-  dependencies: Pick<TuiBridgeDependencies, "ensureDaemon">
+  dependencies: Pick<TuiBridgeDependencies, "ensureDaemon" | "restartDaemon">
 ): Promise<void> {
   if (request.headers.authorization !== `Bearer ${token}`) {
     sendBootstrapJson(response, 401, {
@@ -585,12 +608,19 @@ async function handleTuiBootstrapRequest(
     return;
   }
 
+  if (request.method === "POST" && pathname === "/daemon/restart") {
+    const result = await (dependencies.restartDaemon ?? restartDaemon)(daemonLaunchOptions(options));
+    sendBootstrapJson(response, 200, { daemon: result });
+    return;
+  }
+
   sendBootstrapJson(response, 404, {
     daemon: {
       reachable: false,
       started: false,
       code: "daemon_not_running",
-      userAction: "Supported bootstrap endpoints are GET /daemon/status and POST /daemon/ensure.",
+      userAction:
+        "Supported bootstrap endpoints are GET /daemon/status, POST /daemon/ensure, and POST /daemon/restart.",
       error: "Unknown bootstrap route."
     }
   });

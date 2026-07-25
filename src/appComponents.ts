@@ -91,6 +91,10 @@ function componentStatusForState(state: AppState): AppComponentStatus {
     return "failed";
   }
 
+  if (state.runtime.status === "degraded") {
+    return "degraded";
+  }
+
   if (state.runtime.status === "starting" || state.readiness.state === "starting") {
     return "starting";
   }
