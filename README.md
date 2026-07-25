@@ -127,6 +127,8 @@ These are the main controls:
 - local input/history preferences;
 - daemon-owned Agent provider, tool, approval, execution, and budget settings.
 
+Appearance includes Automatic, Relaybase Light, Relaybase Dark, Terminal Green, Code Blue, Pure Black, Amber CRT, Arctic Slate, and Plum Night. Select one from **Settings → Appearance** or use `/theme <name>`; the complete IDs and examples are in the [operator console manual](docs/operator-console.md#built-in-themes). Theme changes affect presentation colors while success, warning, and error statuses retain their established semantic colors.
+
 Local interface preferences are stored under the Relaybase state directory. Agent settings use the authenticated daemon API. Raw provider keys are never accepted in the settings UI.
 
 See the complete [operator console manual](docs/operator-console.md).

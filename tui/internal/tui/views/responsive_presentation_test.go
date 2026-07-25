@@ -201,6 +201,33 @@ func TestSettingsModalKeepsMinimumHeightEditFlowVisible(t *testing.T) {
 	}
 }
 
+func TestSettingsModalRendersEveryThemeNameWithoutTruncation(t *testing.T) {
+	for _, option := range styles.ThemeOptions() {
+		t.Run(option.ID, func(t *testing.T) {
+			theme, _ := styles.ResolveTheme(option.ID, func(string) string { return "" })
+			data := responsivePresentationShellData(80, 24, 1)
+			data.Settings = &SettingsData{
+				Title:      "Appearance",
+				Breadcrumb: "Settings / Appearance",
+				Rows: []SettingsRowData{
+					{Index: 0, Label: "Theme", Value: option.Name, Hint: "Cycle the built-in TUI color themes."},
+				},
+				Selected:  0,
+				TotalRows: 1,
+			}
+
+			frame := BuildShell(styles.New(theme), data)
+			plain := ansiEscapePattern.ReplaceAllString(frame.Text, "")
+			if !strings.Contains(plain, option.Name) {
+				t.Fatalf("Settings modal truncated theme name %q:\n%s", option.Name, plain)
+			}
+			if lipgloss.Width(frame.Text) != data.Width || lipgloss.Height(frame.Text) != data.Height {
+				t.Fatalf("theme %q changed frame geometry: %dx%d", option.ID, lipgloss.Width(frame.Text), lipgloss.Height(frame.Text))
+			}
+		})
+	}
+}
+
 func TestMinimumHeightThreeRowComposerKeepsPaneLogAndExactFrame(t *testing.T) {
 	theme, _ := styles.ResolveTheme("light", func(string) string { return "" })
 	style := styles.New(theme)

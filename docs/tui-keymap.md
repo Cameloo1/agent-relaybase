@@ -112,7 +112,7 @@ Implemented deterministic slash commands:
 - `/pane color <pane> <color>`
 - `/pin <pane>`
 - `/unpin <pane>`
-- `/theme <light|dark|auto>`
+- `/theme <name>`
 - `/help`
 - `/manage`
 - `/usage`
@@ -153,6 +153,8 @@ Implemented deterministic slash commands:
 - `/component role <app> <role>`
 - `/component group <app> <groupId>`
 - `/component label <app> <label>`
+
+Theme names are `auto`, `light`, `dark`, `terminal-green`, `code-blue`, `pure-black`, `amber-crt`, `arctic-slate`, and `plum-night`. Theme selection changes presentation colors only; status colors retain their existing semantic meanings.
 
 Pane targets may use `current`, the exact pane/app label, or the visible pane number on the current page. Targeted start, launch, stop, app restart, daemon restart, log export, package launch/delete/run retry/run abort, setup apply, manifest registration, project open/prove, and safe manifest patch commands require a confirmation preview unless the command includes `--confirm`. Bare `/start` is read-only and opens the chooser. `/configure <path> --dry-run`, `/repair <app-or-path>`, and `/manifest inspect <app-or-path>` are read-only daemon requests and do not require confirmation. The preview shows action, target, risk, and expected result. Ambiguous targets ask the user to choose a more specific app id, group id, or pane id; unknown targets return an actionable error.
 

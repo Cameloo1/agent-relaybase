@@ -4,6 +4,8 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"github.com/cameloo/relaybase/tui/internal/tui/styles"
 )
 
 // CommandDescriptor is the discoverability contract shared by help and slash
@@ -54,7 +56,7 @@ var commandCatalog = []CommandDescriptor{
 	descriptor(KindUsage, "/usage", "/usage", "agent", false, "Show model, token, and cost usage for the last request and active thread.", []string{"/usage"}, []string{"/usage"}, []string{"model", "tokens", "cost", "spend", "credits", "billing"}),
 	descriptor(KindSettings, "/settings", "/settings", "settings", false, "Open categorized Relaybase settings, including dedicated Agent security management.", []string{"/settings", "/settings agent", "/settings agent security"}, []string{"/settings agent security"}, []string{"preferences", "agent", "configuration", "credentials", "security", "repair"}),
 	descriptor(KindUnpin, "/unpin", "/unpin ", "layout", false, "Unpin a pane from the dashboard layout.", []string{"/unpin <pane>"}, []string{"/unpin current"}, []string{"release", "layout"}),
-	descriptor(KindTheme, "/theme", "/theme ", "layout", false, "Choose the light, dark, or automatic TUI theme.", []string{"/theme <light|dark|auto>"}, []string{"/theme dark"}, []string{"appearance", "color"}),
+	descriptor(KindTheme, "/theme", "/theme ", "layout", false, "Choose a built-in TUI color theme.", []string{"/theme <name>"}, themeCommandExamples(), append([]string{"appearance", "color"}, styles.ThemeIDs()...)),
 	descriptor(KindHelp, "/help", "/help", "help", false, "Open searchable command help.", []string{"/help"}, []string{"/help"}, []string{"commands", "documentation"}),
 	withCompatibilityAliases(descriptor(KindManage, "/manage", "/manage", "inventory", false, "Manage registered apps through daemon-backed actions.", []string{"/manage"}, []string{"/manage"}, []string{"apps", "registered", "saved", "start", "stop", "restart", "unregister"}), "/list"),
 	descriptor(KindConfirm, "/confirm", "/confirm", "safety", false, "Confirm the currently pending Relaybase action.", []string{"/confirm"}, []string{"/confirm"}, []string{"approve", "continue"}),
@@ -97,6 +99,15 @@ func descriptor(kind, canonical, insertion, category string, approval bool, desc
 		policy = ConfirmationAlways
 	}
 	return CommandDescriptor{Kind: kind, Canonical: canonical, Insertion: insertion, Category: category, Approval: approval, ConfirmationPolicy: policy, Description: description, Usages: usages, Examples: examples, Keywords: keywords}
+}
+
+func themeCommandExamples() []string {
+	themeIDs := styles.ThemeIDs()
+	examples := make([]string, 0, len(themeIDs))
+	for _, themeID := range themeIDs {
+		examples = append(examples, "/theme "+themeID)
+	}
+	return examples
 }
 
 func withConfirmationPolicy(value CommandDescriptor, policy ConfirmationPolicy) CommandDescriptor {

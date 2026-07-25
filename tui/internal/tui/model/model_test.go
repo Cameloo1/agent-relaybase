@@ -29,6 +29,7 @@ import (
 	"github.com/cameloo/relaybase/tui/internal/tui/interaction"
 	"github.com/cameloo/relaybase/tui/internal/tui/panes"
 	"github.com/cameloo/relaybase/tui/internal/tui/slash"
+	"github.com/cameloo/relaybase/tui/internal/tui/styles"
 	"github.com/cameloo/relaybase/tui/internal/tui/testfixtures"
 )
 
@@ -47,8 +48,7 @@ func TestRootModelInitialState(t *testing.T) {
 }
 
 func TestRootViewUsesResolvedThemeCanvasColors(t *testing.T) {
-	tests := []string{"light", "dark"}
-	for _, mode := range tests {
+	for _, mode := range styles.ThemeIDs() {
 		t.Run(mode, func(t *testing.T) {
 			cfg := config.Config{
 				BaseURL:   "http://127.0.0.1:7777",
@@ -70,6 +70,36 @@ func TestRootViewUsesResolvedThemeCanvasColors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSettingsCyclesEveryThemeInCatalogOrder(t *testing.T) {
+	root := newTestModel(t)
+	root.settingsPage = "appearance"
+	root.settingsSelected = 0
+
+	ids := styles.ThemeIDs()
+	wantSequence := append(append([]string(nil), ids[1:]...), ids[0])
+	for _, want := range wantSequence {
+		updated, _ := root.activateSettingsSelection()
+		root = updated
+		if root.Preferences().Theme != want || root.Theme().Mode != resolvedThemeMode(want) {
+			t.Fatalf("theme cycle selected preference=%q resolved=%q, want preference=%q resolved=%q", root.Preferences().Theme, root.Theme().Mode, want, resolvedThemeMode(want))
+		}
+		if root.settingsNotice != "Theme saved: "+styles.ThemeDisplayName(want)+"." {
+			t.Fatalf("theme notice = %q", root.settingsNotice)
+		}
+		rows := root.settingsRows()
+		if len(rows) == 0 || rows[0].id != "theme" || rows[0].value != styles.ThemeDisplayName(want) {
+			t.Fatalf("Appearance theme row = %#v, want full name %q", rows, styles.ThemeDisplayName(want))
+		}
+	}
+}
+
+func resolvedThemeMode(themeID string) string {
+	if themeID == "auto" {
+		return "light"
+	}
+	return themeID
 }
 
 func TestDaemonUnavailableDiagnostic(t *testing.T) {

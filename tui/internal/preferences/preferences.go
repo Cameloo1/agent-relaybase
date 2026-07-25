@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cameloo/relaybase/tui/internal/tui/assistant"
+	"github.com/cameloo/relaybase/tui/internal/tui/styles"
 )
 
 const (
@@ -268,7 +269,7 @@ func migrate(raw []byte) (Preferences, error) {
 func normalize(preferences Preferences) Preferences {
 	defaults := Default()
 	preferences.Version = SchemaVersion
-	preferences.Theme = oneOf(preferences.Theme, []string{"auto", "light", "dark"}, defaults.Theme)
+	preferences.Theme = oneOf(preferences.Theme, styles.ThemeIDs(), defaults.Theme)
 	preferences.Keymap.ContextMenu = normalizeContextMenu(preferences.Keymap.ContextMenu)
 	preferences.Panes.Pinned = uniqueSorted(preferences.Panes.Pinned)
 	// Hidden pane order is meaningful: most-recently closed panes are stored

@@ -53,7 +53,7 @@ Current layout:
 - `tui/internal/tui/views`: workspace, managers, settings, help, Agent transcript, status, and composer rendering.
 - `tui/internal/tui/components`: reusable render components.
 - `tui/internal/tui/keymap`: key bindings aligned with `docs/tui-keymap.md`.
-- `tui/internal/tui/styles`: Relaybase light theme, dark fallback, and terminal color fallback diagnostics.
+- `tui/internal/tui/styles`: ordered built-in theme catalog, palette resolution, shared semantic status colors, and terminal color fallback diagnostics.
 - `tui/internal/tui/commands`: non-blocking Bubble Tea commands for daemon state fetches.
 - `tui/internal/tui/assistant`: deterministic local assistant parsing and routing into slash commands or the daemon Agent Gateway.
 - `tui/internal/tui/setupwizard`: TUI-only setup/onboarding view state for no-apps prompts, setup choices, file diffs, repair previews, and manifest patch previews.
@@ -103,6 +103,8 @@ Command and menu behavior:
 - calls daemon lifecycle and export APIs for mutations; it does not spawn processes, inspect ports, or manage lifecycle locally
 - persists only UI preference changes such as pane pin/color/order/hidden state, theme, assistant bar color, and page selection
 - routes Agent threads, redacted thread export, and remote model work through the daemon Agent Gateway when enabled
+
+The theme catalog is the shared selection contract for Settings, persisted preference normalization, slash parsing/help, and direct TUI CLI help. `auto`, Relaybase Light, and Relaybase Dark retain their existing resolution behavior. Additional palettes may change background, border, main/muted text, and non-status accents, while the success, warning, and error fields remain the existing semantic source of truth. Pane colors and explicit Assistant bar overrides remain separate preferences.
 
 Deterministic natural assistant behavior:
 
@@ -205,7 +207,7 @@ Troubleshooting boundaries:
 - Missing binary: build with `npm run tui:build`, install a package containing `bin/relaybase-tui/<platform binary>`, or set `RELAYBASE_TUI_BIN`.
 - Daemon unavailable: start `relaybase serve`; the bridge does not silently start unknown user apps.
 - Auth failure: use the correct state directory or set `RELAYBASE_TOKEN`; tokens are not printed in diagnostics.
-- Unsupported terminal/color: launch with `relaybase tui -- --theme light` or `relaybase tui -- --theme dark`.
+- Unsupported terminal/color: `TERM=dumb` or `NO_COLOR` selects the existing high-contrast dark fallback automatically.
 
 ## API And Client Boundary
 

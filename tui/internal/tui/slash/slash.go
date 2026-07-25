@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/cameloo/relaybase/tui/internal/relaybaseclient"
+	"github.com/cameloo/relaybase/tui/internal/tui/styles"
 )
 
 const (
@@ -277,15 +278,16 @@ func Parse(input string) (ParsedCommand, error) {
 		parsed.Kind = KindUnpin
 		parsed.Target = target
 	case "theme":
-		if err := rejectUnexpectedFlags(args, "/theme <light|dark|auto>"); err != nil {
+		usage := "/theme <" + styles.ThemeUsage() + ">"
+		if err := rejectUnexpectedFlags(args, usage); err != nil {
 			return ParsedCommand{}, err
 		}
 		if len(args) != 1 {
-			return ParsedCommand{}, ParseError{Message: "Use /theme <light|dark|auto>."}
+			return ParsedCommand{}, ParseError{Message: "Use " + usage + "."}
 		}
 		theme := strings.ToLower(args[0])
-		if theme != "light" && theme != "dark" && theme != "auto" {
-			return ParsedCommand{}, ParseError{Message: "Theme must be light, dark, or auto."}
+		if !styles.IsThemeID(theme) {
+			return ParsedCommand{}, ParseError{Message: "Theme must be one of: " + styles.ThemeList() + "."}
 		}
 		parsed.Kind = KindTheme
 		parsed.Theme = theme

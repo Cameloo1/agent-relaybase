@@ -16,6 +16,7 @@ import (
 	"github.com/cameloo/relaybase/tui/internal/relaybaseclient"
 	"github.com/cameloo/relaybase/tui/internal/tui/commands"
 	"github.com/cameloo/relaybase/tui/internal/tui/model"
+	"github.com/cameloo/relaybase/tui/internal/tui/styles"
 )
 
 var (
@@ -31,7 +32,7 @@ func main() {
 	baseURL := flag.String("base-url", cfg.BaseURL, "Relaybase daemon base URL")
 	stateDir := flag.String("state-dir", cfg.StateDir, "Relaybase state directory")
 	currentDirectory := flag.String("current-directory", cfg.CurrentDirectory, "trusted current project directory for setup/onboarding prompts")
-	theme := flag.String("theme", cfg.ThemeMode, "theme mode: auto, light, or dark")
+	theme := flag.String("theme", cfg.ThemeMode, "theme: "+styles.ThemeUsage())
 	smokeRender := flag.Bool("smoke-render", false, "render one deterministic smoke-evidence frame and exit")
 	smokeInput := flag.String("smoke-input", "", "optional command or assistant input for smoke-render")
 	smokeAgentSessionID := flag.String("smoke-agent-session-id", "", "optional Agent Gateway session id to render in smoke-render")

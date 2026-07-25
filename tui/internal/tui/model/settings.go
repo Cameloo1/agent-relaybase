@@ -14,6 +14,7 @@ import (
 	"github.com/cameloo/relaybase/tui/internal/tui/commands"
 	"github.com/cameloo/relaybase/tui/internal/tui/interaction"
 	"github.com/cameloo/relaybase/tui/internal/tui/slash"
+	"github.com/cameloo/relaybase/tui/internal/tui/styles"
 	"github.com/cameloo/relaybase/tui/internal/tui/views"
 )
 
@@ -106,7 +107,7 @@ func (m RootModel) settingsRows() []settingsRow {
 			activity = "authoritative reduced motion"
 		}
 		return []settingsRow{
-			{id: "theme", label: "Theme", value: m.preferences.Theme, hint: "Cycle auto, light, and dark."},
+			{id: "theme", label: "Theme", value: styles.ThemeDisplayName(m.preferences.Theme), hint: "Cycle the built-in TUI color themes."},
 			{id: "density", label: "Layout density", value: m.preferences.Layout.Density, hint: "Cycle compact and comfortable."},
 			{id: "agent_pane", label: "Agent pane", value: onOff(!m.preferences.Layout.AgentPaneCollapsed), hint: "Show or collapse the docked Agent surface."},
 			{id: "activity", label: "Thinking indicator", value: activity, hint: "Visible only while an authoritative active run is working.", readOnly: true},
@@ -771,9 +772,9 @@ func (m RootModel) activateSettingsSelection() (RootModel, tea.Cmd) {
 		m.settingsNotice = "Checking remote revocation support..."
 		return m, commands.PreviewAgentProviderRevokeCmd(m.ctx, m.client)
 	case "theme":
-		next := nextChoice(m.preferences.Theme, []string{"auto", "light", "dark"})
+		next := nextChoice(m.preferences.Theme, styles.ThemeIDs())
 		m.applyTheme(next)
-		m.settingsNotice = "Theme saved."
+		m.settingsNotice = "Theme saved: " + styles.ThemeDisplayName(next) + "."
 		return m, m.persistPreferencesCmd()
 	case "density":
 		m.preferences.Layout.Density = nextChoice(m.preferences.Layout.Density, []string{"compact", "comfortable"})

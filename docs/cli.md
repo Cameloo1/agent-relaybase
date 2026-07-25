@@ -107,11 +107,14 @@ relaybase tui
 relaybase tui --port 7777 --host 127.0.0.1
 relaybase tui --restart-daemon
 relaybase tui -- --theme dark
+relaybase tui -- --theme code-blue
 ```
 
 `relaybase tui` launches the Go Bubble Tea TUI as a client of the running daemon. It does not start apps, inspect ports, or manage process lifecycle locally. The bridge passes `--base-url` and `--state-dir` to the TUI using the same `--host`, `--port`, and `--state-dir` conventions as other Relaybase commands. TUI-specific arguments can be passed after `--`.
 
 `relaybase tui --restart-daemon` performs the same bound restart workflow as `relaybase daemon restart` before the TUI is launched. A blocked or unverified restart fails the launch and, when a report was written, prints its redacted path instead of silently continuing against an uncertain daemon.
+
+The `--theme` option and `RELAYBASE_TUI_THEME` accept `auto`, `light`, `dark`, `terminal-green`, `code-blue`, `pure-black`, `amber-crt`, `arctic-slate`, and `plum-night`. Inside the TUI, use **Settings → Appearance → Theme** to cycle the same ordered list or `/theme <id>` to select one directly. Color themes do not change semantic success, warning, or error status colors.
 
 Inside the TUI, `/manage` opens the registered-app management table. Its confirmation-gated **Rename app** action edits the durable display name while preserving the stable app ID, route, current process, packages, panes, logs, history, and automation. Its final **Add to package** action changes only saved package membership. `/packages` opens the dedicated package table for creation, launch/run inspection, ordered member editing, rename, and definition deletion. Bare `/start` remains the faster app launcher and does not expose management actions.
 
@@ -154,7 +157,7 @@ Troubleshooting:
 - Missing Go: install Go `1.25.x`, open a new terminal so `PATH` is refreshed, then verify with `go version`, `go env GOVERSION GOOS GOARCH GOMOD GOMODCACHE`, and `npm run doctor:tui`.
 - Daemon unavailable: start `relaybase serve`; the bridge does not silently start apps.
 - Auth failure: verify the selected `--state-dir` contains the Relaybase `session-token`, or set `RELAYBASE_TOKEN` for the TUI process.
-- Unsupported terminal: use the TUI dark/light fallback with `relaybase tui -- --theme dark` or `relaybase tui -- --theme light`.
+- Unsupported terminal/color: `TERM=dumb` or `NO_COLOR` selects the existing high-contrast dark fallback automatically.
 
 ## start
 

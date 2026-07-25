@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/cameloo/relaybase/tui/internal/relaybaseclient"
+	"github.com/cameloo/relaybase/tui/internal/tui/styles"
 )
 
 func TestParseSlashCommands(t *testing.T) {
@@ -357,7 +358,7 @@ func TestParseRejectsInvalidArgumentsAndFlags(t *testing.T) {
 		{input: "/pane color current blue --alpha", want: `Unknown flag "--alpha"`},
 		{input: "/pin", want: "Use /pin <pane>."},
 		{input: "/unpin", want: "Use /unpin <pane>."},
-		{input: "/theme purple", want: "Theme must be light, dark, or auto."},
+		{input: "/theme purple", want: "Theme must be one of: " + styles.ThemeList() + "."},
 		{input: "/help now", want: "Use /help."},
 		{input: "/manage now", want: "Use /manage."},
 		{input: "/manage --confirm", want: "Use /manage."},
@@ -403,6 +404,20 @@ func TestParseRejectsInvalidArgumentsAndFlags(t *testing.T) {
 			_, err := Parse(test.input)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("expected error containing %q, got %v", test.want, err)
+			}
+		})
+	}
+}
+
+func TestParseEverySupportedTheme(t *testing.T) {
+	for _, themeID := range styles.ThemeIDs() {
+		t.Run(themeID, func(t *testing.T) {
+			command, err := Parse("/theme " + themeID)
+			if err != nil {
+				t.Fatalf("Parse theme %q: %v", themeID, err)
+			}
+			if command.Kind != KindTheme || command.Theme != themeID {
+				t.Fatalf("parsed theme = %#v, want %q", command, themeID)
 			}
 		})
 	}

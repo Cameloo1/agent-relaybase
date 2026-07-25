@@ -3283,7 +3283,7 @@ func renderHelp(data ShellData) string {
 	lines = append(lines, "- /pane color <pane> <color>")
 	lines = append(lines, "- /pin <pane>")
 	lines = append(lines, "- /unpin <pane>")
-	lines = append(lines, "- /theme <light|dark|auto>")
+	lines = append(lines, "- /theme <name>")
 	lines = append(lines, "- /help")
 	lines = append(lines, "- /manage")
 	lines = append(lines, "- /daemon status")

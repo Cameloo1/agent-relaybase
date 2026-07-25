@@ -130,8 +130,8 @@ func TestGoldenStableTerminalSizes(t *testing.T) {
 	}
 }
 
-func TestRenderShellFillsExactViewportInLightAndDarkThemes(t *testing.T) {
-	for _, mode := range []string{"light", "dark"} {
+func TestRenderShellFillsExactViewportInEveryTheme(t *testing.T) {
+	for _, mode := range styles.ThemeIDs() {
 		t.Run(mode, func(t *testing.T) {
 			theme, _ := styles.ResolveTheme(mode, func(string) string { return "" })
 			data := ShellData{

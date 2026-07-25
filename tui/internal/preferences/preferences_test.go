@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cameloo/relaybase/tui/internal/tui/assistant"
+	"github.com/cameloo/relaybase/tui/internal/tui/styles"
 )
 
 func TestLoadDefaultsWhenPreferenceFileMissing(t *testing.T) {
@@ -51,6 +52,26 @@ func TestSavePreferencesAtomically(t *testing.T) {
 	}
 	if len(tempFiles) != 0 {
 		t.Fatalf("atomic save left temporary files behind: %#v", tempFiles)
+	}
+}
+
+func TestEverySupportedThemePersistsWithoutSchemaChanges(t *testing.T) {
+	for _, themeID := range styles.ThemeIDs() {
+		t.Run(themeID, func(t *testing.T) {
+			store := NewStore(t.TempDir())
+			prefs := Default()
+			prefs.Theme = themeID
+			if err := store.Save(prefs); err != nil {
+				t.Fatalf("Save(%s): %v", themeID, err)
+			}
+			loaded, result := store.Load()
+			if len(result.Diagnostics) != 0 {
+				t.Fatalf("Load(%s) diagnostics: %#v", themeID, result.Diagnostics)
+			}
+			if loaded.Version != SchemaVersion || loaded.Theme != themeID {
+				t.Fatalf("loaded theme = version %d theme %q, want version %d theme %q", loaded.Version, loaded.Theme, SchemaVersion, themeID)
+			}
+		})
 	}
 }
 

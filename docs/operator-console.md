@@ -182,13 +182,39 @@ Only an authoritative active foreground operation animates. Waiting for approval
 | `/pane color <pane> <color>` | Change a pane accent preference.                            |
 | `/pin <pane>`                | Pin a pane.                                                 |
 | `/unpin <pane>`              | Unpin a pane.                                               |
-| `/theme <light\|dark\|auto>` | Change the TUI theme.                                       |
+| `/theme <name>`              | Change the persisted TUI color theme.                       |
 | `/daemon status`             | Show daemon connection status.                              |
 | `/daemon repair`             | Request a confirmation-gated daemon repair or reconnect.    |
 | `/daemon retry`              | Alias for daemon repair.                                    |
 | `/daemon restart`            | Safely replace the daemon and restore Relaybase-owned apps. |
 | `/confirm`                   | Confirm the current pending action.                         |
 | `/cancel`                    | Cancel the current pending action.                          |
+
+### Built-in themes
+
+Open **Settings → Appearance → Theme** and press Enter to cycle the themes, or select one directly with `/theme <id>`. The same IDs are accepted by `relaybase tui -- --theme <id>`, `relaybase start -- --theme <id>`, and `RELAYBASE_TUI_THEME`.
+
+| ID               | Appearance                                      |
+| ---------------- | ----------------------------------------------- |
+| `auto`           | Automatic selection; currently Relaybase Light. |
+| `light`          | Warm Relaybase light palette.                   |
+| `dark`           | Warm Relaybase dark palette.                    |
+| `terminal-green` | Black terminal with neon-green text.            |
+| `code-blue`      | Blue-and-gray editor-inspired palette.          |
+| `pure-black`     | True-black background with neutral text.        |
+| `amber-crt`      | Warm amber terminal palette.                    |
+| `arctic-slate`   | Cool slate and frost-blue palette.              |
+| `plum-night`     | Deep plum palette with violet accents.          |
+
+Examples:
+
+```text
+/theme terminal-green
+/theme code-blue
+/theme pure-black
+```
+
+Themes change the background, borders, main text, muted text, and non-status accents. Running, warning, stopped, failed, connection, and other status labels keep the existing success, warning, and error color semantics. Pane-specific color preferences and an explicitly configured Assistant bar color remain independent of the selected theme.
 
 ## Natural-language commands
 
