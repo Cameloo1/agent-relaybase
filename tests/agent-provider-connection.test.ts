@@ -187,43 +187,39 @@ test("an unverified managed credential remains unverified across config-manager 
 });
 
 test("Agent config status silently recovers a persisted DPAPI credential on its first read", async () => {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-status-recovery-"));
-  const store = new FixtureCredentialStore();
-  const secret = Buffer.from(NEW_SECRET);
-  const stored = await store.put("openrouter", secret);
-  secret.fill(0);
-  await fs.mkdir(path.join(stateDir, "agent"), { recursive: true });
-  await fs.writeFile(
-    path.join(stateDir, "agent", "config.json"),
-    JSON.stringify({
-      schemaVersion: 2,
-      enabled: true,
-      provider: {
-        modelSlug: "openrouter/test-model",
-        apiKeySourceType: "managed_windows_dpapi",
-        credentialId: stored.credentialId,
-        credentialState: {
-          verified: true,
-          lastValidatedAt: "2026-07-24T00:00:00.000Z"
-        },
-        remoteModelEnabled: true
-      }
-    }),
-    "utf8"
-  );
-  const gateway = new AgentGatewayService({ stateDir, credentialStore: store });
+  await withAgentControlEnvironment({}, async () => {
+    await withPersistedManagedCredentialGateway(async (gateway) => {
+      assert.equal(gateway.getConfig().credential?.connection, "disconnected");
+      const status = await gateway.getConfigStatus();
+      assert.equal(status.enabled, true);
+      assert.equal(status.provider.remoteModelEnabled, true);
+      assert.equal(status.credential?.connection, "connected");
+      assert.equal(status.provider.apiKeySource.configured, true);
+      assert.equal(status.readiness, "ready");
+      assert.doesNotMatch(JSON.stringify(status), new RegExp(NEW_SECRET));
+    });
+  });
+});
 
-  try {
-    assert.equal(gateway.getConfig().credential?.connection, "disconnected");
-    const status = await gateway.getConfigStatus();
-    assert.equal(status.credential?.connection, "connected");
-    assert.equal(status.provider.apiKeySource.configured, true);
-    assert.equal(status.readiness, "ready");
-    assert.doesNotMatch(JSON.stringify(status), new RegExp(NEW_SECRET));
-  } finally {
-    await gateway.close();
-    await fs.rm(stateDir, { recursive: true, force: true });
-  }
+test("Agent config status recovers a persisted credential without bypassing explicit disabled controls", async () => {
+  await withAgentControlEnvironment(
+    {
+      RELAYBASE_AGENT_ENABLED: "0",
+      RELAYBASE_AGENT_REMOTE_MODEL_ENABLED: "0"
+    },
+    async () => {
+      await withPersistedManagedCredentialGateway(async (gateway) => {
+        assert.equal(gateway.getConfig().credential?.connection, "disconnected");
+        const status = await gateway.getConfigStatus();
+        assert.equal(status.enabled, false);
+        assert.equal(status.provider.remoteModelEnabled, false);
+        assert.equal(status.credential?.connection, "connected");
+        assert.equal(status.provider.apiKeySource.configured, true);
+        assert.equal(status.readiness, "disabled");
+        assert.doesNotMatch(JSON.stringify(status), new RegExp(NEW_SECRET));
+      });
+    }
+  );
 });
 
 test("Agent provider browser launch uses only the safe authorization URL and a scrubbed child environment", async () => {
@@ -320,6 +316,66 @@ function fixtureConfigManager(store: CredentialStore): AgentConfigManager {
     shellEnvironment: {},
     credentialStore: store
   });
+}
+
+async function withPersistedManagedCredentialGateway(
+  callback: (gateway: AgentGatewayService) => Promise<void>
+): Promise<void> {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-agent-status-recovery-"));
+  const store = new FixtureCredentialStore();
+  const secret = Buffer.from(NEW_SECRET);
+  const stored = await store.put("openrouter", secret);
+  secret.fill(0);
+  await fs.mkdir(path.join(stateDir, "agent"), { recursive: true });
+  await fs.writeFile(
+    path.join(stateDir, "agent", "config.json"),
+    JSON.stringify({
+      schemaVersion: 2,
+      enabled: true,
+      provider: {
+        modelSlug: "openrouter/test-model",
+        apiKeySourceType: "managed_windows_dpapi",
+        credentialId: stored.credentialId,
+        credentialState: {
+          verified: true,
+          lastValidatedAt: "2026-07-24T00:00:00.000Z"
+        },
+        remoteModelEnabled: true
+      }
+    }),
+    "utf8"
+  );
+  const gateway = new AgentGatewayService({ stateDir, credentialStore: store });
+  try {
+    await callback(gateway);
+  } finally {
+    await gateway.close();
+    await fs.rm(stateDir, { recursive: true, force: true });
+  }
+}
+
+async function withAgentControlEnvironment(values: NodeJS.ProcessEnv, callback: () => Promise<void>): Promise<void> {
+  const names = ["RELAYBASE_AGENT_ENABLED", "RELAYBASE_AGENT_REMOTE_MODEL_ENABLED", "RELAYBASE_AGENT_MODEL"] as const;
+  const previous = new Map(names.map((name) => [name, process.env[name]]));
+  for (const name of names) {
+    const value = values[name];
+    if (value === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = value;
+    }
+  }
+  try {
+    await callback();
+  } finally {
+    for (const [name, value] of previous.entries()) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  }
 }
 
 function callbackUrl(attempt: OpenRouterConnectionAttemptState): URL {
