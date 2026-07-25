@@ -154,6 +154,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build compiled runtime
+        run: npm run build:runtime
+
       - name: Build platform TUI binary
         run: npm run tui:build
 
@@ -199,6 +202,9 @@ jobs:
         with:
           name: relaybase-windows-native-${{ github.run_id }}
           path: dist-runtime/native
+
+      - name: Build compiled runtime
+        run: npm run build:runtime
 
       - name: Build all platform TUI binaries
         run: npm run tui:build:all

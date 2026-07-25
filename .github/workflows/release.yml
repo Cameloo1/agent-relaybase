@@ -112,6 +112,9 @@ jobs:
       - name: Run source verification
         run: npm run verify -- --release
 
+      - name: Build compiled runtime
+        run: npm run build:runtime
+
       - name: Validate GoReleaser configuration
         run: npm run release:check
 
