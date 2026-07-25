@@ -12,6 +12,7 @@ Provider availability and model behavior are external and volatile. Automated te
 - The TUI displays previews, confirmations, streamed progress, and results.
 - The model may propose tools but may not execute them directly.
 - Every tool input is schema-validated.
+- Collection tools use deterministic filters, conservative default result limits, and explicit truncation or next-page metadata.
 - Destructive, file-writing, manifest-editing, env-editing, browser, clipboard, and export actions require approval when they can affect user state or reveal sensitive data.
 - Tool results must not include raw tokens, raw env secrets, or unredacted log payloads.
 
@@ -43,21 +44,23 @@ The current tests cover the contract, queued/idempotent/cancel/retry behavior, r
 
 ## Read-Only App Tools
 
-| Tool                     | Purpose                                                                                         | Approval                                                     |
-| ------------------------ | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `list_apps`              | Return app, group, component, readiness, and route summaries.                                   | No                                                           |
-| `get_app_state`          | Return one app's authoritative daemon state.                                                    | No                                                           |
-| `get_app_group`          | Return one group and its components.                                                            | No                                                           |
-| `get_current_context`    | Return the selected app/group/pane, route, cwd, daemon state, and active Agent thread context.  | No                                                           |
-| `get_agent_capabilities` | Report registered, effective, disabled, and stale unknown tools plus policy limits.             | No                                                           |
-| `explain_app_problem`    | Combine app state, operation state, and bounded diagnostics into an evidence-based explanation. | No                                                           |
-| `get_diagnostics`        | Return safe daemon/TUI diagnostics.                                                             | No                                                           |
-| `get_operation_status`   | Inspect one daemon operation by ID.                                                             | No                                                           |
-| `list_operations`        | List bounded recent operations and terminal/pending state.                                      | No                                                           |
-| `tail_logs`              | Return bounded redacted recent logs.                                                            | No tool approval; prompt inclusion policy may gate model use |
-| `search_logs`            | Search bounded redacted logs.                                                                   | No tool approval; prompt inclusion policy may gate model use |
+| Tool                     | Purpose                                                                                           | Approval                                                     |
+| ------------------------ | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `list_apps`              | Return a filtered, paginated app summary; group/component topology is opt-in.                     | No                                                           |
+| `get_app_state`          | Return one app's authoritative daemon state.                                                      | No                                                           |
+| `get_app_group`          | Return one group and its components.                                                              | No                                                           |
+| `get_current_context`    | Return the selected app/group/pane, route, cwd, daemon state, and active Agent thread context.    | No                                                           |
+| `get_agent_capabilities` | Report tool policy, terminal support, project grants, and built-in help/settings/theme reference. | No                                                           |
+| `explain_app_problem`    | Combine app state, operation state, and bounded diagnostics into an evidence-based explanation.   | No                                                           |
+| `get_diagnostics`        | Return safe daemon/TUI diagnostics.                                                               | No                                                           |
+| `get_operation_status`   | Inspect one daemon operation by ID.                                                               | No                                                           |
+| `list_operations`        | List bounded recent operations and terminal/pending state.                                        | No                                                           |
+| `tail_logs`              | Return bounded redacted recent logs.                                                              | No tool approval; prompt inclusion policy may gate model use |
+| `search_logs`            | Search a bounded redacted window and return a separately capped set of latest matches.            | No tool approval; prompt inclusion policy may gate model use |
 
-The implemented tools return redacted log payloads. They do not request unbounded history and do not expose raw token/password/secret/key-like values.
+`list_apps` sorts by stable app ID, defaults to 20 apps, accepts at most 50 per page, and returns `nextOffset` when another page exists. Query, runtime-status, group, and component-role filters are applied before pagination. Topology, when requested, is limited to apps on the returned page. Safe diagnostics are compacted and capped.
+
+`search_logs` scans at most 500 recent redacted events and returns at most 50 matches by default or 100 when explicitly requested. Its result reports searched, matched, returned, and truncated counts. The implemented log tools do not request unbounded history and do not expose raw token/password/secret/key-like values.
 
 ## Project Inspection Tools
 

@@ -1513,6 +1513,9 @@ test("Operator Agent instructions separate Relaybase runtime from AI app builder
   assert.match(instructions, /Never write files without approval/);
   assert.match(instructions, /Never edit manifests without approval/);
   assert.match(instructions, /If an app ignores PORT/);
+  assert.match(instructions, /built-in help, settings, shortcut, or theme support/);
+  assert.match(instructions, /list_apps with the narrowest useful query\/status\/group\/role and a small limit/);
+  assert.match(instructions, /For logs, scope by app\/group\/role and request a small result limit/);
 });
 
 test("Operator Agent instructions require runtime-matrix setup behavior", () => {

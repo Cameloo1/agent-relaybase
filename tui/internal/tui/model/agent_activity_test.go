@@ -131,6 +131,28 @@ func TestAgentActivityAnimationRequiresConnectedAuthoritativeRunningState(t *tes
 	}
 }
 
+func TestOpeningFullAgentChatRestartsVisibleActivityAnimation(t *testing.T) {
+	root := newTestModel(t)
+	root.preferences.Layout.AgentPaneCollapsed = true
+	root.agentActivityAnimations = true
+	root.agentStatus = "running"
+	root.agentStream = &relaybaseclient.AgentEventStream{}
+	root.applyAgentTranscriptEvent(transcriptEvent(t, 1, "model.processing_started", map[string]any{
+		"activity": map[string]any{
+			"id": "processing:run-1:1", "kind": "processing", "state": "active", "label": "Thinking",
+		},
+	}))
+	if root.agentActivityVisible() || root.agentActivityTicking {
+		t.Fatalf("collapsed Agent surface unexpectedly remained visible or ticking: visible=%v ticking=%v", root.agentActivityVisible(), root.agentActivityTicking)
+	}
+
+	updated, command := root.Update(agentChatKey())
+	root = updated.(RootModel)
+	if command == nil || !root.agentChatFull || !root.agentActivityTicking {
+		t.Fatalf("F6 did not restart the authoritative activity tick: command=%v full=%v ticking=%v", command, root.agentChatFull, root.agentActivityTicking)
+	}
+}
+
 func TestRunTerminalEventCannotLeaveTranscriptActivityActive(t *testing.T) {
 	root := newTestModel(t)
 	root.applyAgentTranscriptEvent(transcriptActivityEvent(t, 1, "tool.started", "tool:1", "active", "Reading logs", ""))

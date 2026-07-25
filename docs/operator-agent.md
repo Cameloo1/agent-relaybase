@@ -103,6 +103,26 @@ Execution limits are bounded by the daemon. A run continues in segments while re
 
 Fresh default configurations use all currently registered Relaybase tools. A deliberately customized explicit allowlist remains restricted. Capability inspection distinguishes registered, effective, disabled, and stale unknown tool names.
 
+## Built-in console reference
+
+The read-only `get_agent_capabilities` result includes a compact built-in console reference. The Agent uses it for questions about Relaybase help, settings, Agent surfaces, shortcuts, and themes without needing project-file access or a documentation search.
+
+The reference reports `/help` and `?`, `/settings`, `Ctrl+G`, `F6`, the four settings categories, the ordered Agent settings sections, and these exact theme IDs and display names:
+
+| ID               | Display name    |
+| ---------------- | --------------- |
+| `auto`           | Automatic       |
+| `light`          | Relaybase Light |
+| `dark`           | Relaybase Dark  |
+| `terminal-green` | Terminal Green  |
+| `code-blue`      | Code Blue       |
+| `pure-black`     | Pure Black      |
+| `amber-crt`      | Amber CRT       |
+| `arctic-slate`   | Arctic Slate    |
+| `plum-night`     | Plum Night      |
+
+The settings rundown mirrors the current console: **General** covers daemon state and safe restart; **Appearance** covers theme, density, Agent pane, and activity display; **Interaction** covers history retention and context-menu shortcuts; **Agent** covers Status, Provider, Configuration, Security and credentials, Safety and permissions, Execution, Budgets, and Recovery.
+
 ## Threads and history
 
 Agent threads are daemon-owned and stored under the Relaybase state directory in `agent/agent.sqlite`. The TUI preference file is not a transcript store.
@@ -128,6 +148,8 @@ JSON and Markdown thread exports are redacted and recorded by the daemon.
 The transcript presents public processing labels, tool calls, approvals, diagnostics, results, and final answers in chronological order. It does not expose private model reasoning.
 
 Tool traces update in place. Select a trace with Up or Down and press Enter or Space to expand its bounded sanitized result. `Ctrl+E` toggles all available tool details.
+
+Collection tools are bounded at their execution boundary as well as in the transcript. `list_apps` returns a deterministic page with filters and next-page metadata, and includes group/component topology only when requested. `search_logs` searches a bounded recent window but returns a separately capped set of matching events. This keeps model context precise even when the daemon manages many apps or logs.
 
 Only an authoritative `model.processing_started` to `model.processing_completed` interval animates. Queued work, OAuth connection, provider validation, settings saves, config reload, tool execution, replay, reconnect, approval waiting, completed, failed, cancelled, and offline states are static and labeled.
 

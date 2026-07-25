@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	"github.com/cameloo/relaybase/tui/internal/relaybaseclient"
 	"github.com/cameloo/relaybase/tui/internal/tui/components"
 	"github.com/cameloo/relaybase/tui/internal/tui/interaction"
 	"github.com/cameloo/relaybase/tui/internal/tui/views"
@@ -219,6 +221,93 @@ func TestFullAgentChatRestoresWorkspaceComposerAndIndependentScroll(t *testing.T
 	}
 	if root.responseOffset != 3 || root.responseFollow || root.paneManager.SelectedPaneID() != selectedID || root.paneManager.Page() != page {
 		t.Fatalf("workspace identity changed: offset=%d follow=%v selected=%q page=%d", root.responseOffset, root.responseFollow, root.paneManager.SelectedPaneID(), root.paneManager.Page())
+	}
+}
+
+func TestFullAgentChatComposerOwnsEditingAndSubmission(t *testing.T) {
+	root := newTestModelWithPanes(t, 3)
+	updated, _ := root.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	root = updated.(RootModel)
+	root.agentConfig = enabledAgentConfig(true)
+	root.agentSession = &relaybaseclient.AgentSession{ID: "session-full-chat"}
+
+	updated, _ = root.Update(agentChatKey())
+	root = updated.(RootModel)
+	for _, character := range []string{"a", "b", "c", "q"} {
+		updated, _ = root.Update(keyPress(character))
+		root = updated.(RootModel)
+	}
+	if root.commandInput != "abcq" || root.interaction.Owner() != interaction.OwnerComposer || root.codePickerVisible || root.quitConfirmation {
+		t.Fatalf("full-chat typing leaked into transcript shortcuts: input=%q owner=%s codePicker=%v quit=%v", root.commandInput, root.interaction.Owner(), root.codePickerVisible, root.quitConfirmation)
+	}
+	if rendered := ansi.Strip(root.Render()); !strings.Contains(rendered, "abcq") || !strings.Contains(rendered, "[focused]") {
+		t.Fatalf("full-chat composer did not render the active draft and focus:\n%s", rendered)
+	}
+
+	updated, _ = root.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	root = updated.(RootModel)
+	if root.commandInput != "abc" {
+		t.Fatalf("full-chat Backspace did not edit the composer: input=%q", root.commandInput)
+	}
+
+	updated, command := root.Update(keyPress("enter"))
+	root = updated.(RootModel)
+	if command == nil || root.commandInput != "" || root.agentStatus != "sending" || !root.agentChatFull || root.interaction.Owner() != interaction.OwnerResponse {
+		t.Fatalf("full-chat Enter did not submit and return focus to the transcript: command=%v input=%q status=%q full=%v owner=%s", command, root.commandInput, root.agentStatus, root.agentChatFull, root.interaction.Owner())
+	}
+}
+
+func TestAgentSubmissionResumesFollowOnlyForActiveSurface(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		name := "dock"
+		if full {
+			name = "full"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := newTestModelWithPanes(t, 3)
+			updated, _ := root.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+			root = updated.(RootModel)
+			root.agentConfig = enabledAgentConfig(true)
+			root.agentSession = &relaybaseclient.AgentSession{ID: "session-follow"}
+			root.responseOffset = 3
+			root.responseFollow = false
+			root.responseNewOutput = 4
+			root.agentFullResponseOffset = 5
+			root.agentFullResponseFollow = false
+			root.agentFullResponseNewOutput = 6
+			root.agentChatFull = full
+			for index := 0; index < 40; index++ {
+				root.agentTranscript = append(root.agentTranscript, views.AgentTranscriptItem{
+					ID: fmt.Sprintf("message:%d", index), Kind: "assistant", State: "completed",
+					Output:   fmt.Sprintf("response %d with enough text to keep the transcript scrollable", index),
+					Sequence: int64(index + 1), UpdatedSequence: int64(index + 1),
+				})
+			}
+
+			updatedRoot, command := root.submitAgentInput("inspect the current app state")
+			if command == nil {
+				t.Fatal("Agent submission did not return a send command")
+			}
+			projection := updatedRoot.shellData()
+			if projection.ResponseOffset != views.ResponseScrollMax(updatedRoot.styles, projection) {
+				t.Fatalf("submission did not project the active Agent surface to the rendered bottom: offset=%d", projection.ResponseOffset)
+			}
+			if full {
+				if !updatedRoot.agentFullResponseFollow || updatedRoot.agentFullResponseNewOutput != 0 {
+					t.Fatalf("full-chat submission did not resume follow: follow=%v new=%d", updatedRoot.agentFullResponseFollow, updatedRoot.agentFullResponseNewOutput)
+				}
+				if updatedRoot.responseFollow || updatedRoot.responseOffset != 3 || updatedRoot.responseNewOutput != 5 {
+					t.Fatalf("full-chat submission did not preserve the paused dock and its unread notice: follow=%v offset=%d new=%d", updatedRoot.responseFollow, updatedRoot.responseOffset, updatedRoot.responseNewOutput)
+				}
+				return
+			}
+			if !updatedRoot.responseFollow || updatedRoot.responseNewOutput != 0 {
+				t.Fatalf("dock submission did not resume follow: follow=%v new=%d", updatedRoot.responseFollow, updatedRoot.responseNewOutput)
+			}
+			if updatedRoot.agentFullResponseFollow || updatedRoot.agentFullResponseOffset != 5 || updatedRoot.agentFullResponseNewOutput != 6 {
+				t.Fatalf("dock submission changed full-chat reading state: follow=%v offset=%d new=%d", updatedRoot.agentFullResponseFollow, updatedRoot.agentFullResponseOffset, updatedRoot.agentFullResponseNewOutput)
+			}
+		})
 	}
 }
 

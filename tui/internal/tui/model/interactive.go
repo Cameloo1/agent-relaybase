@@ -894,7 +894,7 @@ func (m RootModel) toggleAgentSurface() (RootModel, tea.Cmd) {
 		}
 		m.syncOperatorLayout()
 		m.clampBodyScroll()
-		return m, m.persistPreferencesCmd()
+		return m, batchCommands(m.persistPreferencesCmd(), m.scheduleAgentActivityTick())
 	}
 	if m.responseDetailsVisible() {
 		m.interaction.CloseTransient()
@@ -903,7 +903,7 @@ func (m RootModel) toggleAgentSurface() (RootModel, tea.Cmd) {
 	if m.interaction.Transient == interaction.TransientNone && m.interaction.Modal == interaction.ModalNone {
 		m.interaction.OpenTransient(interaction.TransientResponseDetails)
 	}
-	return m, nil
+	return m, m.scheduleAgentActivityTick()
 }
 
 func (m RootModel) toggleAgentChat() (RootModel, tea.Cmd) {
@@ -930,7 +930,7 @@ func (m RootModel) toggleAgentChat() (RootModel, tea.Cmd) {
 	if m.agentFullResponseFollow {
 		m.gotoResponseBottom()
 	}
-	return m, nil
+	return m, m.scheduleAgentActivityTick()
 }
 
 func (m RootModel) handleAgentSurfaceKey(msg tea.KeyPressMsg, modal bool) (RootModel, tea.Cmd) {

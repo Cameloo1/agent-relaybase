@@ -570,7 +570,7 @@ test("read tools return daemon state, grouped components, diagnostics, and redac
     ]
   });
 
-  const list = await executeRelaybaseAgentTool("list_apps", {}, context);
+  const list = await executeRelaybaseAgentTool("list_apps", { includeTopology: true }, context);
   assert.equal(list.status, "succeeded");
   assert.equal((list.data as { apps: unknown[] }).apps.length, 2);
   assert.equal((list.data as { groups: unknown[] }).groups.length, 1);
@@ -591,6 +591,152 @@ test("read tools return daemon state, grouped components, diagnostics, and redac
   const search = await executeRelaybaseAgentTool("search_logs", { query: "started", appId: "notes-api" }, context);
   assert.equal(search.status, "succeeded");
   assert.equal((search.data as { events: unknown[] }).events.length, 1);
+});
+
+test("list_apps filters and paginates inventory without returning unbounded topology", async () => {
+  const apps = Array.from({ length: 65 }, (_, index) =>
+    appStatus(
+      `app-${String(index).padStart(2, "0")}`,
+      `App ${index}`,
+      index % 2 === 0 ? "web" : "worker",
+      `group-${index % 5}`,
+      index % 2 === 0 ? "frontend" : "worker",
+      stoppedRuntime()
+    )
+  );
+  const context = fakeToolContext({ apps });
+
+  const first = await executeRelaybaseAgentTool("list_apps", {}, context);
+  assert.equal(first.status, "succeeded");
+  const firstData = first.data as {
+    summary: { totalApps: number; matchedApps: number; returnedApps: number; truncated: boolean; nextOffset?: number };
+    apps: Array<{ id: string }>;
+    groups?: unknown[];
+    components?: unknown[];
+  };
+  assert.deepEqual(firstData.summary, {
+    totalApps: 65,
+    matchedApps: 65,
+    returnedApps: 20,
+    offset: 0,
+    limit: 20,
+    truncated: true,
+    nextOffset: 20,
+    diagnosticCount: 0,
+    diagnosticsTruncated: false,
+    topologyIncluded: false
+  });
+  assert.equal(firstData.apps.length, 20);
+  assert.equal("groups" in firstData, false);
+  assert.equal("components" in firstData, false);
+  assert.ok(JSON.stringify(first).length < 10_000);
+
+  const filtered = await executeRelaybaseAgentTool(
+    "list_apps",
+    { query: "App 64", groupId: "group-4", componentRole: "frontend", limit: 5 },
+    context
+  );
+  const filteredData = filtered.data as {
+    summary: { matchedApps: number; truncated: boolean };
+    apps: Array<{ id: string }>;
+  };
+  assert.equal(filteredData.summary.matchedApps, 1);
+  assert.equal(filteredData.summary.truncated, false);
+  assert.deepEqual(
+    filteredData.apps.map((app) => app.id),
+    ["app-64"]
+  );
+
+  const topology = await executeRelaybaseAgentTool(
+    "list_apps",
+    { groupId: "group-1", limit: 3, includeTopology: true },
+    context
+  );
+  const topologyData = topology.data as {
+    apps: unknown[];
+    groups: Array<{ components: unknown[] }>;
+    components: unknown[];
+  };
+  assert.equal(topologyData.apps.length, 3);
+  assert.equal(topologyData.components.length, 3);
+  assert.equal(topologyData.groups.flatMap((group) => group.components).length, 3);
+});
+
+test("search_logs separates its bounded search window from returned matches", async () => {
+  const logs = Array.from({ length: 120 }, (_, index) => ({
+    sequence: index + 1,
+    appId: "notes-api",
+    stream: "stdout",
+    message: `needle event ${index + 1}`
+  }));
+  const context = fakeToolContext({ logs });
+
+  const defaultResult = await executeRelaybaseAgentTool(
+    "search_logs",
+    { query: "needle", appId: "notes-api" },
+    context
+  );
+  const defaultData = defaultResult.data as {
+    events: Array<{ sequence: number }>;
+    searched: number;
+    matched: number;
+    returned: number;
+    truncated: boolean;
+  };
+  assert.equal(defaultData.searched, 120);
+  assert.equal(defaultData.matched, 120);
+  assert.equal(defaultData.returned, 50);
+  assert.equal(defaultData.truncated, true);
+  assert.equal(defaultData.events[0]?.sequence, 71);
+
+  const narrowResult = await executeRelaybaseAgentTool(
+    "search_logs",
+    { query: "needle", appId: "notes-api", limit: 7, scanLimit: 200 },
+    context
+  );
+  const narrowData = narrowResult.data as { events: Array<{ sequence: number }>; returned: number };
+  assert.equal(narrowData.returned, 7);
+  assert.equal(narrowData.events[0]?.sequence, 114);
+});
+
+test("get_agent_capabilities includes the verified console settings and theme reference", async () => {
+  const result = await executeRelaybaseAgentTool("get_agent_capabilities", {}, fakeToolContext());
+  assert.equal(result.status, "succeeded");
+  const consoleReference = (
+    result.data as {
+      console: {
+        help: { command: string; shortcut: string };
+        settings: { command: string; categories: Array<{ name: string; controls: string[] }> };
+        themes: Array<{ id: string; name: string }>;
+      };
+    }
+  ).console;
+  assert.deepEqual(
+    consoleReference.settings.categories.map((category) => category.name),
+    ["General", "Appearance", "Interaction", "Agent"]
+  );
+  assert.deepEqual(consoleReference.help, {
+    command: "/help",
+    shortcut: "?",
+    description: "Open searchable command help."
+  });
+  assert.equal(consoleReference.settings.command, "/settings");
+  assert.deepEqual(consoleReference.themes, [
+    { id: "auto", name: "Automatic" },
+    { id: "light", name: "Relaybase Light" },
+    { id: "dark", name: "Relaybase Dark" },
+    { id: "terminal-green", name: "Terminal Green" },
+    { id: "code-blue", name: "Code Blue" },
+    { id: "pure-black", name: "Pure Black" },
+    { id: "amber-crt", name: "Amber CRT" },
+    { id: "arctic-slate", name: "Arctic Slate" },
+    { id: "plum-night", name: "Plum Night" }
+  ]);
+
+  const goThemes = await fs.readFile(path.join(process.cwd(), "tui", "internal", "tui", "styles", "styles.go"), "utf8");
+  for (const theme of consoleReference.themes) {
+    assert.match(goThemes, new RegExp(`ID: "${theme.id}", Name: "${theme.name}"`));
+  }
 });
 
 test("target resolution asks clarification for ambiguous app names", async () => {
@@ -1576,6 +1722,7 @@ function fakeToolContext(
       }
     } as unknown as RelaybaseRuntime["processes"],
     logStore: {
+      health: () => ({ status: "available", diagnostics: [] }),
       query: async () => ({
         events: logs.map((event, index) => ({
           sequence: Number(event.sequence ?? index + 1),

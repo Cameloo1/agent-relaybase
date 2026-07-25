@@ -1131,11 +1131,17 @@ func (m RootModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if keymap.Matches(msg, m.keymap.AgentChat) {
 			return m.toggleAgentChat()
 		}
+		// Once typing moves focus from an Agent transcript to the composer, the
+		// composer must own editing and submission keys. Keep the full-chat Escape
+		// contract explicit: it restores the workspace even when a draft is active.
+		if m.commandActive {
+			if m.agentChatFull && keymap.Matches(msg, m.keymap.Escape) {
+				return m.toggleAgentChat()
+			}
+			return m.handleCommandInput(msg)
+		}
 		if m.agentChatFull || m.responseDetailsVisible() || m.interaction.Owner() == interaction.OwnerResponse {
 			return m.handleAgentSurfaceKey(msg, m.responseDetailsVisible())
-		}
-		if m.commandActive {
-			return m.handleCommandInput(msg)
 		}
 		if m.interaction.Owner() == interaction.OwnerPanes && keymap.Matches(msg, m.keymap.StopSelected) {
 			cmd := m.confirmPaneLifecycle(slash.KindStop, "")
@@ -3170,6 +3176,11 @@ func (m RootModel) handleCommandInput(msg tea.KeyPressMsg) (RootModel, tea.Cmd) 
 		if updated.pendingSubmissionDraft == nil {
 			return updated, command
 		}
+		if updated.agentChatFull && updated.pendingSubmissionDraft.AwaitingAgentAcceptance {
+			// Full chat has no visible workspace pane to receive post-submit focus.
+			// Return keyboard ownership to the transcript while the run proceeds.
+			updated.setPrimaryFocus(interaction.FocusResponse)
+		}
 		updated.composerHistoryID++
 		historyScope := updated.composerHistoryScopeID()
 		updated.composer.AddHistory(composer.HistoryEntry{
@@ -3701,6 +3712,9 @@ func (m RootModel) submitAgentInput(input string) (RootModel, tea.Cmd) {
 	}
 
 	m.addAssistantMessage("You: " + content)
+	// Submission is the one user action that intentionally resumes follow mode.
+	// Incoming Agent output still preserves a manually paused reading position.
+	m.gotoResponseBottom()
 	m.agentStatus = "sending"
 	context := m.agentContext()
 	generation := m.nextAgentMessageGeneration()

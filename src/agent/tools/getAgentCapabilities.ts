@@ -7,7 +7,7 @@ export function createGetAgentCapabilitiesTool(): RelaybaseAgentToolDefinition<z
   const definition: RelaybaseAgentToolDefinition<z.infer<typeof parameters>> = {
     name: "get_agent_capabilities",
     description:
-      "Read the Operator Agent's effective tool policy, project grants, terminal capabilities, daemon feature support, and safe subsystem health without revealing secrets.",
+      "Read the Operator Agent's effective tool policy, project grants, terminal capabilities, built-in console help/settings/themes, daemon feature support, and safe subsystem health without revealing secrets.",
     parameters,
     approvalRequired: false,
     risk: "low",
@@ -65,6 +65,55 @@ export function createGetAgentCapabilitiesTool(): RelaybaseAgentToolDefinition<z
             durableLogs: true,
             appExplanation: true,
             projectRootDiscovery: true
+          },
+          console: {
+            help: { command: "/help", shortcut: "?", description: "Open searchable command help." },
+            agentSurfaces: {
+              dock: { shortcut: "Ctrl+G", description: "Open or close the docked Agent transcript." },
+              fullChat: { shortcut: "F6", description: "Open or close the full-width Agent Chat page." }
+            },
+            settings: {
+              command: "/settings",
+              categories: [
+                {
+                  name: "General",
+                  controls: ["Daemon connection state", "Confirmation-gated safe daemon restart"]
+                },
+                {
+                  name: "Appearance",
+                  controls: ["Theme", "Layout density", "Agent pane", "Thinking indicator status", "Indicator charset"]
+                },
+                {
+                  name: "Interaction",
+                  controls: ["History retention", "Persisted context-menu shortcuts"]
+                },
+                {
+                  name: "Agent",
+                  controls: [
+                    "Status",
+                    "Provider",
+                    "Configuration",
+                    "Security and credentials",
+                    "Safety and permissions",
+                    "Execution",
+                    "Budgets",
+                    "Recovery"
+                  ]
+                }
+              ]
+            },
+            themes: [
+              { id: "auto", name: "Automatic" },
+              { id: "light", name: "Relaybase Light" },
+              { id: "dark", name: "Relaybase Dark" },
+              { id: "terminal-green", name: "Terminal Green" },
+              { id: "code-blue", name: "Code Blue" },
+              { id: "pure-black", name: "Pure Black" },
+              { id: "amber-crt", name: "Amber CRT" },
+              { id: "arctic-slate", name: "Arctic Slate" },
+              { id: "plum-night", name: "Plum Night" }
+            ],
+            themeCommand: "/theme <id>"
           },
           logStore: { status: logHealth.status, diagnostics: logHealth.diagnostics }
         });

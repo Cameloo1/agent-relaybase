@@ -107,6 +107,8 @@ While the transcript owns input:
 
 Only an authoritative active foreground operation animates. Waiting for approval, replay, reconnect, completed, failed, cancelled, and offline states are static and include text labels.
 
+Typing while an Agent transcript owns input moves focus to the composer. Editing keys and Enter then operate on that composer. Submitting a message resumes follow mode for the Agent surface used to submit it so the accepted user message and response remain visible; ordinary incoming output does not move a transcript that the user manually paused.
+
 ## Command reference
 
 ### Apps and lifecycle

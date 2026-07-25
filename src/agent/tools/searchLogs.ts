@@ -7,7 +7,8 @@ const parameters = z
     appId: z.string().optional(),
     groupId: z.string().optional(),
     componentRole: z.enum(["frontend", "backend", "worker", "database", "service", "other"]).optional(),
-    limit: z.number().int().positive().max(500).optional()
+    limit: z.number().int().positive().max(100).optional(),
+    scanLimit: z.number().int().positive().max(500).optional()
   })
   .strict();
 
@@ -15,7 +16,7 @@ export function createSearchLogsTool(): RelaybaseAgentToolDefinition<z.infer<typ
   const definition: RelaybaseAgentToolDefinition<z.infer<typeof parameters>> = {
     name: "search_logs",
     description:
-      "Search a bounded redacted log page. This reads from durable logs only and must not expose raw secrets or request unbounded log history.",
+      "Search a bounded redacted log window and return only the latest bounded matches. Use appId/groupId/componentRole to narrow scope, limit to cap returned matches, and scanLimit only when a wider recent search window is necessary.",
     parameters,
     approvalRequired: false,
     risk: "medium",
@@ -25,10 +26,12 @@ export function createSearchLogsTool(): RelaybaseAgentToolDefinition<z.infer<typ
           ...(input.appId ? { appId: input.appId } : {}),
           ...(input.groupId ? { groupId: input.groupId } : {}),
           ...(input.componentRole ? { componentRole: input.componentRole } : {}),
-          limit: input.limit ?? 500
+          limit: input.scanLimit ?? 500
         });
         const needle = input.query.toLowerCase();
-        const events = result.events.filter((event) => event.message.toLowerCase().includes(needle));
+        const matches = result.events.filter((event) => event.message.toLowerCase().includes(needle));
+        const limit = input.limit ?? 50;
+        const events = matches.slice(-limit);
         return successResult(definition.name, {
           events: events.map((event) => ({
             sequence: event.sequence,
@@ -42,6 +45,9 @@ export function createSearchLogsTool(): RelaybaseAgentToolDefinition<z.infer<typ
             redacted: true
           })),
           searched: result.events.length,
+          matched: matches.length,
+          returned: events.length,
+          truncated: matches.length > events.length,
           page: result.page,
           diagnostics: result.diagnostics
         });
