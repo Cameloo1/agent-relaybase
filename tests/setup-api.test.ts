@@ -250,12 +250,11 @@ try {
 `,
     "utf8"
   );
-  const backendPort = await availablePort();
   const hub = await createRelaybaseServer({
     port: 0,
     stateDir,
-    portRangeStart: backendPort,
-    portRangeEnd: backendPort
+    portRangeStart: 19000,
+    portRangeEnd: 19020
   });
   try {
     await hub.listen();

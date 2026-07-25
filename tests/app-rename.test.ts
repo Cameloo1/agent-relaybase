@@ -310,7 +310,12 @@ async function renameFixture(
   await fs.mkdir(project, { recursive: true });
   const manifest = manifestFor(appId, oldName, project, options);
   await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  const hub = await createRelaybaseServer({ port: 0, stateDir });
+  const hub = await createRelaybaseServer({
+    port: 0,
+    stateDir,
+    portRangeStart: 19030,
+    portRangeEnd: 19050
+  });
   await hub.runtime.registry.upsertManifest(manifest, { manifestPath });
   await hub.listen();
   return { hub, appId, oldName, newName, stateDir, project, manifestPath };
