@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "relaybase": {
+      "command": "node",
+      "args": [
+        "./bin/relaybase.cjs",
+        "mcp"
+      ]
+    }
+  }
+}

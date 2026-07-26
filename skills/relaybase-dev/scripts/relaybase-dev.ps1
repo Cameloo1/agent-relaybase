@@ -367,13 +367,26 @@ function Invoke-RouteCheck {
 
   $human = Invoke-HttpCheck -Uri "http://$Id.localhost:$Port$healthPath"
   $agent = Invoke-HttpCheck -Uri "$(Get-BaseUrl)$healthPath" -Headers @{ "X-Relaybase-App" = $Id }
+  $humanOk = [bool]$human.ok
+  $agentOk = [bool]$agent.ok
+  $routeHealth = "failed"
+  if ($humanOk -and $agentOk) {
+    $routeHealth = "full"
+  } elseif ($humanOk -or $agentOk) {
+    $routeHealth = "degraded"
+  }
 
   [pscustomobject]@{
     action = "route-check"
-    ok = ($human.ok -or $agent.ok)
+    ok = ($routeHealth -ne "failed")
+    degraded = ($routeHealth -eq "degraded")
+    routeHealth = $routeHealth
+    routePolicy = "human-or-agent; full requires both humanRoute and agentRoute"
     id = $Id
     healthPath = $healthPath
     status = $status.app
+    humanRoute = $human
+    agentRoute = $agent
     human = $human
     agent = $agent
   }
@@ -481,6 +494,9 @@ function Ensure-Manifest {
     cwd = $Cwd
     protocol = "http"
     healthUrl = "/"
+  }
+  if ($BackendPort -gt 0) {
+    $manifest["upstreamPort"] = $BackendPort
   }
 
   $dir = Split-Path -Parent $path

@@ -1,19 +1,43 @@
 import http from "node:http";
+import { buildAppComponentState } from "./appComponents.ts";
+import { isHealthyHttpStatus } from "./health.ts";
 import type { RelaybaseRuntime } from "./server.ts";
 import { isPortOpen } from "./ports.ts";
-import type { AppReadiness, AppState, AppStatusView, ReadinessCheck, ReadinessState, RuntimeView } from "./types.ts";
+import type { RelaybaseState } from "./apiTypes.ts";
+import type {
+  AppReadiness,
+  AppState,
+  AppStatusView,
+  ReadinessCheck,
+  ReadinessState,
+  RouteHealth,
+  RouteProbe,
+  RuntimeView
+} from "./types.ts";
 
 const DEFAULT_READINESS_TIMEOUT_MS = 8000;
+// State snapshots feed interactive clients. They must not inherit a full app
+// startup budget from a slow or wedged route; explicit lifecycle proof already
+// owns the longer readiness wait.
+const MAX_ROUTE_PROBE_TIMEOUT_MS = 2_000;
 
-interface RouteCheck {
-  reachable: boolean;
-  statusCode?: number;
-  error?: string;
+export async function getRelaybaseState(runtime: RelaybaseRuntime): Promise<RelaybaseState> {
+  const generatedAt = new Date().toISOString();
+  const statuses = await runtime.processes.listStatuses();
+  const apps = await Promise.all(statuses.map((app) => buildAppState(runtime, app.id, { status: app })));
+  const componentState = buildAppComponentState({ states: apps, statuses, generatedAt });
+
+  return {
+    apps,
+    groups: componentState.groups,
+    components: componentState.components,
+    ...(componentState.diagnostics.length ? { diagnostics: componentState.diagnostics } : {}),
+    generatedAt
+  };
 }
 
 export async function getAllAppStates(runtime: RelaybaseRuntime): Promise<AppState[]> {
-  const statuses = await runtime.processes.listStatuses();
-  return Promise.all(statuses.map((app) => buildAppState(runtime, app.id, { status: app })));
+  return (await getRelaybaseState(runtime)).apps;
 }
 
 export async function getAppState(runtime: RelaybaseRuntime, id: string): Promise<AppState> {
@@ -25,6 +49,8 @@ export async function getAppState(runtime: RelaybaseRuntime, id: string): Promis
 export function composeAppState(input: {
   id: string;
   name?: string;
+  cwd?: string;
+  manifestPath?: string;
   registered: boolean;
   runtime: RuntimeView;
   hubHost: string;
@@ -32,6 +58,7 @@ export function composeAppState(input: {
   backendPort?: number;
   backendPortOpen: boolean;
   routeReachable: boolean;
+  routeHealth?: RouteHealth;
   recentLogs: string[];
   readinessCheckedAt: string;
   timeoutMs?: number;
@@ -50,11 +77,14 @@ export function composeAppState(input: {
   return {
     id: input.id,
     name: input.name ?? input.id,
+    ...(input.cwd ? { cwd: input.cwd } : {}),
+    ...(input.manifestPath ? { manifestPath: input.manifestPath } : {}),
     registered: input.registered,
     runtime: input.runtime,
     ...(input.backendPort ? { backendPort: input.backendPort } : {}),
     backendPortOpen: input.backendPortOpen,
     routeReachable: input.routeReachable,
+    ...(input.routeHealth ? { routeHealth: input.routeHealth } : {}),
     humanUrl,
     agentUrl,
     agentHeaders: { "X-Relaybase-App": input.id },
@@ -85,38 +115,60 @@ async function buildAppState(
   const runtimeView = status?.runtime ?? stoppedRuntime();
   const backendPort = runtimeView.assignedPort ?? status?.upstreamPort;
   const backendPortOpen = backendPort ? await isPortOpen(backendPort, runtime.host) : false;
-  const route =
-    status && status.protocol !== "tcp"
-      ? await checkRouteReachability(runtime, status, DEFAULT_READINESS_TIMEOUT_MS)
-      : { reachable: status?.protocol === "tcp" ? backendPortOpen : false };
+  const timeoutMs = status?.healthTimeoutMs ?? status?.startTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
+  const routeHealth =
+    status && status.protocol !== "tcp" ? await checkRouteHealth(runtime, status, timeoutMs) : undefined;
+  const routeReachable = status?.protocol === "tcp" ? backendPortOpen : Boolean(routeHealth?.ok);
   const recentLogs = status ? (await runtime.processes.logs(id)).slice(-50) : [];
 
   const state = composeAppState({
     id,
     name: status?.name,
+    cwd: status?.cwd,
+    manifestPath: status?.manifestPath,
     registered: Boolean(status),
     runtime: runtimeView,
     hubHost: runtime.host,
     hubPort: runtime.port,
     ...(backendPort ? { backendPort } : {}),
     backendPortOpen,
-    routeReachable: route.reachable,
+    routeReachable,
+    ...(routeHealth ? { routeHealth } : {}),
     recentLogs,
     readinessCheckedAt: checkedAt,
-    timeoutMs: DEFAULT_READINESS_TIMEOUT_MS
+    timeoutMs
   });
 
-  if (!state.readiness.failureReason && route.error) {
-    state.readiness.failureReason = route.error;
+  const routeFailure = routeHealth ? routeFailureDetail(routeHealth) : undefined;
+  if (!state.readiness.failureReason && routeFailure) {
+    state.readiness.failureReason = routeFailure;
   }
 
-  state.readiness.checks.push({
-    name: "route-status-code",
-    ok: route.reachable,
-    checkedAt,
-    ...(route.statusCode ? { value: route.statusCode } : {}),
-    ...(route.error ? { detail: route.error } : {})
-  });
+  if (routeHealth) {
+    state.readiness.checks.push(
+      {
+        name: "route-health",
+        ok: routeHealth.ok,
+        checkedAt,
+        value: routeHealth.status,
+        detail: routeHealth.policy
+      },
+      {
+        name: "human-route",
+        ok: routeHealth.humanRoute.ok,
+        checkedAt,
+        ...(routeHealth.humanRoute.statusCode ? { value: routeHealth.humanRoute.statusCode } : {}),
+        ...(routeHealth.humanRoute.error ? { detail: routeHealth.humanRoute.error } : {})
+      },
+      {
+        name: "agent-route",
+        ok: routeHealth.agentRoute.ok,
+        checkedAt,
+        ...(routeHealth.agentRoute.statusCode ? { value: routeHealth.agentRoute.statusCode } : {}),
+        ...(routeHealth.agentRoute.error ? { detail: routeHealth.agentRoute.error } : {})
+      }
+    );
+  }
 
   return state;
 }
@@ -193,6 +245,10 @@ function readinessState(input: {
     return "failed";
   }
 
+  if (input.runtime.status === "degraded") {
+    return "unhealthy";
+  }
+
   if (
     input.runtime.status === "running" &&
     input.runtime.health === "healthy" &&
@@ -227,6 +283,10 @@ function readinessFailureReason(input: {
     return "App is stopped.";
   }
 
+  if (input.runtime.status === "degraded") {
+    return "Relaybase can see the configured backend port, but cannot prove that it belongs to this app.";
+  }
+
   if (!input.backendPortOpen) {
     return "Backend port is not open.";
   }
@@ -258,37 +318,63 @@ function primaryAction(
     return "stop";
   }
 
-  if (runtime.status === "errored" || runtime.status === "conflict") {
+  if (runtime.status === "errored" || runtime.status === "conflict" || runtime.status === "degraded") {
     return "repair";
   }
 
   return "start";
 }
 
-async function checkRouteReachability(
+async function checkRouteHealth(
   runtime: RelaybaseRuntime,
   app: AppStatusView,
   timeoutMs: number
-): Promise<RouteCheck> {
+): Promise<RouteHealth> {
   const path = routeHealthPath(app.healthUrl);
+  const [humanRoute, agentRoute] = await Promise.all([
+    checkRoute(runtime, {
+      path,
+      timeoutMs,
+      url: `http://${app.id}.localhost:${runtime.port}${path}`,
+      headers: { host: `${app.id}.localhost:${runtime.port}` }
+    }),
+    checkRoute(runtime, {
+      path,
+      timeoutMs,
+      url: `http://${runtime.host}:${runtime.port}${path}`,
+      headers: { host: "localhost", "x-relaybase-app": app.id }
+    })
+  ]);
+  const status = humanRoute.ok && agentRoute.ok ? "full" : humanRoute.ok || agentRoute.ok ? "degraded" : "failed";
+  return {
+    status,
+    ok: status !== "failed",
+    policy: "human-or-agent",
+    humanRoute,
+    agentRoute
+  };
+}
+
+async function checkRoute(
+  runtime: RelaybaseRuntime,
+  input: { path: string; timeoutMs: number; url: string; headers: Record<string, string> }
+): Promise<RouteProbe> {
   return new Promise((resolve) => {
     const request = http.request(
       {
         host: runtime.host,
         port: runtime.port,
-        path,
+        path: input.path,
         method: "GET",
-        timeout: Math.min(timeoutMs, 1000),
-        headers: {
-          host: "localhost",
-          "x-relaybase-app": app.id
-        }
+        timeout: routeProbeTimeoutMs(input.timeoutMs),
+        headers: input.headers
       },
       (response) => {
         response.resume();
         const statusCode = response.statusCode ?? 0;
         resolve({
-          reachable: statusCode >= 200 && statusCode < 500,
+          ok: isHealthyHttpStatus(statusCode),
+          url: input.url,
           statusCode
         });
       }
@@ -296,11 +382,24 @@ async function checkRouteReachability(
 
     request.once("timeout", () => {
       request.destroy();
-      resolve({ reachable: false, error: "Relaybase route check timed out." });
+      resolve({ ok: false, url: input.url, error: "Relaybase route check timed out." });
     });
-    request.once("error", (error) => resolve({ reachable: false, error: error.message }));
+    request.once("error", (error) => resolve({ ok: false, url: input.url, error: error.message }));
     request.end();
   });
+}
+
+function routeProbeTimeoutMs(timeoutMs: number): number {
+  return Math.min(Math.max(250, Math.min(timeoutMs, MAX_ROUTE_PROBE_TIMEOUT_MS)), timeoutMs);
+}
+
+function routeFailureDetail(routeHealth: RouteHealth): string | undefined {
+  if (routeHealth.ok) {
+    return undefined;
+  }
+
+  const details = [routeHealth.humanRoute.error, routeHealth.agentRoute.error].filter(Boolean);
+  return details.length ? details.join("; ") : "Relaybase human and agent routes are not reachable.";
 }
 
 function routeHealthPath(healthUrl?: string): string {

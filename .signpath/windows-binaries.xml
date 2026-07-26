@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file-set product-name="Relaybase"
+                 product-version="${version}"
+                 file-version="${version}"
+                 company-name="Relaybase OSS Project"
+                 copyright="Copyright (c) 2026 Relaybase contributors">
+      <include path="relaybase-tui-windows-amd64.exe" />
+      <include path="relaybase-tui-windows-arm64.exe" />
+      <for-each>
+        <authenticode-sign description="Relaybase"
+                           description-url="https://github.com/Cameloo1/relaybase" />
+      </for-each>
+    </pe-file-set>
+  </zip-file>
+</artifact-configuration>

@@ -25,6 +25,30 @@ export function proxyHttpRequest(options: {
   headers["x-forwarded-host"] = request.headers.host ?? "";
   headers["x-forwarded-proto"] = "http";
   headers["x-relaybase-routed-app"] = app.id;
+  let failed = false;
+  const failProxyResponse = (error: Error) => {
+    if (failed) {
+      return;
+    }
+    failed = true;
+    if (!response.headersSent) {
+      response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
+      response.end(
+        JSON.stringify(
+          {
+            error: "Relaybase proxy failed",
+            app: app.id,
+            detail: error.message
+          },
+          null,
+          2
+        )
+      );
+      return;
+    }
+
+    response.destroy(error);
+  };
 
   const upstream = http.request(
     {
@@ -36,27 +60,12 @@ export function proxyHttpRequest(options: {
     },
     (upstreamResponse) => {
       response.writeHead(upstreamResponse.statusCode ?? 502, filterHeaders(upstreamResponse.headers));
+      upstreamResponse.once("error", failProxyResponse);
       upstreamResponse.pipe(response);
     }
   );
 
-  upstream.once("error", (error) => {
-    if (!response.headersSent) {
-      response.writeHead(502, { "content-type": "application/json; charset=utf-8" });
-    }
-
-    response.end(
-      JSON.stringify(
-        {
-          error: "Relaybase proxy failed",
-          app: app.id,
-          detail: error.message
-        },
-        null,
-        2
-      )
-    );
-  });
+  upstream.once("error", failProxyResponse);
 
   request.pipe(upstream);
 }
@@ -79,6 +88,14 @@ export function proxyUpgrade(options: {
 
     upstream.pipe(socket);
     socket.pipe(upstream);
+  });
+
+  socket.once("error", () => {
+    upstream.destroy();
+  });
+
+  upstream.once("close", () => {
+    socket.destroy();
   });
 
   upstream.once("error", (error) => {
@@ -109,8 +126,18 @@ function filterHeaders(headers: http.IncomingHttpHeaders): http.OutgoingHttpHead
 function rebuildUpgradeRequest(request: http.IncomingMessage): string {
   const lines = [`${request.method ?? "GET"} ${request.url ?? "/"} HTTP/${request.httpVersion}`];
   for (let index = 0; index < request.rawHeaders.length; index += 2) {
-    lines.push(`${request.rawHeaders[index]}: ${request.rawHeaders[index + 1]}`);
+    const key = request.rawHeaders[index];
+    const value = request.rawHeaders[index + 1];
+    if (!key || value === undefined || shouldStripUpgradeHeader(key)) {
+      continue;
+    }
+    lines.push(`${key}: ${value}`);
   }
 
   return `${lines.join("\r\n")}\r\n\r\n`;
+}
+
+function shouldStripUpgradeHeader(key: string): boolean {
+  const normalized = key.toLowerCase();
+  return HOP_BY_HOP_HEADERS.has(normalized) && normalized !== "connection" && normalized !== "upgrade";
 }

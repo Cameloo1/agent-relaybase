@@ -1,0 +1,4 @@
+interface:
+  display_name: "Relaybase"
+  short_description: "Run local apps through Relaybase lifecycle, routing, logs, health, and MCP."
+  default_prompt: "Use $relaybase to run this app through Relaybase with direct ports only as fallback."

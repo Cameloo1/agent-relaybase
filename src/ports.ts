@@ -32,13 +32,3 @@ export async function canBindPort(port: number, host = "127.0.0.1"): Promise<boo
     });
   });
 }
-
-export async function findAvailablePort(start: number, end: number, host = "127.0.0.1"): Promise<number> {
-  for (let port = start; port <= end; port += 1) {
-    if (await canBindPort(port, host)) {
-      return port;
-    }
-  }
-
-  throw new Error(`No available ports in range ${start}-${end}.`);
-}

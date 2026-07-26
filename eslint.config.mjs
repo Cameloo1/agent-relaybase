@@ -22,7 +22,16 @@ const nodeGlobals = {
 
 export default [
   {
-    ignores: ["coverage/**", "node_modules/**", "*.tgz"]
+    ignores: [
+      "artifacts/**",
+      "coverage/**",
+      "dist/**",
+      "dist-runtime/**",
+      "node_modules/**",
+      "bin/relaybase-tui/relaybase-tui-*",
+      "packages/relaybase-tui-*/bin/relaybase-tui-*",
+      "*.tgz"
+    ]
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

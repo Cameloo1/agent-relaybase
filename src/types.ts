@@ -1,10 +1,32 @@
 export type AppProtocol = "http" | "http+ws" | "tcp";
 
-export type RuntimeStatus = "stopped" | "starting" | "running" | "stopping" | "errored" | "conflict";
+export type RuntimeStatus = "stopped" | "starting" | "running" | "stopping" | "degraded" | "errored" | "conflict";
 
 export type HealthStatus = "unknown" | "healthy" | "unhealthy";
 
 export type RouteSource = "header" | "host";
+
+export type AppComponentRole = "frontend" | "backend" | "worker" | "database" | "service" | "other";
+
+export type AppComponentStatus = "stopped" | "starting" | "running" | "stopping" | "failed" | "degraded";
+
+export type AppAggregateStatus = "failed" | "degraded" | "starting" | "running" | "stopped";
+
+export interface RelaybaseManifestMetadata {
+  groupId: string;
+  componentRole: AppComponentRole;
+  displayName: string;
+  paneLabel: string;
+  paneOrder: number;
+}
+
+export interface AppManifestDiagnostic {
+  code: string;
+  severity: "info" | "warning" | "error";
+  message: string;
+  field?: string;
+  detail?: unknown;
+}
 
 export type LifecyclePhase =
   | "stopped"
@@ -14,6 +36,7 @@ export type LifecyclePhase =
   | "waiting_for_health"
   | "running"
   | "stopping"
+  | "degraded"
   | "cleanup_failed"
   | "stop_verification_failed"
   | "errored"
@@ -48,7 +71,26 @@ export interface LifecycleAttempt {
   endedAt?: string;
   assignedPort?: number;
   command?: string;
+  launchPlan?: {
+    source: CompiledLaunchPlan["source"];
+    adapterId: string;
+    adapterVersion: number;
+    executable: string;
+    args: string[];
+    cwd: string;
+    environmentNames: string[];
+    port: CompiledLaunchPlan["port"];
+  };
   hooks: LifecycleHookAttempt[];
+  verification?: {
+    registrationPreviewId?: string;
+    policyDigest?: string;
+    declaredTarget?: string;
+    successfulTarget?: string;
+    statusCode?: number;
+    assignedPortOpen?: boolean;
+    candidateTargetsChecked: string[];
+  };
   error?: string;
 }
 
@@ -82,6 +124,7 @@ export interface AppManifestInput {
   id?: unknown;
   name?: unknown;
   command?: unknown;
+  launch?: unknown;
   cwd?: unknown;
   protocol?: unknown;
   healthUrl?: unknown;
@@ -95,6 +138,36 @@ export interface AppManifestInput {
   stopTimeoutMs?: unknown;
   healthTimeoutMs?: unknown;
   mcp?: unknown;
+  relaybase?: unknown;
+}
+
+export type AppLaunchPortBinding = "environment" | "arguments" | "fixed" | "external";
+
+export interface AppLaunch {
+  executable: string;
+  args: string[];
+  environment: Record<string, string>;
+  portBinding: AppLaunchPortBinding;
+}
+
+export interface CompiledLaunchPlan {
+  schemaVersion: 1;
+  source: "declared" | "detected" | "generated" | "legacy" | "fixed" | "external";
+  adapterId: string;
+  adapterVersion: number;
+  executable: string;
+  args: readonly string[];
+  cwd: string;
+  environment: Readonly<Record<string, string>>;
+  port: Readonly<{
+    ownership: "relaybase" | "fixed" | "external";
+    strategy: "arguments" | "environment" | "fixed";
+    requestedPort?: number;
+  }>;
+  health?: Readonly<{ protocol: AppProtocol; target?: string }>;
+  generatedFiles: readonly unknown[];
+  warnings: readonly AppManifestDiagnostic[];
+  confidence: "high" | "medium" | "low";
 }
 
 export interface AppRecord {
@@ -102,6 +175,7 @@ export interface AppRecord {
   id: string;
   name: string;
   command: string;
+  launch?: AppLaunch;
   cwd: string;
   protocol: AppProtocol;
   healthUrl?: string;
@@ -115,6 +189,8 @@ export interface AppRecord {
   stopTimeoutMs?: number;
   healthTimeoutMs?: number;
   mcp?: AppMcpConfig;
+  relaybase?: RelaybaseManifestMetadata;
+  manifestDiagnostics?: AppManifestDiagnostic[];
   manifestPath?: string;
   createdAt: string;
   updatedAt: string;
@@ -171,6 +247,15 @@ export interface ServerOptions {
   portRangeStart?: number;
   portRangeEnd?: number;
   stopPortOpenProbe?: (port: number, host: string) => Promise<boolean>;
+  agentEnvironment?: {
+    modelSource?: import("./agent/types.ts").AgentModelSource;
+    envFilePath?: string;
+    envFileFingerprint?: string;
+    envFileAppliedKeys?: string[];
+    envFileSkippedKeys?: string[];
+    envFileSourceKind?: "explicit_env_file" | "cwd_env_file";
+  };
+  agentRuntime?: import("./agent/runtime.ts").OperatorAgentRuntime;
 }
 
 export type ChildMcpRuntimeStatus = "stopped" | "starting" | "connected" | "draining" | "errored" | "restarting";
@@ -230,14 +315,62 @@ export interface AppReadiness {
   failureReason?: string;
 }
 
+export type RouteHealthStatus = "full" | "degraded" | "failed" | "unknown";
+
+export interface RouteProbe {
+  ok: boolean;
+  url: string;
+  statusCode?: number;
+  error?: string;
+}
+
+export interface RouteHealth {
+  status: RouteHealthStatus;
+  ok: boolean;
+  policy: "human-or-agent";
+  humanRoute: RouteProbe;
+  agentRoute: RouteProbe;
+}
+
+export interface AppComponentRoute {
+  humanUrl: string;
+  agentUrl: string;
+  reachable: boolean;
+  health?: RouteHealth;
+}
+
+export interface AppComponent {
+  appId: string;
+  groupId: string;
+  role: AppComponentRole;
+  paneLabel: string;
+  paneOrder: number;
+  displayName: string;
+  route: AppComponentRoute;
+  pid?: number;
+  port?: number;
+  status: AppComponentStatus;
+  lastError: string | null;
+}
+
+export interface AppGroup {
+  groupId: string;
+  displayName: string;
+  components: AppComponent[];
+  aggregateStatus: AppAggregateStatus;
+}
+
 export interface AppState {
   id: string;
   name: string;
+  cwd?: string;
+  manifestPath?: string;
   registered: boolean;
   runtime: RuntimeView;
   backendPort?: number;
   backendPortOpen: boolean;
   routeReachable: boolean;
+  routeHealth?: RouteHealth;
   humanUrl: string;
   agentUrl: string;
   agentHeaders: Record<string, string>;

@@ -3,8 +3,11 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:chil
 import type { Registry } from "./registry.ts";
 import { DEFAULT_HOST, DEFAULT_PORT, DEFAULT_PORT_RANGE_END, DEFAULT_PORT_RANGE_START } from "./state.ts";
 import { ChildMcpSupervisor } from "./childMcp.ts";
-import { checkAppHealth, waitForHealthy } from "./health.ts";
-import { findAvailablePort, isPortOpen } from "./ports.ts";
+import { checkAppHealth, probeLocalHealthTarget, waitForHealthy } from "./health.ts";
+import { type DurableLogEvent, type LogStore, type LogStoreQuery, type LogStoreQueryResult } from "./logStore.ts";
+import { canBindPort, isPortOpen } from "./ports.ts";
+import { redactSecretLikeValues } from "./redaction.ts";
+import { compileLaunchPlan } from "./launchPlan.ts";
 import type {
   AppRecord,
   AppStatusView,
@@ -39,19 +42,80 @@ interface RuntimeEntry {
   stopVerification?: StopVerification;
 }
 
+const WINDOWS_COMMAND_SHIMS = new Set(["npm", "npx", "pnpm", "yarn", "corepack"]);
+
+export function normalizeWindowsCommandShim(command: string, platform = process.platform): string {
+  if (platform !== "win32") {
+    return command;
+  }
+  return command.replace(/^(\s*)(npm|npx|pnpm|yarn|corepack)(?=\s|$)/i, "$1$2.cmd");
+}
+
+function throwIfLifecycleAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw lifecycleAbortError(signal);
+  }
+}
+
+function lifecycleAbortError(signal: AbortSignal): Error {
+  const reason = typeof signal.reason === "string" && signal.reason.trim() ? signal.reason : "daemon_shutdown";
+  const error = new Error(`Lifecycle operation was cancelled: ${reason}.`);
+  error.name = "AbortError";
+  return error;
+}
+
+function waitForHealthyOrAbort(work: () => Promise<boolean>, signal?: AbortSignal): Promise<boolean> {
+  if (!signal) {
+    return work();
+  }
+  if (signal.aborted) {
+    return Promise.resolve(false);
+  }
+  return new Promise<boolean>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => resolve(false));
+    signal.addEventListener("abort", onAbort, { once: true });
+    void work().then(
+      (healthy) => finish(() => resolve(healthy)),
+      (error) => finish(() => reject(error))
+    );
+  });
+}
+
 interface SpawnSpec {
   command: string;
   args: string[];
   shell: boolean;
 }
 
-export interface AppLogEvent {
+export type AppLogEvent = DurableLogEvent;
+
+export interface AppLogStreamRotatedEvent {
   appId: string;
-  line: string;
-  stream: "stdout" | "stderr" | "system";
-  source: "system" | LifecycleHookName;
-  sequence: number;
+  droppedLogs: number;
+  droppedEvents: number;
+  retainedLogs: number;
+  retainedEvents: number;
   at: string;
+}
+
+export interface AppRuntimeChangedEvent {
+  appId: string;
+  status: RuntimeStatus;
+  health: "unknown" | "healthy" | "unhealthy";
+  phase: LifecyclePhase;
+  reason: string;
+  at: string;
+  pid?: number;
+  assignedPort?: number;
 }
 
 export interface ProcessManagerOptions {
@@ -60,6 +124,28 @@ export interface ProcessManagerOptions {
   portRangeStart?: number;
   portRangeEnd?: number;
   stopPortOpenProbe?: (port: number, host: string) => Promise<boolean>;
+  logStore?: LogStore;
+  sanitizeEnvironment?: (environment: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
+}
+
+export interface LifecycleRunOptions {
+  signal?: AbortSignal;
+  verification?: {
+    registrationPreviewId?: string;
+    policyDigest?: string;
+    startupBudgetMs: number;
+    probeTimeoutMs: number;
+    stopBudgetMs: number;
+    closureBudgetMs: number;
+    candidateHealthTargets: string[];
+    candidateHealthProbeLimit: number;
+  };
+}
+
+export interface ProcessManagerShutdownResult {
+  requestedAppIds: string[];
+  stoppedAppIds: string[];
+  failed: Array<{ appId: string; error: string }>;
 }
 
 export class ProcessManager {
@@ -70,9 +156,14 @@ export class ProcessManager {
   readonly portRangeEnd: number;
   readonly mcp: ChildMcpSupervisor;
   readonly stopPortOpenProbe: (port: number, host: string) => Promise<boolean>;
+  readonly logStore?: LogStore;
+  readonly sanitizeEnvironment: (environment: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
   #runtime = new Map<string, RuntimeEntry>();
   #mutations = new Map<string, { action: "start" | "stop" | "restart"; promise: Promise<RuntimeView> }>();
+  #portReservations = new Map<number, string>();
   #logSubscribers = new Set<(event: AppLogEvent) => void>();
+  #logRotationSubscribers = new Set<(event: AppLogStreamRotatedEvent) => void>();
+  #runtimeSubscribers = new Set<(event: AppRuntimeChangedEvent) => void>();
   #logSequence = 0;
 
   constructor(registry: Registry, options: ProcessManagerOptions = {}) {
@@ -82,10 +173,65 @@ export class ProcessManager {
     this.portRangeStart = options.portRangeStart ?? DEFAULT_PORT_RANGE_START;
     this.portRangeEnd = options.portRangeEnd ?? DEFAULT_PORT_RANGE_END;
     this.stopPortOpenProbe = options.stopPortOpenProbe ?? ((port, host) => isPortOpen(port, host));
-    this.mcp = new ChildMcpSupervisor();
+    this.logStore = options.logStore;
+    this.sanitizeEnvironment = options.sanitizeEnvironment ?? ((environment) => ({ ...environment }));
+    this.#logSequence = options.logStore?.lastSequence ?? 0;
+    this.mcp = new ChildMcpSupervisor({ sanitizeEnvironment: this.sanitizeEnvironment });
   }
 
-  async start(id: string): Promise<RuntimeView> {
+  runningOwnedAppIds(): string[] {
+    return [...this.#runtime.entries()]
+      .filter(([, entry]) => Boolean(entry.child && entry.child.exitCode === null))
+      .map(([appId]) => appId)
+      .sort();
+  }
+
+  runningExternalAppIds(): string[] {
+    return [...this.#runtime.entries()]
+      .filter(([, entry]) => !entry.child && entry.status === "running")
+      .map(([appId]) => appId)
+      .sort();
+  }
+
+  async shutdownOwnedApps(options: { timeoutMs?: number } = {}): Promise<ProcessManagerShutdownResult> {
+    const requestedAppIds = this.runningOwnedAppIds();
+    if (requestedAppIds.length === 0) {
+      return { requestedAppIds, stoppedAppIds: [], failed: [] };
+    }
+    const controller = new AbortController();
+    const timeoutMs = Math.min(Math.max(options.timeoutMs ?? 120_000, 1_000), 10 * 60_000);
+    const timer = setTimeout(() => controller.abort("process_manager_shutdown_timeout"), timeoutMs);
+    timer.unref?.();
+    try {
+      const settled = await Promise.allSettled(
+        requestedAppIds.map(async (appId) => {
+          const state = await this.stop(appId, { signal: controller.signal });
+          if (state.status !== "stopped") {
+            throw new Error(state.lastError ?? `App stopped with status ${state.status}.`);
+          }
+          return appId;
+        })
+      );
+      const stoppedAppIds: string[] = [];
+      const failed: Array<{ appId: string; error: string }> = [];
+      settled.forEach((result, index) => {
+        const appId = requestedAppIds[index];
+        if (result.status === "fulfilled") {
+          stoppedAppIds.push(result.value);
+        } else {
+          failed.push({
+            appId,
+            error: result.reason instanceof Error ? result.reason.message : String(result.reason)
+          });
+        }
+      });
+      return { requestedAppIds, stoppedAppIds, failed };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async start(id: string, options: LifecycleRunOptions = {}): Promise<RuntimeView> {
     const active = this.#mutations.get(id);
     if (active) {
       if (active.action === "start") {
@@ -97,14 +243,16 @@ export class ProcessManager {
       return this.#view(entry, id);
     }
 
-    const promise = this.#startLocked(id).finally(() => {
+    const promise = this.#startLocked(id, options).finally(() => {
       this.#mutations.delete(id);
     });
     this.#mutations.set(id, { action: "start", promise });
     return promise;
   }
 
-  async #startLocked(id: string): Promise<RuntimeView> {
+  async #startLocked(id: string, options: LifecycleRunOptions = {}): Promise<RuntimeView> {
+    const signal = options.signal;
+    throwIfLifecycleAborted(signal);
     const app = await this.registry.get(id);
     if (!app) {
       throw new Error(`Unknown app: ${id}`);
@@ -128,17 +276,40 @@ export class ProcessManager {
         "conflict"
       );
       this.#runtime.set(id, conflict);
+      this.#publishRuntimeChange(id, conflict, "port_conflict");
       return this.#view(conflict, id);
     }
 
     const entry = this.#entry("starting", "unknown", assignedPort, undefined, "prestarting");
     entry.cleanupStatus = "not_needed";
     const attempt = this.#startAttempt(app, assignedPort);
+    if (options.verification) {
+      attempt.verification = {
+        ...(options.verification.registrationPreviewId
+          ? { registrationPreviewId: options.verification.registrationPreviewId }
+          : {}),
+        ...(options.verification.policyDigest ? { policyDigest: options.verification.policyDigest } : {}),
+        ...(app.healthUrl ? { declaredTarget: app.healthUrl } : {}),
+        candidateTargetsChecked: []
+      };
+    }
+    const launchPlan = compileLaunchPlan(app, { host: this.hubHost, port: assignedPort, hubPort: this.hubPort });
+    attempt.launchPlan = {
+      source: launchPlan.source,
+      adapterId: launchPlan.adapterId,
+      adapterVersion: launchPlan.adapterVersion,
+      executable: launchPlan.executable,
+      args: [...launchPlan.args],
+      cwd: launchPlan.cwd,
+      environmentNames: Object.keys(launchPlan.environment).sort(),
+      port: launchPlan.port
+    };
     entry.lastStartAttempt = attempt;
     this.#recordAttempt(entry, attempt);
     this.#runtime.set(id, entry);
+    this.#publishRuntimeChange(id, entry, "start_requested");
 
-    const env = this.#appEnv(app, assignedPort);
+    const env = { ...this.#appEnv(app, assignedPort), ...launchPlan.environment };
     if (app.preStartCommand) {
       const preStart = await this.#runHook(
         app,
@@ -146,9 +317,21 @@ export class ProcessManager {
         "preStart",
         app.preStartCommand,
         app.preStartTimeoutMs ?? 120_000,
-        env
+        env,
+        signal
       );
       attempt.hooks.push(preStart);
+      if (signal?.aborted) {
+        entry.status = "errored";
+        entry.health = "unhealthy";
+        entry.phase = "errored";
+        entry.lastError = "Lifecycle start was cancelled during daemon shutdown.";
+        this.#finishAttempt(attempt, "failed", entry.phase, entry.lastError);
+        this.#releasePortReservation(app.id, assignedPort);
+        entry.assignedPort = undefined;
+        this.#publishRuntimeChange(id, entry, "start_cancelled");
+        throw lifecycleAbortError(signal);
+      }
       if (preStart.status !== "succeeded") {
         const message = preStart.error ?? `preStartCommand failed with exit code ${preStart.exitCode ?? "unknown"}.`;
         entry.status = "errored";
@@ -156,12 +339,25 @@ export class ProcessManager {
         entry.phase = "errored";
         entry.lastError = message;
         this.#finishAttempt(attempt, "failed", entry.phase, message);
+        this.#publishRuntimeChange(id, entry, "prestart_failed");
         return this.#view(entry, id);
       }
     }
 
     entry.phase = "launching";
-    const spawnSpec = this.#spawnSpec(app.command);
+    if (launchPlan.port.ownership === "external") {
+      const healthy = await checkAppHealth(app, assignedPort, this.hubHost);
+      entry.status = healthy ? "running" : "errored";
+      entry.health = healthy ? "healthy" : "unhealthy";
+      entry.phase = healthy ? "running" : "errored";
+      entry.lastError = healthy ? undefined : "External application is not reachable on its declared upstream port.";
+      this.#finishAttempt(attempt, healthy ? "succeeded" : "failed", entry.phase, entry.lastError);
+      this.#publishRuntimeChange(id, entry, healthy ? "external_ready" : "external_unhealthy");
+      return this.#view(entry, id);
+    }
+    const spawnSpec = app.launch
+      ? this.#structuredSpawnSpec(launchPlan.executable, [...launchPlan.args])
+      : this.#spawnSpec(app.command);
     const child = spawn(spawnSpec.command, spawnSpec.args, {
       cwd: app.cwd,
       env,
@@ -172,19 +368,31 @@ export class ProcessManager {
     entry.child = child;
     entry.pid = child.pid;
     entry.startedAt = new Date().toISOString();
-    this.#appendLog(app.id, `[relaybase] starting ${app.id} on ${this.hubHost}:${assignedPort}`, "system", "system");
+    this.#appendLog(
+      app.id,
+      `[relaybase] starting ${app.id} on ${this.hubHost}:${assignedPort}`,
+      "system",
+      "lifecycle_starting",
+      app,
+      env
+    );
     await this.mcp.startApp(app);
+    if (signal?.aborted) {
+      return this.#cancelStartedApp(app, entry, child, attempt, signal);
+    }
 
-    child.stdout.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stdout", "start"));
-    child.stderr.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stderr", "start"));
+    child.stdout.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stdout", "process", app, env));
+    child.stderr.on("data", (chunk) => this.#appendLog(app.id, chunk.toString(), "stderr", "process", app, env));
     child.once("error", (error) => {
       entry.status = "errored";
       entry.health = "unhealthy";
       entry.phase = "errored";
       entry.lastError = error.message;
-      this.#appendLog(app.id, `[relaybase] process error: ${error.message}`, "system", "system");
+      this.#appendLog(app.id, `[relaybase] process error: ${error.message}`, "system", "process", app, env, "error");
+      this.#publishRuntimeChange(app.id, entry, "process_error");
     });
     child.once("exit", (code, signal) => {
+      const expectedStop = entry.status === "stopping" || entry.status === "stopped";
       if (entry.status !== "stopped" && entry.status !== "errored") {
         entry.status = code === 0 ? "stopped" : "errored";
         entry.phase = code === 0 ? "stopped" : "errored";
@@ -200,23 +408,35 @@ export class ProcessManager {
         app.id,
         `[relaybase] exited code=${code ?? "null"} signal=${signal ?? "null"}`,
         "system",
-        "system"
+        "process",
+        app,
+        env,
+        code === 0 || expectedStop ? "info" : "error"
       );
+      this.#publishRuntimeChange(app.id, entry, expectedStop ? "process_stopped" : "process_exited");
     });
 
     entry.phase = "waiting_for_health";
-    const healthy = await waitForHealthy(
-      app,
-      assignedPort,
-      this.hubHost,
-      app.healthTimeoutMs ?? app.startTimeoutMs ?? 8000
+    const healthy = await waitForHealthyOrAbort(
+      () =>
+        waitForHealthy(
+          app,
+          assignedPort,
+          this.hubHost,
+          options.verification?.startupBudgetMs ?? app.healthTimeoutMs ?? app.startTimeoutMs ?? 8000,
+          signal
+        ),
+      signal
     );
-    if (child.exitCode !== null) {
+    if (signal?.aborted) {
+      return this.#cancelStartedApp(app, entry, child, attempt, signal);
+    } else if (child.exitCode !== null) {
       entry.status = "errored";
       entry.health = "unhealthy";
       entry.phase = "errored";
       entry.lastError ??= "Process exited before becoming healthy.";
       this.#finishAttempt(attempt, "failed", entry.phase, entry.lastError);
+      await this.#cleanupAfterFailedStart(app, entry, child);
     } else if (healthy) {
       entry.status = "running";
       entry.health = "healthy";
@@ -224,6 +444,35 @@ export class ProcessManager {
       entry.lastError = undefined;
       this.#finishAttempt(attempt, "succeeded", entry.phase);
     } else {
+      if (options.verification && child.exitCode === null) {
+        if (attempt.verification) {
+          attempt.verification.assignedPortOpen = await isPortOpen(
+            assignedPort,
+            this.hubHost,
+            options.verification.probeTimeoutMs
+          );
+        }
+        const targets = [...new Set(options.verification.candidateHealthTargets)]
+          .filter((target) => target !== app.healthUrl)
+          .slice(0, options.verification.candidateHealthProbeLimit);
+        for (const target of targets) {
+          attempt.verification?.candidateTargetsChecked.push(target);
+          const probe = await probeLocalHealthTarget(
+            target,
+            assignedPort,
+            this.hubHost,
+            options.verification.probeTimeoutMs,
+            signal
+          );
+          if (probe.ok) {
+            if (attempt.verification) {
+              attempt.verification.successfulTarget = target;
+              attempt.verification.statusCode = probe.statusCode;
+            }
+            break;
+          }
+        }
+      }
       entry.status = "errored";
       entry.health = "unhealthy";
       entry.phase = "errored";
@@ -232,10 +481,11 @@ export class ProcessManager {
       await this.#cleanupAfterFailedStart(app, entry, child);
     }
 
+    this.#publishRuntimeChange(id, entry, entry.status === "running" ? "start_ready" : "start_failed");
     return this.#view(entry, id);
   }
 
-  async stop(id: string): Promise<RuntimeView> {
+  async stop(id: string, options: LifecycleRunOptions = {}): Promise<RuntimeView> {
     const active = this.#mutations.get(id);
     if (active) {
       if (active.action === "stop") {
@@ -247,14 +497,14 @@ export class ProcessManager {
       return this.#view(entry, id);
     }
 
-    const promise = this.#stopLocked(id).finally(() => {
+    const promise = this.#stopLocked(id, options).finally(() => {
       this.#mutations.delete(id);
     });
     this.#mutations.set(id, { action: "stop", promise });
     return promise;
   }
 
-  async #stopLocked(id: string): Promise<RuntimeView> {
+  async #stopLocked(id: string, options: LifecycleRunOptions = {}): Promise<RuntimeView> {
     const app = await this.registry.get(id);
     const entry = this.#runtime.get(id);
     if (!app) {
@@ -273,8 +523,9 @@ export class ProcessManager {
       stopped.health = "unhealthy";
       stopped.cleanupStatus = app.stopCommand ? "pending" : "not_needed";
       this.#runtime.set(id, stopped);
+      this.#publishRuntimeChange(id, stopped, "stop_requested");
       stopped.mcpDrain = await this.mcp.stopApp(id);
-      return this.#finalizeStop(app, stopped, attempt, assignedPort);
+      return this.#finalizeStop(app, stopped, attempt, assignedPort, options);
     }
 
     const assignedPort = entry.assignedPort;
@@ -282,23 +533,31 @@ export class ProcessManager {
     entry.phase = "stopping";
     entry.health = "unhealthy";
     entry.cleanupStatus = app.stopCommand ? "pending" : "not_needed";
-    this.#appendLog(id, "[relaybase] stopping", "system", "system");
+    this.#appendLog(id, "[relaybase] stopping", "system", "lifecycle_stopping", app);
+    this.#publishRuntimeChange(id, entry, "stop_requested");
     entry.mcpDrain = await this.mcp.stopApp(id);
 
     await this.#terminateChild(entry.child);
     entry.stoppedAt = new Date().toISOString();
-    return this.#finalizeStop(app, entry, attempt, assignedPort);
+    return this.#finalizeStop(app, entry, attempt, assignedPort, options);
   }
 
-  async restart(id: string): Promise<RuntimeView> {
+  async restart(id: string, options: LifecycleRunOptions = {}): Promise<RuntimeView> {
     const active = this.#mutations.get(id);
     if (active) {
-      return active.promise;
+      if (active.action === "restart") {
+        return active.promise;
+      }
+
+      const entry = this.#runtime.get(id) ?? this.#entry("stopped", "unknown");
+      entry.blockingReason = `${active.action}_in_progress`;
+      return this.#view(entry, id);
     }
 
     const promise = (async () => {
-      await this.#stopLocked(id);
-      return this.#startLocked(id);
+      await this.#stopLocked(id, options);
+      throwIfLifecycleAborted(options.signal);
+      return this.#startLocked(id, options);
     })().finally(() => {
       this.#mutations.delete(id);
     });
@@ -306,12 +565,49 @@ export class ProcessManager {
     return promise;
   }
 
-  async logs(id: string): Promise<string[]> {
-    return [...(this.#runtime.get(id)?.logs ?? [])];
+  async logs(id: string, options: LogStoreQuery = {}): Promise<string[]> {
+    if (this.logStore) {
+      const result = await this.queryLogs({ ...options, appId: id });
+      return result.events.map((event) => event.message);
+    }
+    const limit = options.limit ?? 500;
+    const lines = [...(this.#runtime.get(id)?.logs ?? [])];
+    return lines.slice(-limit);
   }
 
-  async logEvents(id: string): Promise<AppLogEvent[]> {
-    return [...(this.#runtime.get(id)?.logEvents ?? [])];
+  async logEvents(id: string, options: LogStoreQuery = {}): Promise<AppLogEvent[]> {
+    if (this.logStore) {
+      return (await this.queryLogs({ ...options, appId: id })).events;
+    }
+    const limit = options.limit ?? 500;
+    return [...(this.#runtime.get(id)?.logEvents ?? [])].slice(-limit);
+  }
+
+  async queryLogs(query: LogStoreQuery): Promise<LogStoreQueryResult> {
+    if (this.logStore) {
+      return this.logStore.query(query);
+    }
+
+    const appId = query.appId;
+    const events = appId ? [...(this.#runtime.get(appId)?.logEvents ?? [])] : [];
+    const filtered = events
+      .filter((event) => (query.before === undefined ? true : event.sequence < query.before))
+      .filter((event) => (query.after === undefined ? true : event.sequence > query.after))
+      .slice(-(query.limit ?? 500));
+    const oldestSequence = filtered[0]?.sequence;
+    const newestSequence = filtered.at(-1)?.sequence;
+    return {
+      events: filtered,
+      page: {
+        limit: query.limit ?? 500,
+        ...(query.before !== undefined ? { before: query.before } : {}),
+        ...(query.after !== undefined ? { after: query.after } : {}),
+        ...(oldestSequence !== undefined ? { oldestSequence } : {}),
+        ...(newestSequence !== undefined ? { newestSequence } : {}),
+        hasMore: events.length > filtered.length
+      },
+      diagnostics: []
+    };
   }
 
   subscribeLogs(id: string, listener: (event: AppLogEvent) => void): () => void {
@@ -326,26 +622,70 @@ export class ProcessManager {
     };
   }
 
+  subscribeAllLogs(listener: (event: AppLogEvent) => void): () => void {
+    this.#logSubscribers.add(listener);
+    return () => {
+      this.#logSubscribers.delete(listener);
+    };
+  }
+
+  subscribeLogRotations(listener: (event: AppLogStreamRotatedEvent) => void): () => void {
+    this.#logRotationSubscribers.add(listener);
+    return () => {
+      this.#logRotationSubscribers.delete(listener);
+    };
+  }
+
+  subscribeRuntimeChanges(listener: (event: AppRuntimeChangedEvent) => void): () => void {
+    this.#runtimeSubscribers.add(listener);
+    return () => {
+      this.#runtimeSubscribers.delete(listener);
+    };
+  }
+
   async listStatuses(): Promise<AppStatusView[]> {
     const apps = await this.registry.list();
     const views: AppStatusView[] = [];
+    const externalClaims = new Map<number, number>();
+    for (const app of apps) {
+      if (!this.#runtime.has(app.id) && app.upstreamPort) {
+        externalClaims.set(app.upstreamPort, (externalClaims.get(app.upstreamPort) ?? 0) + 1);
+      }
+    }
+    const openPorts = new Map<number, boolean>();
+    await Promise.all(
+      [...externalClaims.keys()].map(async (port) => {
+        openPorts.set(port, await isPortOpen(port, this.hubHost));
+      })
+    );
 
     for (const app of apps) {
       const runtime = this.#runtime.get(app.id);
       const view = runtime ? this.#view(runtime, app.id) : this.#view(this.#entry("stopped", "unknown"), app.id);
       if (!runtime && app.upstreamPort) {
-        view.externalPortOpen = await isPortOpen(app.upstreamPort, this.hubHost);
+        view.externalPortOpen = openPorts.get(app.upstreamPort) ?? false;
         if (view.externalPortOpen) {
-          view.status = "running";
-          view.health =
-            app.protocol === "tcp"
-              ? "healthy"
-              : (await checkAppHealth(app, app.upstreamPort, this.hubHost))
-                ? "healthy"
-                : "unhealthy";
-          view.phase = "running";
           view.assignedPort = app.upstreamPort;
-          view.canOpen = view.health === "healthy";
+          if ((externalClaims.get(app.upstreamPort) ?? 0) > 1) {
+            view.status = "degraded";
+            view.health = "unhealthy";
+            view.phase = "degraded";
+            view.canStart = false;
+            view.canStop = false;
+            view.canOpen = false;
+            view.primaryAction = "repair";
+            view.blockingReason = "external_port_shared";
+          } else {
+            const healthy = app.protocol === "tcp" ? true : await checkAppHealth(app, app.upstreamPort, this.hubHost);
+            view.status = healthy ? "running" : "degraded";
+            view.health = healthy ? "healthy" : "unhealthy";
+            view.phase = healthy ? "running" : "degraded";
+            view.canStart = false;
+            view.canStop = false;
+            view.canOpen = healthy;
+            view.primaryAction = healthy ? "open" : "repair";
+            if (!healthy) view.blockingReason = "external_health_unverified";
+          }
         }
       }
 
@@ -366,8 +706,12 @@ export class ProcessManager {
       return { port: runtime.assignedPort, external: false };
     }
 
-    if (app.upstreamPort && (await isPortOpen(app.upstreamPort, this.hubHost))) {
-      return { port: app.upstreamPort, external: true };
+    if (app.upstreamPort) {
+      const apps = await this.registry.list();
+      const claimCount = apps.filter((candidate) => candidate.upstreamPort === app.upstreamPort).length;
+      if (claimCount === 1 && (await isPortOpen(app.upstreamPort, this.hubHost))) {
+        return { port: app.upstreamPort, external: true };
+      }
     }
 
     return undefined;
@@ -402,15 +746,25 @@ export class ProcessManager {
     app: AppRecord,
     entry: RuntimeEntry,
     attempt: LifecycleAttempt,
-    assignedPort?: number
+    assignedPort?: number,
+    options: LifecycleRunOptions = {}
   ): Promise<RuntimeView> {
+    const signal = options.signal;
     const env = this.#appEnv(app, assignedPort ?? app.upstreamPort ?? 0);
     let stopHook: LifecycleHookAttempt | undefined;
     let verifyHook: LifecycleHookAttempt | undefined;
     let failureReason: string | undefined;
 
     if (app.stopCommand) {
-      stopHook = await this.#runHook(app, entry, "stop", app.stopCommand, app.stopTimeoutMs ?? 60_000, env);
+      stopHook = await this.#runHook(
+        app,
+        entry,
+        "stop",
+        app.stopCommand,
+        Math.min(app.stopTimeoutMs ?? 60_000, options.verification?.stopBudgetMs ?? Number.POSITIVE_INFINITY),
+        env,
+        signal
+      );
       attempt.hooks.push(stopHook);
       if (stopHook.status !== "succeeded") {
         entry.cleanupStatus = stopHook.timedOut ? "timeout" : "failed";
@@ -428,8 +782,9 @@ export class ProcessManager {
         entry,
         "verifyStopped",
         app.verifyStoppedCommand,
-        app.stopTimeoutMs ?? 60_000,
-        env
+        Math.min(app.stopTimeoutMs ?? 60_000, options.verification?.stopBudgetMs ?? Number.POSITIVE_INFINITY),
+        env,
+        signal
       );
       attempt.hooks.push(verifyHook);
       if (verifyHook.status !== "succeeded") {
@@ -441,10 +796,12 @@ export class ProcessManager {
 
     const checkedAt = new Date().toISOString();
     const shouldCheckPort = Boolean(assignedPort && this.#ownsBackendPort(app, entry));
-    let portStillOpen = shouldCheckPort && assignedPort ? !(await this.#waitForPortClosed(assignedPort, 3000)) : false;
+    const portCloseTimeoutMs = signal?.aborted ? 500 : (options.verification?.closureBudgetMs ?? 3000);
+    let portStillOpen =
+      shouldCheckPort && assignedPort ? !(await this.#waitForPortClosed(assignedPort, portCloseTimeoutMs)) : false;
     if (!failureReason && portStillOpen && assignedPort && process.platform === "win32" && !app.stopCommand) {
       this.#killPortOwner(assignedPort);
-      portStillOpen = !(await this.#waitForPortClosed(assignedPort, 3000));
+      portStillOpen = !(await this.#waitForPortClosed(assignedPort, portCloseTimeoutMs));
     }
     if (!failureReason && portStillOpen && assignedPort) {
       entry.cleanupStatus = "verification_failed";
@@ -472,33 +829,61 @@ export class ProcessManager {
       entry.phase = entry.cleanupStatus === "verification_failed" ? "stop_verification_failed" : "cleanup_failed";
       entry.lastError = failureReason;
       this.#finishAttempt(attempt, "failed", entry.phase, failureReason);
-      this.#appendLog(app.id, `[relaybase] stop failed: ${failureReason}`, "system", "system");
+      this.#appendLog(
+        app.id,
+        `[relaybase] stop failed: ${failureReason}`,
+        "system",
+        "lifecycle_stop_failed",
+        app,
+        env,
+        "error"
+      );
+      this.#publishRuntimeChange(app.id, entry, "stop_failed");
       return this.#view(entry, app.id);
     }
 
     entry.status = "stopped";
     entry.health = "unknown";
     entry.phase = "stopped";
+    if (entry.assignedPort) {
+      this.#releasePortReservation(app.id, entry.assignedPort);
+    }
     entry.assignedPort = undefined;
     entry.pid = undefined;
     entry.lastError = undefined;
     entry.blockingReason = undefined;
     this.#finishAttempt(attempt, "succeeded", entry.phase);
-    this.#appendLog(app.id, "[relaybase] stopped", "system", "system");
+    this.#appendLog(app.id, "[relaybase] stopped", "system", "lifecycle_stopped", app, env);
+    this.#publishRuntimeChange(app.id, entry, "stopped");
     return this.#view(entry, app.id);
   }
 
   async #cleanupAfterFailedStart(
     app: AppRecord,
     entry: RuntimeEntry,
-    child: ChildProcessWithoutNullStreams
+    child: ChildProcessWithoutNullStreams,
+    options: { shutdown?: boolean } = {}
   ): Promise<void> {
+    const assignedPort = entry.assignedPort;
+    entry.mcpDrain = await this.mcp.stopApp(app.id);
     await this.#terminateChild(child);
     entry.pid = undefined;
     entry.stoppedAt = new Date().toISOString();
     if (!app.stopCommand) {
       entry.cleanupStatus = "not_needed";
-      if (entry.assignedPort && (await this.#waitForPortClosed(entry.assignedPort, 3000))) {
+      const portClosed = Boolean(assignedPort && (await this.#waitForPortClosed(assignedPort, 3000)));
+      entry.stopVerification = {
+        attempted: true,
+        checkedAt: new Date().toISOString(),
+        ...(assignedPort ? { backendPort: assignedPort } : {}),
+        backendPortOpen: assignedPort ? !portClosed : null,
+        portClosureVerified: portClosed,
+        ok: !assignedPort || portClosed,
+        cleanupStatus: entry.cleanupStatus,
+        ...(entry.mcpDrain?.length ? { mcpDrain: entry.mcpDrain } : {})
+      };
+      if (assignedPort && portClosed) {
+        this.#releasePortReservation(app.id, assignedPort);
         entry.assignedPort = undefined;
       }
       return;
@@ -510,7 +895,7 @@ export class ProcessManager {
       entry,
       "stop",
       app.stopCommand,
-      app.stopTimeoutMs ?? 60_000,
+      options.shutdown ? Math.min(app.stopTimeoutMs ?? 60_000, 1_500) : (app.stopTimeoutMs ?? 60_000),
       this.#appEnv(app, entry.assignedPort ?? 0)
     );
     entry.lastStartAttempt?.hooks.push(hook);
@@ -520,12 +905,42 @@ export class ProcessManager {
       return;
     }
 
-    if (entry.assignedPort && (await this.#waitForPortClosed(entry.assignedPort, 3000))) {
+    const portClosed = Boolean(assignedPort && (await this.#waitForPortClosed(assignedPort, 3000)));
+    entry.stopVerification = {
+      attempted: true,
+      checkedAt: new Date().toISOString(),
+      ...(assignedPort ? { backendPort: assignedPort } : {}),
+      backendPortOpen: assignedPort ? !portClosed : null,
+      portClosureVerified: portClosed,
+      ok: hook.status === "succeeded" && (!assignedPort || portClosed),
+      cleanupStatus: entry.cleanupStatus,
+      stopCommand: hook,
+      ...(entry.mcpDrain?.length ? { mcpDrain: entry.mcpDrain } : {})
+    };
+    if (assignedPort && portClosed) {
+      this.#releasePortReservation(app.id, assignedPort);
       entry.assignedPort = undefined;
-    } else if (entry.assignedPort) {
+    } else if (assignedPort) {
       entry.cleanupStatus = "verification_failed";
-      entry.lastError = `${entry.lastError} Cleanup ran, but backend port ${entry.assignedPort} is still open.`;
+      entry.lastError = `${entry.lastError} Cleanup ran, but backend port ${assignedPort} is still open.`;
     }
+  }
+
+  async #cancelStartedApp(
+    app: AppRecord,
+    entry: RuntimeEntry,
+    child: ChildProcessWithoutNullStreams,
+    attempt: LifecycleAttempt,
+    signal: AbortSignal
+  ): Promise<never> {
+    entry.status = "errored";
+    entry.health = "unhealthy";
+    entry.phase = "errored";
+    entry.lastError = "Lifecycle start was cancelled during daemon shutdown.";
+    this.#finishAttempt(attempt, "failed", entry.phase, entry.lastError);
+    await this.#cleanupAfterFailedStart(app, entry, child, { shutdown: true });
+    this.#publishRuntimeChange(app.id, entry, "start_cancelled");
+    throw lifecycleAbortError(signal);
   }
 
   async #runHook(
@@ -534,7 +949,8 @@ export class ProcessManager {
     name: LifecycleHookName,
     command: string,
     timeoutMs: number,
-    env: NodeJS.ProcessEnv
+    env: NodeJS.ProcessEnv,
+    signal?: AbortSignal
   ): Promise<LifecycleHookAttempt> {
     const hook: LifecycleHookAttempt = {
       name,
@@ -544,6 +960,12 @@ export class ProcessManager {
       stdout: [],
       stderr: []
     };
+    if (signal?.aborted) {
+      hook.status = "failed";
+      hook.endedAt = new Date().toISOString();
+      hook.error = `${name} hook was cancelled during daemon shutdown.`;
+      return hook;
+    }
     const spec = this.#spawnSpec(command);
 
     await new Promise<void>((resolve) => {
@@ -557,35 +979,44 @@ export class ProcessManager {
       const timer = setTimeout(() => {
         hook.timedOut = true;
         hook.error = `${name} hook timed out after ${timeoutMs}ms.`;
-        this.#terminateChild(child);
+        void this.#terminateChild(child);
       }, timeoutMs);
+      const abort = () => {
+        hook.error = `${name} hook was cancelled during daemon shutdown.`;
+        void this.#terminateChild(child);
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) {
+        abort();
+      }
 
       child.stdout.on("data", (chunk) => {
         const text = this.#redact(chunk.toString(), env);
         hook.stdout?.push(...this.#lines(text));
-        this.#appendLog(app.id, text, "stdout", name);
+        this.#appendLog(app.id, chunk.toString(), "stdout", name, app, env);
       });
       child.stderr.on("data", (chunk) => {
         const text = this.#redact(chunk.toString(), env);
         hook.stderr?.push(...this.#lines(text));
-        this.#appendLog(app.id, text, "stderr", name);
+        this.#appendLog(app.id, chunk.toString(), "stderr", name, app, env);
       });
       child.once("error", (error) => {
         hook.error = error.message;
       });
-      const finish = (code: number | null, signal: NodeJS.Signals | null) => {
+      const finish = (code: number | null, exitSignal: NodeJS.Signals | null) => {
         if (settled) {
           return;
         }
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
         hook.exitCode = code;
-        hook.signal = signal;
+        hook.signal = exitSignal;
         hook.endedAt = new Date().toISOString();
         hook.status = code === 0 && !hook.timedOut && !hook.error ? "succeeded" : "failed";
         hook.error ??=
           hook.status === "failed"
-            ? `${name} hook exited with code ${code ?? "null"} signal ${signal ?? "null"}.`
+            ? `${name} hook exited with code ${code ?? "null"} signal ${exitSignal ?? "null"}.`
             : undefined;
         resolve();
       };
@@ -614,11 +1045,13 @@ export class ProcessManager {
             ? "stopped"
             : status === "conflict"
               ? "conflict"
-              : status === "starting"
-                ? "launching"
-                : status === "stopping"
-                  ? "stopping"
-                  : "errored"),
+              : status === "degraded"
+                ? "degraded"
+                : status === "starting"
+                  ? "launching"
+                  : status === "stopping"
+                    ? "stopping"
+                    : "errored"),
       ...(assignedPort ? { assignedPort } : {}),
       ...(lastError ? { lastError } : {}),
       logs: [],
@@ -675,18 +1108,18 @@ export class ProcessManager {
   }
 
   #appEnv(app: AppRecord, assignedPort: number): NodeJS.ProcessEnv {
-    return {
+    return this.sanitizeEnvironment({
       ...process.env,
       ...app.env,
       ...(assignedPort ? { PORT: String(assignedPort) } : {}),
       HOST: this.hubHost,
       RELAYBASE_APP_ID: app.id,
       RELAYBASE_BASE_URL: `http://${app.id}.localhost:${this.hubPort}`
-    };
+    });
   }
 
   #ownsBackendPort(app: AppRecord, entry: RuntimeEntry): boolean {
-    if (app.command === "external" && !entry.child) {
+    if ((app.command === "external" || app.launch?.portBinding === "external") && !entry.child) {
       return false;
     }
 
@@ -694,14 +1127,7 @@ export class ProcessManager {
   }
 
   #redact(text: string, env: NodeJS.ProcessEnv): string {
-    let redacted = text;
-    for (const [key, value] of Object.entries(env)) {
-      if (!value || value.length < 4 || !/(token|secret|password|key)/i.test(key)) {
-        continue;
-      }
-      redacted = redacted.split(value).join("[redacted]");
-    }
-    return redacted;
+    return redactSecretLikeValues(text, env).value;
   }
 
   #lines(text: string): string[] {
@@ -709,12 +1135,54 @@ export class ProcessManager {
   }
 
   async #assignPort(app: AppRecord): Promise<number | undefined> {
+    this.#releaseAppPortReservations(app.id);
+
     if (app.upstreamPort) {
+      if (this.#isPortReserved(app.upstreamPort, app.id)) {
+        return undefined;
+      }
       const bindable = await isPortOpen(app.upstreamPort, this.hubHost).then((open) => !open);
-      return bindable ? app.upstreamPort : undefined;
+      if (!bindable) {
+        return undefined;
+      }
+      this.#reservePort(app.id, app.upstreamPort);
+      return app.upstreamPort;
     }
 
-    return findAvailablePort(this.portRangeStart, this.portRangeEnd, this.hubHost);
+    for (let port = this.portRangeStart; port <= this.portRangeEnd; port += 1) {
+      if (this.#isPortReserved(port, app.id)) {
+        continue;
+      }
+      if (await canBindPort(port, this.hubHost)) {
+        this.#reservePort(app.id, port);
+        return port;
+      }
+    }
+
+    throw new Error(`No available ports in range ${this.portRangeStart}-${this.portRangeEnd}.`);
+  }
+
+  #reservePort(appId: string, port: number): void {
+    this.#portReservations.set(port, appId);
+  }
+
+  #releasePortReservation(appId: string, port: number): void {
+    if (this.#portReservations.get(port) === appId) {
+      this.#portReservations.delete(port);
+    }
+  }
+
+  #releaseAppPortReservations(appId: string): void {
+    for (const [port, owner] of this.#portReservations) {
+      if (owner === appId) {
+        this.#portReservations.delete(port);
+      }
+    }
+  }
+
+  #isPortReserved(port: number, appId: string): boolean {
+    const owner = this.#portReservations.get(port);
+    return Boolean(owner && owner !== appId);
   }
 
   #spawnSpec(command: string): SpawnSpec {
@@ -736,11 +1204,44 @@ export class ProcessManager {
       return { command, args: [], shell: true };
     }
 
+    if (process.platform === "win32" && WINDOWS_COMMAND_SHIMS.has(executable.toLowerCase())) {
+      return {
+        command: normalizeWindowsCommandShim(command),
+        args: [],
+        shell: true
+      };
+    }
+
     return {
       command: executable,
       args: tokens.slice(1),
       shell: false
     };
+  }
+
+  #structuredSpawnSpec(executable: string, args: string[]): SpawnSpec {
+    if (process.platform === "win32" && /\.ps1$/i.test(executable)) {
+      return {
+        command: "powershell.exe",
+        args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", executable, ...args],
+        shell: false
+      };
+    }
+    if (process.platform === "win32" && /\.(?:cmd|bat)$/i.test(executable)) {
+      return {
+        command: process.env.ComSpec ?? "cmd.exe",
+        args: ["/d", "/s", "/c", executable, ...args],
+        shell: false
+      };
+    }
+    if (process.platform === "win32" && WINDOWS_COMMAND_SHIMS.has(executable.toLowerCase())) {
+      return {
+        command: process.env.ComSpec ?? "cmd.exe",
+        args: ["/d", "/s", "/c", `${executable}.cmd`, ...args],
+        shell: false
+      };
+    }
+    return { command: executable, args, shell: false };
   }
 
   #splitCommand(command: string): string[] {
@@ -847,7 +1348,10 @@ export class ProcessManager {
     id: string,
     text: string,
     stream: AppLogEvent["stream"] = "system",
-    source: AppLogEvent["source"] = "system"
+    source: AppLogEvent["source"] = "system",
+    app?: AppRecord,
+    env?: NodeJS.ProcessEnv,
+    level?: AppLogEvent["level"]
   ): void {
     const entry = this.#runtime.get(id);
     if (!entry) {
@@ -859,16 +1363,42 @@ export class ProcessManager {
         continue;
       }
 
-      entry.logs.push(line);
+      const redaction = redactSecretLikeValues(line, env);
+      const safeLine = redaction.value;
+      entry.logs.push(safeLine);
+      const timestamp = new Date().toISOString();
       const event: AppLogEvent = {
+        sequence: ++this.#logSequence,
+        timestamp,
+        at: timestamp,
         appId: id,
-        line,
+        groupId: app?.relaybase?.groupId ?? id,
+        componentRole: app?.relaybase?.componentRole ?? "other",
+        line: safeLine,
+        message: safeLine,
         stream,
         source,
-        sequence: ++this.#logSequence,
-        at: new Date().toISOString()
+        level: level ?? (stream === "stderr" ? "error" : "info"),
+        redacted: redaction.redacted
       };
       entry.logEvents.push(event);
+      if (this.logStore) {
+        void this.logStore
+          .append({
+            sequence: event.sequence,
+            timestamp: event.timestamp,
+            appId: event.appId,
+            groupId: event.groupId,
+            componentRole: event.componentRole,
+            stream: event.stream,
+            source: event.source,
+            level: event.level,
+            message: line,
+            redacted: event.redacted,
+            env
+          })
+          .catch(() => undefined);
+      }
       for (const subscriber of this.#logSubscribers) {
         try {
           subscriber(event);
@@ -878,12 +1408,32 @@ export class ProcessManager {
       }
     }
 
-    if (entry.logs.length > 500) {
-      entry.logs.splice(0, entry.logs.length - 500);
+    const droppedLogs = entry.logs.length > 500 ? entry.logs.length - 500 : 0;
+    if (droppedLogs) {
+      entry.logs.splice(0, droppedLogs);
     }
 
-    if (entry.logEvents.length > 500) {
-      entry.logEvents.splice(0, entry.logEvents.length - 500);
+    const droppedEvents = entry.logEvents.length > 500 ? entry.logEvents.length - 500 : 0;
+    if (droppedEvents) {
+      entry.logEvents.splice(0, droppedEvents);
+    }
+
+    if (droppedLogs || droppedEvents) {
+      const rotation: AppLogStreamRotatedEvent = {
+        appId: id,
+        droppedLogs,
+        droppedEvents,
+        retainedLogs: entry.logs.length,
+        retainedEvents: entry.logEvents.length,
+        at: new Date().toISOString()
+      };
+      for (const subscriber of this.#logRotationSubscribers) {
+        try {
+          subscriber(rotation);
+        } catch {
+          // Rotation subscribers are observers; log retention must not block on them.
+        }
+      }
     }
   }
 
@@ -943,6 +1493,16 @@ export class ProcessManager {
       };
     }
 
+    if (entry.status === "degraded") {
+      return {
+        canStart: false,
+        canStop: false,
+        canOpen: false,
+        primaryAction: "repair",
+        blockingReason: entry.blockingReason ?? "external_health_unverified"
+      };
+    }
+
     if (entry.status === "errored" || entry.status === "conflict") {
       return {
         canStart: true,
@@ -959,5 +1519,21 @@ export class ProcessManager {
       canOpen: false,
       primaryAction: "start"
     };
+  }
+
+  #publishRuntimeChange(appId: string, entry: RuntimeEntry, reason: string): void {
+    const event: AppRuntimeChangedEvent = {
+      appId,
+      status: entry.status,
+      health: entry.health,
+      phase: entry.phase,
+      reason,
+      at: new Date().toISOString(),
+      ...(entry.pid ? { pid: entry.pid } : {}),
+      ...(entry.assignedPort ? { assignedPort: entry.assignedPort } : {})
+    };
+    for (const subscriber of this.#runtimeSubscribers) {
+      subscriber(event);
+    }
   }
 }

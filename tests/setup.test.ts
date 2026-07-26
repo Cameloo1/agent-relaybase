@@ -20,6 +20,42 @@ import type { AppManifestInput } from "../src/types.ts";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+test("package workflows compile the runtime before lifecycle-disabled package verification", async () => {
+  const ci = await fs.readFile(path.join(rootDir, ".github", "workflows", "ci.yml"), "utf8");
+  const release = await fs.readFile(path.join(rootDir, ".github", "workflows", "release.yml"), "utf8");
+  const ciTuiBuild = workflowJob(ci, "tui-build");
+
+  assert.match(ciTuiBuild, /^ {4}needs: windows-native$/m);
+  assert.match(
+    ciTuiBuild,
+    /- name: Download Windows credential modules\s+if: runner\.os == 'Windows'\s+uses: actions\/download-artifact@v4/
+  );
+  assertWorkflowOrder(ci, "tui-build", "actions/download-artifact@v4", "npm run package:install-smoke");
+  assertWorkflowOrder(ci, "tui-build", "npm run build:runtime", "npm run package:install-smoke");
+  assertWorkflowOrder(ci, "package", "npm run build:runtime", "npm run package:check:strict");
+  assertWorkflowOrder(release, "prepare", "npm run build:runtime", "npm run package:check:strict");
+  assertWorkflowOrder(release, "prepare", "npm run build:runtime", "npm run release:prepare");
+});
+
+function assertWorkflowOrder(workflow: string, jobName: string, before: string, after: string): void {
+  const job = workflowJob(workflow, jobName);
+  const beforeIndex = job.indexOf(before);
+  const afterIndex = job.indexOf(after);
+
+  assert.ok(beforeIndex >= 0, `${jobName} must run ${before}`);
+  assert.ok(afterIndex >= 0, `${jobName} must run ${after}`);
+  assert.ok(beforeIndex < afterIndex, `${jobName} must run ${before} before ${after}`);
+}
+
+function workflowJob(workflow: string, jobName: string): string {
+  const jobStartMatch = new RegExp(`^  ${jobName}:\\s*$`, "m").exec(workflow);
+  assert.ok(jobStartMatch, `workflow job ${jobName} is missing`);
+  const jobStart = jobStartMatch.index + jobStartMatch[0].length;
+  const remaining = workflow.slice(jobStart);
+  const nextJob = /^ {2}[a-zA-Z0-9_-]+:\s*$/m.exec(remaining);
+  return nextJob ? remaining.slice(0, nextJob.index) : remaining;
+}
+
 test("detects package-manager, framework, env, and generates multiple setup architectures", async () => {
   const project = await tempProject("relaybase-detect-");
   await fs.writeFile(
@@ -54,6 +90,24 @@ test("detects package-manager, framework, env, and generates multiple setup arch
   assert.ok(plans.some((plan) => plan.architecture === "framework-port-flag"));
   assert.ok(plans.some((plan) => plan.architecture === "pinned-upstream-port"));
   assert.equal(plans[0]?.id, "framework-port-flag");
+});
+
+test("static projects without runnable package scripts select the complete static preview plan", async () => {
+  const project = await tempProject("relaybase-static-plan-");
+  await fs.writeFile(path.join(project, "index.html"), "<!doctype html><title>Static fixture</title>\n", "utf8");
+
+  const detection = await detectProject(project);
+  const plans = await proposeSetupPlans(detection);
+  const selected = plans[0];
+
+  assert.equal(detection.appKind, "static");
+  assert.equal(selected?.id, "static-preview");
+  assert.equal(selected?.manifest.command, "node .relaybase/static-preview.cjs");
+  assert.ok(selected?.writes.some((write) => write.path.endsWith(path.join(".relaybase", "static-preview.cjs"))));
+  assert.equal(
+    plans.some((plan) => plan.id === "framework-port-flag"),
+    false
+  );
 });
 
 test("configure writes inspectable setup artifacts and registers without starting when requested", async () => {
@@ -99,6 +153,19 @@ test("configure writes inspectable setup artifacts and registers without startin
   assert.equal((await registry.get("sample-app"))?.manifestPath, path.join(project, "relaybase.app.json"));
 });
 
+test("setup uses the platform package-manager command for a nonstandard detected script", async () => {
+  const project = await tempProject("relaybase-nonstandard-script-");
+  await fs.writeFile(
+    path.join(project, "package.json"),
+    JSON.stringify({ name: "serve-only-app", scripts: { serve: "node server.js" } }, null, 2)
+  );
+
+  const detection = await detectProject(project);
+  const plans = await proposeSetupPlans(detection);
+
+  assert.equal(plans[0]?.manifest.command, `${process.platform === "win32" ? "npm.cmd" : "npm"} run serve`);
+});
+
 test("configure guarded env writes preserve existing secrets and remain idempotent", async () => {
   const project = await tempProject("relaybase-env-");
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-env-state-"));
@@ -133,6 +200,88 @@ test("configure guarded env writes preserve existing secrets and remain idempote
   assert.match(env, /SECRET_TOKEN=keep-me/);
   assert.equal((env.match(/# relaybase:start/g) ?? []).length, 1);
   assert.equal((env.match(/# relaybase:end/g) ?? []).length, 1);
+});
+
+test("configure dry-run uses one canonical manifest for selected plan and write preview", async () => {
+  const project = await tempProject("relaybase-dry-run-canonical-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-dry-run-canonical-state-"));
+  await fs.writeFile(
+    path.join(project, "package.json"),
+    JSON.stringify({ name: "canonical-app", scripts: { start: "node server.js" } }, null, 2)
+  );
+  await fs.writeFile(
+    path.join(project, "relaybase.app.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "canonical-app",
+        name: "Canonical App",
+        command: "node server.js",
+        cwd: ".",
+        protocol: "http",
+        healthUrl: "/health",
+        upstreamPort: 4321
+      },
+      null,
+      2
+    )
+  );
+
+  const result = await configureProject({
+    cwd: project,
+    host: "127.0.0.1",
+    port: 17781,
+    stateDir,
+    dryRun: true,
+    selectedPlanId: "managed-web"
+  });
+
+  const manifestWrite = result.selectedPlan.writes.find((write) => write.path.endsWith("relaybase.app.json"));
+  assert.equal(result.selectedPlan.manifest.upstreamPort, undefined);
+  assert.ok(manifestWrite);
+  assert.equal(JSON.parse(manifestWrite.preview).upstreamPort, undefined);
+});
+
+test("MCP-only projects prefer the MCP setup plan over fake web commands", async () => {
+  const project = await tempProject("relaybase-mcp-only-");
+  await fs.writeFile(
+    path.join(project, "package.json"),
+    JSON.stringify(
+      {
+        name: "tool-server",
+        dependencies: {
+          "@modelcontextprotocol/sdk": "^1.29.0"
+        }
+      },
+      null,
+      2
+    )
+  );
+
+  const detection = await detectProject(project);
+  const plans = await proposeSetupPlans(detection);
+
+  assert.equal(detection.appKind, "mcp");
+  assert.equal(plans[0]?.id, "mcp-only");
+  assert.equal(plans[0]?.manifest.command, "external");
+  assert.notEqual(plans[0]?.manifest.command, "node server.js");
+});
+
+test("repo exposes Relaybase as a Codex plugin and primary skill", async () => {
+  const plugin = JSON.parse(await fs.readFile(path.join(rootDir, ".codex-plugin", "plugin.json"), "utf8"));
+  const mcp = JSON.parse(await fs.readFile(path.join(rootDir, ".mcp.json"), "utf8"));
+  const relaybaseSkill = await fs.readFile(path.join(rootDir, "skills", "relaybase", "SKILL.md"), "utf8");
+  const packageJson = JSON.parse(await fs.readFile(path.join(rootDir, "package.json"), "utf8"));
+
+  assert.equal(plugin.name, "relaybase");
+  assert.equal(plugin.skills, "./skills/");
+  assert.equal(plugin.mcpServers, "./.mcp.json");
+  assert.ok(plugin.interface.defaultPrompt.some((prompt: string) => prompt.includes("$relaybase")));
+  assert.deepEqual(mcp.mcpServers.relaybase.args, ["./bin/relaybase.cjs", "mcp"]);
+  assert.match(relaybaseSkill, /^name: relaybase/m);
+  assert.ok(packageJson.files.includes(".codex-plugin/"));
+  assert.ok(packageJson.files.includes(".mcp.json"));
+  assert.ok(packageJson.files.includes("skills/"));
 });
 
 test("configure can replay saved answers for noninteractive setup", async () => {
@@ -340,6 +489,169 @@ test("CLI list filters online daemon state and keeps status as an alias", async 
   }
 });
 
+test("CLI rejects unknown options and serves command scoped help", async () => {
+  const unknown = await runRelaybaseCli(["health", "--jsoon"]);
+  assert.notEqual(unknown.code, 0);
+  assert.match(unknown.stderr, /Unknown option: --jsoon/);
+
+  const jsonUnknown = await runRelaybaseCli(["health", "--json", "--jsoon"]);
+  assert.notEqual(jsonUnknown.code, 0);
+  const body = JSON.parse(jsonUnknown.stdout);
+  assert.equal(body.ok, false);
+  assert.match(body.error, /Unknown option: --jsoon/);
+
+  const typoFilter = await runRelaybaseCli(["list", "--runnning"]);
+  assert.notEqual(typoFilter.code, 0);
+  assert.match(typoFilter.stderr, /Unknown option: --runnning/);
+
+  const startHelp = await runRelaybaseCli(["start", "--help"]);
+  assert.equal(startHelp.code, 0);
+  assert.match(startHelp.stdout, /relaybase start \[--port <number>\]/);
+  assert.match(startHelp.stdout, /relaybase start <app-id>/);
+  assert.doesNotMatch(startHelp.stdout, /npm link|relaybase\.ps1|prefix repair/i);
+  assert.equal(startHelp.stderr, "");
+
+  const checkHelp = await runRelaybaseCli(["check", "--help"]);
+  assert.equal(checkHelp.code, 0);
+  assert.match(checkHelp.stdout, /Relaybase check/);
+  assert.match(checkHelp.stdout, /read-only/);
+
+  const verifyHelp = await runRelaybaseCli(["verify", "--help"]);
+  assert.equal(verifyHelp.code, 0);
+  assert.match(verifyHelp.stdout, /Relaybase verify/);
+  assert.match(verifyHelp.stdout, /--live/);
+  assert.match(verifyHelp.stdout, /--full/);
+
+  const prefixRepairHelp = await runRelaybaseCli(["repair-prefix", "--help"]);
+  assert.equal(prefixRepairHelp.code, 0);
+  assert.match(prefixRepairHelp.stdout, /relaybase repair-prefix \[--plan\|--diagnose\]/);
+  assert.match(prefixRepairHelp.stdout, /Ordinary start and check commands never perform this repair/);
+
+  const daemonHelp = await runRelaybaseCli(["daemon", "--help"]);
+  assert.equal(daemonHelp.code, 0);
+  assert.match(daemonHelp.stdout, /relaybase daemon restart \[--json\]/);
+  assert.match(daemonHelp.stdout, /Active Agent, lifecycle, or package work blocks restart/);
+
+  const misorderedDaemonRestart = await runRelaybaseCli(["daemon", "--json", "restart"]);
+  assert.notEqual(misorderedDaemonRestart.code, 0);
+  assert.match(JSON.parse(misorderedDaemonRestart.stdout).error, /Usage: relaybase daemon restart/);
+
+  const extraDaemonRestartArgument = await runRelaybaseCli(["daemon", "restart", "unexpected"]);
+  assert.notEqual(extraDaemonRestartArgument.code, 0);
+  assert.match(extraDaemonRestartArgument.stderr, /Unsupported daemon restart argument: unexpected/);
+});
+
+test("CLI diagnose-token proves state identity without exposing token contents", async () => {
+  const daemonStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-diagnose-daemon-state-"));
+  const mismatchedStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-diagnose-client-state-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir: daemonStateDir });
+
+  try {
+    await hub.listen();
+    const port = String(hub.address().port);
+    const token = (await fs.readFile(path.join(daemonStateDir, "session-token"), "utf8")).trim();
+    const common = ["--host", "127.0.0.1", "--port", port, "--state-dir", daemonStateDir];
+
+    const diagnosed = await runRelaybaseCli(["diagnose-token", ...common]);
+    assert.equal(diagnosed.code, 0);
+    assert.match(diagnosed.stdout, /Daemon: online/);
+    assert.match(diagnosed.stdout, /State match: yes/);
+    assert.match(diagnosed.stdout, /Authentication: accepted/);
+    assert.equal((diagnosed.stdout + diagnosed.stderr).includes(token), false);
+
+    const compatibilityAlias = await runRelaybaseCli(["diagnose_token", "--json", ...common]);
+    assert.equal(compatibilityAlias.code, 0);
+    assert.equal(JSON.parse(compatibilityAlias.stdout).diagnosis, "daemon_ready");
+    assert.equal((compatibilityAlias.stdout + compatibilityAlias.stderr).includes(token), false);
+
+    const mismatch = await runRelaybaseCli([
+      "diagnose-token",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      port,
+      "--state-dir",
+      mismatchedStateDir
+    ]);
+    assert.equal(mismatch.code, 1);
+    assert.match(mismatch.stdout, /Daemon: degraded/);
+    assert.match(mismatch.stdout, /Diagnosis: daemon_state_mismatch/);
+    assert.equal((mismatch.stdout + mismatch.stderr).includes(token), false);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("CLI bundled start, check, and verify expose safe executable plans", async () => {
+  const startPlan = await runRelaybaseCli(["start", "--plan", "--port", "17782", "--", "--smoke-render"]);
+  assert.equal(startPlan.code, 0);
+  assert.match(startPlan.stdout, /relaybase start/);
+  assert.match(startPlan.stdout, /Launch TUI through Node bridge/);
+  assert.match(startPlan.stdout, /--smoke-render/);
+  assert.doesNotMatch(startPlan.stdout, /npm(?:\.cmd)? link|npm-cli\.js link|relaybase\.ps1|package-check/i);
+
+  const npmStartPlan = await runCommand(
+    process.execPath,
+    ["scripts/relaybase-start.mjs", "--plan", "--", "--smoke-render"],
+    { timeoutMs: 30_000 }
+  );
+  assert.equal(npmStartPlan.code, 0);
+  assert.match(npmStartPlan.stdout, /Launch TUI through Node bridge/);
+  assert.doesNotMatch(npmStartPlan.stdout, /npm(?:\.cmd)? link|npm-cli\.js link|relaybase\.ps1|package-check/i);
+  const npmStartSource = await fs.readFile(path.join(rootDir, "scripts", "relaybase-start.mjs"), "utf8");
+  assert.doesNotMatch(npmStartSource, /npm(?:\.cmd)? link|unlinkSync|relaybase\.ps1|RELAYBASE_SKIP_PREFIX_REPAIR/);
+
+  const checkPlan = await runRelaybaseCli(["check", "--plan"]);
+  assert.equal(checkPlan.code, 0);
+  assert.match(checkPlan.stdout, /relaybase check/);
+  assert.match(checkPlan.stdout, /TUI\/toolchain doctor/);
+  assert.match(checkPlan.stdout, /Project and daemon health/);
+  assert.doesNotMatch(
+    checkPlan.stdout,
+    /package-check|npm pack|npm(?:\.cmd)? link|relaybase\.ps1|agent:smoke:openrouter/i
+  );
+
+  const prefixRepairPlan = await runRelaybaseCli(["repair-prefix", "--plan"]);
+  assert.equal(prefixRepairPlan.code, 0);
+  assert.match(prefixRepairPlan.stdout, /relaybase repair-prefix/);
+  assert.match(prefixRepairPlan.stdout, /npm-cli\.js link|npm\.cmd link|npm link/);
+  assert.match(prefixRepairPlan.stdout, /relaybase\.ps1/);
+
+  const leftoverOpenRouterEnv = {
+    OPENROUTER_API_KEY: "sk-or-leftover-plan-secret",
+    RELAYBASE_AGENT_MODEL: "openrouter/leftover-model",
+    RELAYBASE_AGENT_ENABLED: "1",
+    RELAYBASE_AGENT_REMOTE_MODEL_ENABLED: "1"
+  };
+
+  const verifyPlan = await runRelaybaseCli(["verify", "--plan"], { env: leftoverOpenRouterEnv });
+  assert.equal(verifyPlan.code, 0);
+  assert.match(verifyPlan.stdout, /npm run format:check/);
+  assert.match(verifyPlan.stdout, /npm run test:jest/);
+  assert.doesNotMatch(verifyPlan.stdout, /agent:smoke:openrouter/);
+  assert.doesNotMatch(verifyPlan.stdout, /leftover/);
+
+  const allPlan = await runRelaybaseCli(["verify", "--plan", "--all"], { env: leftoverOpenRouterEnv });
+  assert.equal(allPlan.code, 0);
+  assert.match(allPlan.stdout, /npm run tui:smoke:8pane/);
+  assert.match(allPlan.stdout, /npm run release:check/);
+  assert.doesNotMatch(allPlan.stdout, /agent:smoke:openrouter/);
+  assert.doesNotMatch(allPlan.stdout, /leftover/);
+
+  const checkPlanWithLeftoverEnv = await runRelaybaseCli(["check", "--plan"], { env: leftoverOpenRouterEnv });
+  assert.equal(checkPlanWithLeftoverEnv.code, 0);
+  assert.doesNotMatch(checkPlanWithLeftoverEnv.stdout, /agent:smoke:openrouter|leftover/);
+
+  const fullLivePlan = await runRelaybaseCli(["verify", "--plan", "--full", "--live", "--release", "--race"], {
+    env: leftoverOpenRouterEnv
+  });
+  assert.equal(fullLivePlan.code, 0);
+  assert.match(fullLivePlan.stdout, /npm run tui:smoke:8pane/);
+  assert.match(fullLivePlan.stdout, /npm run release:check/);
+  assert.match(fullLivePlan.stdout, /npm run tui:race/);
+  assert.match(fullLivePlan.stdout, /npm run agent:smoke:openrouter/);
+});
+
 test("configure generates a Docker Compose profile, override, lifecycle hooks, and evidence contract", async () => {
   const project = await tempProject("relaybase-docker-");
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-docker-state-"));
@@ -462,6 +774,20 @@ test("Windows helper wrapper uses process-local policy bypass and preserves exit
   assert.doesNotMatch(wrapper, /if "%ERRORLEVEL%"/);
   assert.match(wrapper, /endlocal & exit \/b %RELAYBASE_DEV_EXIT_CODE%/);
   assert.doesNotMatch(wrapper, /Set-ExecutionPolicy/i);
+});
+
+test("Windows helper wires backend ports into manifests and reports degraded routes", async () => {
+  const helperScript = await fs.readFile(
+    path.join(rootDir, "skills", "relaybase-dev", "scripts", "relaybase-dev.ps1"),
+    "utf8"
+  );
+
+  assert.match(helperScript, /\$manifest\["upstreamPort"\] = \$BackendPort/);
+  assert.match(helperScript, /routeHealth = \$routeHealth/);
+  assert.match(helperScript, /degraded = \(\$routeHealth -eq "degraded"\)/);
+  assert.match(helperScript, /humanRoute = \$human/);
+  assert.match(helperScript, /agentRoute = \$agent/);
+  assert.match(helperScript, /full requires both humanRoute and agentRoute/);
 });
 
 test("Docker setup refuses ambiguous service detection until service and target port are explicit", async () => {
@@ -589,14 +915,13 @@ test("Docker setup validates explicit service and target port input", async () =
   );
 });
 
-test("helper docs prefer the Windows wrapper for direct helper actions", async () => {
+test("skill docs prefer the Windows wrapper for direct helper actions", async () => {
   const docs = [
+    "skills/relaybase/SKILL.md",
     "skills/relaybase-dev/SKILL.md",
     "skills/relaybase-dev/references/windows-runtime.md",
     "skills/relaybase-dev/references/relaybase-contract.md",
-    "docs/relaybase-dev-skill.md",
-    "docs/docker-compose-lifecycle.md",
-    "docs/development.md"
+    "docs/relaybase-dev-skill.md"
   ];
 
   for (const relativePath of docs) {
@@ -606,6 +931,11 @@ test("helper docs prefer the Windows wrapper for direct helper actions", async (
       if (line.includes("relaybase-dev.ps1 -Action")) {
         assert.match(line, /pwsh -NoProfile -File/, `${relativePath} has a direct .ps1 helper action: ${line}`);
       }
+      assert.doesNotMatch(
+        line,
+        /^\.\\scripts\\relaybase-dev\.cmd -Action/,
+        `${relativePath} uses a helper path that fails from repo root: ${line}`
+      );
     }
   }
 });
@@ -712,7 +1042,152 @@ test("health is read-only and recommends configure for an unconfigured project",
   assert.equal(result.ok, false);
   assert.equal(result.project.configured, false);
   assert.ok(result.findings.some((finding) => finding.code === "PROJECT_NOT_CONFIGURED"));
+  assert.ok(
+    result.nextActions?.some((action) => action.owner === "manifest" && action.command === "relaybase configure")
+  );
+  assert.ok(result.nextActions?.some((action) => action.owner === "daemon"));
   assert.equal(await exists(path.join(project, ".relaybase")), false);
+});
+
+test("open reports invalid manifests as manifest-owned next actions", async () => {
+  const project = await tempProject("relaybase-open-invalid-manifest-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-open-invalid-manifest-state-"));
+  await fs.writeFile(path.join(project, "relaybase.app.json"), "{ not-json", "utf8");
+
+  const result = await openProject({
+    cwd: project,
+    host: "127.0.0.1",
+    port: 17996,
+    stateDir,
+    json: true,
+    noBrowser: true,
+    startDaemon: false
+  });
+
+  assert.equal(result.registered, false);
+  assert.equal(result.started, false);
+  assert.match(result.error ?? "", /manifest could not be loaded/i);
+  assert.equal(result.nextActions?.[0]?.owner, "manifest");
+});
+
+test("open reports daemon token mismatch without falling back to local registry writes", async () => {
+  const project = await tempProject("relaybase-open-token-mismatch-");
+  const daemonStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-open-token-daemon-state-"));
+  const cliStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-open-token-cli-state-"));
+  const hub = await createRelaybaseServer({
+    port: 0,
+    stateDir: daemonStateDir,
+    portRangeStart: 18590,
+    portRangeEnd: 18600
+  });
+
+  await fs.writeFile(
+    path.join(project, "relaybase.app.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "token-mismatch-app",
+        name: "Token Mismatch App",
+        command: "node missing.js",
+        cwd: rootDir,
+        protocol: "http",
+        healthUrl: "/health"
+      },
+      null,
+      2
+    )
+  );
+
+  try {
+    await hub.listen();
+    const result = await openProject({
+      cwd: project,
+      host: "127.0.0.1",
+      port: hub.address().port,
+      stateDir: cliStateDir,
+      json: true,
+      noBrowser: true,
+      startDaemon: false
+    });
+
+    assert.equal(result.registered, false);
+    assert.equal(result.started, false);
+    assert.match(result.error ?? "", /different state directories|not authenticated/i);
+    assert.equal(result.nextActions?.[0]?.owner, "token");
+    assert.match(result.nextActions?.[0]?.command ?? "", /diagnose-token/);
+    assert.equal(await exists(path.join(cliStateDir, "registry.json")), false);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("configure fails authentication preflight before writing a manifest or alternate registry", async () => {
+  const project = await tempProject("relaybase-configure-state-mismatch-");
+  const daemonStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-configure-daemon-state-"));
+  const clientStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-configure-client-state-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir: daemonStateDir });
+  await fs.writeFile(
+    path.join(project, "package.json"),
+    JSON.stringify({ name: "mismatch-app", scripts: { dev: "node server.js" } }, null, 2)
+  );
+
+  try {
+    await hub.listen();
+    const result = await configureProject({
+      cwd: project,
+      host: "127.0.0.1",
+      port: hub.address().port,
+      stateDir: clientStateDir,
+      yes: true,
+      startDaemon: false
+    });
+
+    assert.equal(result.verification.registered, false);
+    assert.equal(result.verification.recoveryHint?.code, "relaybase-auth");
+    assert.equal(result.appliedFiles.length, 0);
+    assert.equal(result.reportPath, undefined);
+    assert.equal(await exists(path.join(project, "relaybase.app.json")), false);
+    assert.equal(await exists(path.join(clientStateDir, "registry.json")), false);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("open reports daemon and permission evidence when offline registry fallback cannot write", async () => {
+  const project = await tempProject("relaybase-open-state-blocked-");
+  const stateDir = path.join(project, "relaybase-state-file");
+  await fs.writeFile(stateDir, "not a directory", "utf8");
+  await fs.writeFile(
+    path.join(project, "relaybase.app.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "blocked-state-app",
+        name: "Blocked State App",
+        command: "node missing.js",
+        cwd: rootDir,
+        protocol: "http",
+        healthUrl: "/health"
+      },
+      null,
+      2
+    )
+  );
+
+  const result = await openProject({
+    cwd: project,
+    host: "127.0.0.1",
+    port: 17996,
+    stateDir,
+    json: true,
+    noBrowser: true
+  });
+
+  assert.equal(result.ready, false);
+  assert.equal(result.registered, false);
+  assert.match(result.daemon?.error ?? "", /state\/log setup failed/i);
+  assert.match(result.error ?? "", /Offline registry fallback failed/);
+  assert.ok(result.nextActions?.some((action) => action.owner === "permissions"));
 });
 
 test("open starts a configured app through a running Relaybase daemon and proves the routed URL", async () => {
@@ -758,6 +1233,99 @@ test("open starts a configured app through a running Relaybase daemon and proves
     assert.equal(result.state?.readiness.state, "ready");
   } finally {
     await hub.runtime.processes.stop("opened-app").catch(() => undefined);
+    await hub.close();
+  }
+});
+
+test("open registers through a reachable daemon before reading local registry state", async () => {
+  const project = await tempProject("relaybase-open-daemon-first-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-open-daemon-first-state-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18560, portRangeEnd: 18580 });
+  const fixture = path.join(rootDir, "tests", "fixtures", "fake-managed-app.ts");
+
+  await fs.writeFile(
+    path.join(project, "relaybase.app.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "daemon-first-app",
+        name: "Daemon First App",
+        command: `"${process.execPath}" --experimental-strip-types "${fixture}"`,
+        cwd: rootDir,
+        protocol: "http",
+        healthUrl: "/health"
+      },
+      null,
+      2
+    )
+  );
+
+  try {
+    await hub.listen();
+    await fs.writeFile(path.join(stateDir, "registry.json"), "{ this is not readable registry json", "utf8");
+    const result = await openProject({
+      cwd: project,
+      host: "127.0.0.1",
+      port: hub.address().port,
+      stateDir,
+      json: true,
+      noBrowser: true,
+      startDaemon: false
+    });
+
+    assert.equal(result.appId, "daemon-first-app");
+    assert.equal(result.registered, true);
+    assert.equal(result.started, true);
+    assert.equal(result.ready, true);
+    assert.equal(result.daemon?.started, false);
+    assert.equal(result.state?.routeHealth?.status, "full");
+  } finally {
+    await hub.runtime.processes.stop("daemon-first-app").catch(() => undefined);
+    await hub.close();
+  }
+});
+
+test("open returns app-command next actions when the launch command is missing", async () => {
+  const project = await tempProject("relaybase-open-missing-command-");
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-open-missing-command-state-"));
+  const hub = await createRelaybaseServer({ port: 0, stateDir, portRangeStart: 18610, portRangeEnd: 18620 });
+
+  await fs.writeFile(
+    path.join(project, "relaybase.app.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: "missing-command-app",
+        name: "Missing Command App",
+        command: "definitely-not-a-real-relaybase-command",
+        cwd: rootDir,
+        protocol: "http",
+        healthUrl: "/health"
+      },
+      null,
+      2
+    )
+  );
+
+  try {
+    await hub.listen();
+    const result = await openProject({
+      cwd: project,
+      host: "127.0.0.1",
+      port: hub.address().port,
+      stateDir,
+      json: true,
+      noBrowser: true,
+      startDaemon: false
+    });
+
+    assert.equal(result.registered, true);
+    assert.equal(result.started, false);
+    assert.equal(result.ready, false);
+    assert.equal(result.recoveryHint?.code, "command-not-found");
+    assert.ok(result.nextActions?.some((action) => action.owner === "app-command"));
+  } finally {
+    await hub.runtime.processes.stop("missing-command-app").catch(() => undefined);
     await hub.close();
   }
 });
@@ -823,6 +1391,20 @@ test("classifies launch failures into actionable recovery architectures", () => 
     classifyLaunchFailure({ lastError: "App did not become healthy before the startup timeout." }).code,
     "ignored-port"
   );
+  assert.equal(
+    classifyLaunchFailure({
+      error: JSON.stringify({ code: "UNAUTHORIZED_MUTATION", message: "Unauthorized Relaybase mutation." }),
+      statusCode: 401
+    }).code,
+    "relaybase-auth"
+  );
+  assert.equal(
+    classifyLaunchFailure({
+      error: "unauthorized: authentication required by registry",
+      architecture: "docker-compose-service"
+    }).code,
+    "image_pull_auth_failed"
+  );
 });
 
 async function registerCliListApp(
@@ -852,13 +1434,17 @@ async function runRelaybaseCliJson(args: string[]): Promise<Record<string, any>>
   return JSON.parse(result.stdout) as Record<string, any>;
 }
 
-function runRelaybaseCli(args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runRelaybaseCli(
+  args: string[],
+  options: { env?: NodeJS.ProcessEnv } = {}
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
       ["--experimental-strip-types", path.join(rootDir, "src", "cli.ts"), ...args],
       {
         cwd: rootDir,
+        env: { ...process.env, ...options.env },
         windowsHide: true
       }
     );

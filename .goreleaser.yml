@@ -1,0 +1,44 @@
+version: 2
+
+project_name: relaybase-tui
+
+builds:
+  - id: relaybase-tui
+    dir: tui
+    main: ./cmd/relaybase-tui
+    binary: "relaybase-tui-{{ .Os }}-{{ .Arch }}"
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - >-
+        -s -w
+        -X=main.buildVersion={{ .Version }}
+        -X=main.buildCommit={{ .Commit }}
+        -X=main.buildTime={{ .Date }}
+        -X=main.buildSource=release
+    goos:
+      - windows
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: relaybase-tui
+    ids:
+      - relaybase-tui
+    name_template: "relaybase-tui-{{ .Os }}-{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - docs/tui-architecture.md
+      - docs/tui-keymap.md
+
+checksum:
+  name_template: "relaybase-tui-checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"

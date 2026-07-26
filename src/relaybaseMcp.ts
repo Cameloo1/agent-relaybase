@@ -31,11 +31,13 @@ import type { DockerSetupOptions } from "./dockerProfile.ts";
 import { readManifestFile } from "./registry.ts";
 import { sendJson } from "./responses.ts";
 import { configureProject } from "./setup.ts";
+import { applyRegistration, previewRegistration } from "./setupApi.ts";
 import type { RelaybaseRuntime } from "./server.ts";
 import type { AppRecord } from "./types.ts";
 
 const RELAYBASE_VERSION = "0.1.0";
 const LOCAL_TOKEN_HEADER = "x-relaybase-token";
+const MAX_JSON_BODY_BYTES = 1024 * 1024;
 
 interface McpSession {
   server: Server;
@@ -131,6 +133,11 @@ export class RelaybaseMcpService {
       }
     } catch (error) {
       if (!response.headersSent) {
+        if (error instanceof McpError) {
+          sendJsonRpcError(response, 400, error.code, error.message);
+          return;
+        }
+
         sendJsonRpcError(
           response,
           500,
@@ -188,6 +195,11 @@ export class RelaybaseMcpService {
       product: "Relaybase",
       version: RELAYBASE_VERSION,
       package: "@cameloo/relaybase",
+      daemon: {
+        instanceId: this.runtime.instanceId,
+        pid: process.pid,
+        startedAt: this.runtime.startedAt
+      },
       endpoints: {
         streamableHttp: `${baseUrl}/mcp`,
         legacySse: `${baseUrl}/sse`
@@ -335,6 +347,11 @@ export class RelaybaseMcpService {
         })
       },
       {
+        name: "diagnose_token",
+        description: "Return read-only Relaybase mutation token diagnostics without exposing token contents.",
+        inputSchema: objectSchema()
+      },
+      {
         name: "app_status",
         description: "Return manifest and runtime status for one app.",
         inputSchema: objectSchema({ id: stringSchema("Relaybase app id.") }, ["id"])
@@ -367,11 +384,32 @@ export class RelaybaseMcpService {
         annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false }
       },
       {
+        name: "plan_registration",
+        description:
+          "Inspect a project folder or exact manifest and return the deterministic approval-bound registration preview without writing files.",
+        inputSchema: objectSchema(
+          {
+            path: stringSchema("Project folder or exact relaybase.app.json path."),
+            mode: { type: "string", enum: ["folder", "manifest"] },
+            verificationMode: {
+              type: "string",
+              enum: ["quick", "none"],
+              description: "Explicitly choose one bounded lifecycle proof or no lifecycle mutation."
+            }
+          },
+          ["path", "verificationMode"]
+        ),
+        annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false }
+      },
+      {
         name: "register_app",
-        description: "Register or update an app manifest.",
+        description: "Apply an exact registration preview, or register a legacy explicit manifest input.",
         inputSchema: objectSchema({
           manifest: { type: "object", description: "Relaybase app manifest object." },
-          manifestPath: stringSchema("Optional path to a relaybase.app.json file.")
+          manifestPath: stringSchema("Optional path to a relaybase.app.json file."),
+          previewId: stringSchema("Exact preview id returned by plan_registration."),
+          confirm: { type: "boolean", description: "Must be true when applying previewId." },
+          selectedRepairId: stringSchema("Optional approved repair id associated with this new proof attempt.")
         }),
         annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false }
       },
@@ -395,15 +433,23 @@ export class RelaybaseMcpService {
       },
       {
         name: "tail_logs",
-        description: "Read recent in-memory logs for one app.",
+        description: "Read recent in-memory logs for one app. This is a snapshot; use log_stream_info for live logs.",
         inputSchema: objectSchema(
           {
             id: stringSchema("Relaybase app id."),
             lines: { type: "number", minimum: 1, maximum: 500, description: "Number of recent log lines to return." },
-            follow: { type: "boolean", description: "Accepted for compatibility; this tool returns a snapshot." }
+            follow: {
+              type: "boolean",
+              description: "Compatibility flag only. Relaybase returns a snapshot and stream instructions."
+            }
           },
           ["id"]
         )
+      },
+      {
+        name: "log_stream_info",
+        description: "Return the live HTTP SSE log stream URL and event contract for one app.",
+        inputSchema: objectSchema({ id: stringSchema("Relaybase app id.") }, ["id"])
       },
       {
         name: "app_url",
@@ -430,6 +476,8 @@ export class RelaybaseMcpService {
     switch (name) {
       case "list_apps":
         return structuredToolResult(await this.#listApps(args));
+      case "diagnose_token":
+        return structuredToolResult(this.#tokenDiagnostics());
       case "configure_project":
         if (args.apply === true) {
           this.#requireMutationToken(extra, mutationAuthMode);
@@ -446,9 +494,14 @@ export class RelaybaseMcpService {
           this.#requireMutationToken(extra, mutationAuthMode);
         }
         return structuredToolResult(await this.#proveApp(requiredArg(args.id, "id"), args.lifecycle === true));
+      case "plan_registration":
+        if (args.verificationMode !== "quick" && args.verificationMode !== "none") {
+          throw new Error("plan_registration requires explicit verificationMode=quick or verificationMode=none.");
+        }
+        return structuredToolResult(await previewRegistration(this.runtime, args));
       case "register_app":
         this.#requireMutationToken(extra, mutationAuthMode);
-        return structuredToolResult({ app: await this.#registerApp(args) });
+        return structuredToolResult(await this.#registerApp(args));
       case "start_app":
         this.#requireMutationToken(extra, mutationAuthMode);
         return this.#lifecycleResult(requiredArg(args.id, "id"), "start");
@@ -460,10 +513,13 @@ export class RelaybaseMcpService {
         return this.#lifecycleResult(requiredArg(args.id, "id"), "restart");
       case "tail_logs":
         return structuredToolResult(await this.#tailLogs(args));
+      case "log_stream_info":
+        return structuredToolResult(await this.#logStreamInfo(requiredArg(args.id, "id")));
       case "app_url":
         return structuredToolResult(await this.#appUrl(requiredArg(args.id, "id"), requiredAppUrlType(args.type)));
       default:
         if (this.runtime.processes.mcp.listTools().some((tool) => tool.name === name)) {
+          this.#requireMutationToken(extra, mutationAuthMode);
           return this.runtime.processes.mcp.callTool(name, args);
         }
 
@@ -471,17 +527,36 @@ export class RelaybaseMcpService {
     }
   }
 
-  async #registerApp(args: Record<string, unknown>): Promise<AppRecord> {
+  async #registerApp(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (typeof args.previewId === "string") {
+      if (args.confirm !== true) {
+        throw new Error("REGISTER_CONFIRMATION_REQUIRED: register_app preview application requires confirm=true.");
+      }
+      const result = await applyRegistration(
+        this.runtime,
+        {
+          previewId: args.previewId,
+          confirm: true,
+          confirmation: { confirmed: true, reason: "MCP confirmation" },
+          ...(typeof args.selectedRepairId === "string" ? { selectedRepairId: args.selectedRepairId } : {})
+        },
+        randomUUID()
+      );
+      if (!result.app) {
+        throw new Error("REGISTER_REGISTRY_FAILED: registration completed without an app record.");
+      }
+      return { registration: result };
+    }
     if (typeof args.manifestPath === "string") {
       const manifest = await readManifestFile(args.manifestPath);
-      return this.runtime.registry.upsertManifest(manifest, { manifestPath: args.manifestPath });
+      return { app: await this.runtime.registry.upsertManifest(manifest, { manifestPath: args.manifestPath }) };
     }
 
     if (typeof args.manifest !== "object" || args.manifest === null || Array.isArray(args.manifest)) {
       throw new Error("register_app requires manifest or manifestPath.");
     }
 
-    return this.runtime.registry.upsertManifest(args.manifest as Record<string, unknown>);
+    return { app: await this.runtime.registry.upsertManifest(args.manifest as Record<string, unknown>) };
   }
 
   async #listApps(args: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -638,8 +713,10 @@ export class RelaybaseMcpService {
     lines: string[];
     events: unknown[];
     follow: boolean;
+    followSupported: boolean;
     followAccepted: boolean;
     logStreamUrl: string;
+    message?: string;
   }> {
     const id = requiredArg(args.id, "id");
     const requestedLines =
@@ -653,8 +730,30 @@ export class RelaybaseMcpService {
       lines: logs.slice(-requestedLines),
       events: events.slice(-requestedLines),
       follow: args.follow === true,
+      followSupported: false,
       followAccepted: false,
-      logStreamUrl: `http://${this.runtime.host}:${this.runtime.port}/__hub/api/apps/${encodeURIComponent(id)}/logs/stream`
+      logStreamUrl: `http://${this.runtime.host}:${this.runtime.port}/__hub/api/apps/${encodeURIComponent(id)}/logs/stream`,
+      ...(args.follow === true
+        ? {
+            message: "tail_logs returns snapshots only. Use log_stream_info and the HTTP SSE log stream for live logs."
+          }
+        : {})
+    };
+  }
+
+  async #logStreamInfo(id: string): Promise<Record<string, unknown>> {
+    const app = await this.runtime.registry.get(id);
+    if (!app) {
+      throw new Error(`Unknown app: ${id}`);
+    }
+
+    return {
+      id,
+      followSupportedInMcpTool: false,
+      streamUrl: `http://${this.runtime.host}:${this.runtime.port}/__hub/api/apps/${encodeURIComponent(id)}/logs/stream`,
+      transport: "http-sse",
+      eventTypes: ["status", "snapshot", "log", "ping"],
+      fallbackTool: "tail_logs"
     };
   }
 
@@ -743,7 +842,7 @@ export class RelaybaseMcpService {
         throw new Error(`Unknown app: ${id}`);
       }
 
-      return textResource(uri, JSON.stringify(app, null, 2), "application/json");
+      return textResource(uri, JSON.stringify(appManifestResource(app), null, 2), "application/json");
     }
 
     if (uri.startsWith("relaybase://app/") && uri.includes("/mcp/")) {
@@ -828,11 +927,14 @@ export class RelaybaseMcpService {
     const headers = requestHeaders(extra);
     if (!headers) {
       if (mutationAuthMode === "http") {
-        throw new McpError(ErrorCode.InvalidRequest, "UNAUTHORIZED_MUTATION: Unauthorized Relaybase mutation.");
+        throw this.#mutationAuthError();
       }
 
       if (!this.runtime.token) {
-        throw new McpError(ErrorCode.InvalidRequest, "Relaybase state token is unavailable for stdio mutation.");
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          `Relaybase state token is unavailable for stdio mutation. ${this.#tokenRecoveryMessage()}`
+        );
       }
 
       return;
@@ -840,8 +942,43 @@ export class RelaybaseMcpService {
 
     const token = headerValue(headers[LOCAL_TOKEN_HEADER]) ?? bearerToken(headerValue(headers.authorization));
     if (token !== this.runtime.token) {
-      throw new McpError(ErrorCode.InvalidRequest, "UNAUTHORIZED_MUTATION: Unauthorized Relaybase mutation.");
+      throw this.#mutationAuthError();
     }
+  }
+
+  #mutationAuthError(): McpError {
+    return new McpError(
+      ErrorCode.InvalidRequest,
+      `UNAUTHORIZED_MUTATION: Unauthorized Relaybase mutation. ${this.#tokenRecoveryMessage()}`
+    );
+  }
+
+  #tokenRecoveryMessage(): string {
+    const diagnostics = this.#tokenDiagnostics();
+    return `Run diagnose_token. stateDir=${diagnostics.stateDir}; tokenPath=${diagnostics.tokenPath}; tokenPresent=${diagnostics.tokenPresent}; acceptedHeaders=${diagnostics.acceptedHeaders.join(" or ")}.`;
+  }
+
+  #tokenDiagnostics(): {
+    requiredForMutations: boolean;
+    acceptedHeaders: string[];
+    stateDir: string;
+    tokenPath: string;
+    tokenPresent: boolean;
+    tokenLength: number | null;
+    mismatchHint: string;
+    note: string;
+  } {
+    return {
+      requiredForMutations: true,
+      acceptedHeaders: ["Authorization: Bearer <token>", `${LOCAL_TOKEN_HEADER}: <token>`],
+      stateDir: this.runtime.stateDir,
+      tokenPath: path.join(this.runtime.stateDir, "session-token"),
+      tokenPresent: Boolean(this.runtime.token),
+      tokenLength: this.runtime.token ? this.runtime.token.length : null,
+      mismatchHint:
+        "Discovery can be healthy while mutations fail with 401 if the client is reading a token from a different Relaybase state directory.",
+      note: "Token contents are intentionally not printed."
+    };
   }
 }
 
@@ -870,6 +1007,11 @@ function structuredToolResult(value: unknown): CallToolResult {
       }
     ]
   };
+}
+
+function appManifestResource(app: AppRecord): Record<string, unknown> {
+  const { env: _env, ...safeApp } = app;
+  return safeApp;
 }
 
 function textResource(uri: string, text: string, mimeType: string): ReadResourceResult {
@@ -963,8 +1105,15 @@ function bearerToken(value: string | undefined): string | undefined {
 
 async function readJsonBody(request: http.IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.byteLength;
+    if (totalBytes > MAX_JSON_BODY_BYTES) {
+      request.destroy();
+      throw new McpError(ErrorCode.InvalidRequest, "Request body exceeds the 1 MB limit.");
+    }
+    chunks.push(buffer);
   }
 
   if (!chunks.length) {

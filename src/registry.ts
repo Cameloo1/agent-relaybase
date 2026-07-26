@@ -58,6 +58,19 @@ export class Registry {
     return merged;
   }
 
+  // Rename and recovery use a commit-before-publish registry update so a
+  // persistence failure cannot leave process-memory state ahead of registry.json.
+  async upsertManifestAtomic(input: AppManifestInput, options: { manifestPath?: string } = {}): Promise<AppRecord> {
+    await this.#ensureLoaded();
+    const normalized = normalizeManifest(input, options);
+    const merged = mergeAppRecord(this.#apps.get(normalized.id), normalized);
+    const next = new Map(this.#apps);
+    next.set(merged.id, merged);
+    await this.#saveSnapshot(next);
+    this.#apps = next;
+    return merged;
+  }
+
   async upsertRecord(record: AppRecord): Promise<AppRecord> {
     await this.#ensureLoaded();
     const merged = mergeAppRecord(this.#apps.get(record.id), record);
@@ -77,14 +90,23 @@ export class Registry {
   }
 
   async save(): Promise<void> {
+    await this.#saveSnapshot(this.#apps);
+  }
+
+  async #saveSnapshot(apps: Map<string, AppRecord>): Promise<void> {
     await ensureStateDir(this.stateDir);
     const data: RegistryFile = {
       version: 1,
-      apps: [...this.#apps.values()].sort((a, b) => a.id.localeCompare(b.id))
+      apps: [...apps.values()].sort((a, b) => a.id.localeCompare(b.id))
     };
-    const tempPath = `${this.filePath}.tmp`;
-    await fs.writeFile(tempPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-    await fs.rename(tempPath, this.filePath);
+    const tempPath = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      await fs.writeFile(tempPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+      await fs.rename(tempPath, this.filePath);
+    } catch (error) {
+      await fs.unlink(tempPath).catch(() => undefined);
+      throw error;
+    }
   }
 
   async #ensureLoaded(): Promise<void> {

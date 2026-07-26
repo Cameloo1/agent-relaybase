@@ -1,6 +1,6 @@
 # MCP
 
-Relaybase exposes its lifecycle control plane through MCP. The same daemon can serve stdio MCP, Streamable HTTP MCP, and legacy SSE MCP compatibility.
+Relaybase exposes its lifecycle control plane through MCP. The same daemon supports stdio MCP, Streamable HTTP MCP, and legacy SSE compatibility.
 
 ## Endpoints
 
@@ -18,6 +18,21 @@ http://localhost:7777/.well-known/mcp.json
 
 The discovery document includes endpoint URLs, mutation auth requirements, accepted auth headers, the active state directory, and the session token path. It does not return the token.
 
+## Client Config
+
+```json
+{
+  "mcpServers": {
+    "relaybase": {
+      "command": "npx",
+      "args": ["@cameloo/relaybase", "mcp"]
+    }
+  }
+}
+```
+
+`relaybase configure --mcp-install` can also write `.relaybase/mcp.json` with this package-based config shape.
+
 ## Auth
 
 HTTP mutation tools require the local Relaybase session token through either:
@@ -27,9 +42,7 @@ Authorization: Bearer <token>
 x-relaybase-token: <token>
 ```
 
-The token is stored as `session-token` in the Relaybase state directory.
-
-Read-only MCP calls do not require mutation auth. Stdio MCP runs in the local process context and does not receive HTTP headers.
+The token is stored as `session-token` in the Relaybase state directory. Read-only MCP calls do not require mutation auth. Stdio MCP runs in the local process context and does not receive HTTP headers.
 
 ## Tools
 
@@ -37,7 +50,9 @@ Relaybase exposes these lifecycle tools:
 
 ```text
 configure_project
+plan_registration
 list_apps
+diagnose_token
 app_status
 health_check
 verify_app
@@ -47,6 +62,7 @@ start_app
 stop_app
 restart_app
 tail_logs
+log_stream_info
 app_url
 ```
 
@@ -59,13 +75,19 @@ Token-gated mutation tools:
 - `stop_app`
 - `restart_app`
 
-`configure_project` uses the same setup engine as `relaybase configure`. With `apply: false`, it returns a dry-run plan. With `apply: true`, it may write project files, register the app, and optionally start verification. Docker Compose callers can pass `profile: "docker-compose"` with `service`, `targetPort`, `healthPath`, timeout fields, `dependencyPortPolicy`, and `dockerStartDesktop`.
+`configure_project` uses the same setup engine as `relaybase configure`. With `apply: false`, it returns a dry-run plan. With `apply: true`, it may write project files, register the app, and optionally start verification.
 
-`list_apps` is read-only and does not require mutation auth. It accepts an optional `filter` value: `all`, `running`, `active`, `stopped`, `ready`, or `attention`. The response preserves the existing `apps` and `states` keys and also includes `filter`, `summary`, and `items`. `summary` counts registered, shown, running, active, ready, stopped, and attention apps. `items` is the compact list shape used by the CLI, with id, name, readiness, runtime, health, route, port, action, attention, and optional verbose fields such as cwd, manifest path, phase, logs, child MCP summary, stop verification, and last error.
+`plan_registration` is read-only and requires an explicit `verificationMode: "quick" | "none"` for automation. It returns the same folder-or-manifest preview used by the CLI and TUI, including whether confirmation will briefly start and stop the app. Apply its exact `previewId` with `register_app { previewId, confirm: true }`. Drift invalidates the preview and performs zero writes, registry updates, or starts.
+
+With `quick`, `register_app` returns `registration.verification` containing the attempt status, assigned port, health target, stop/closure result, classified failure, and up to three ordered preview-only repairs. Successful proof ends stopped. With `none`, it performs zero lifecycle mutation and returns an honest unverified state. A caller may pass `selectedRepairId` when applying a separately approved repair retry.
+
+`list_apps` is read-only. It accepts `all`, `running`, `active`, `stopped`, `ready`, and `attention` filters. Its compact items include id, name, readiness, runtime, health, route, port, action, and attention state.
+
+`diagnose_token` is read-only. It returns the active state directory, token path, token presence, accepted mutation headers, and mismatch hints without returning token contents.
 
 `prove_app` returns a proof snapshot. With `lifecycle: false` or omitted, it is read-only. With `lifecycle: true`, it starts the app, checks routed health and logs, stops the app, and verifies cleanup.
 
-`tail_logs` returns a snapshot. Its `follow` argument is accepted for compatibility, but the tool response marks follow as not accepted. Use the HTTP log stream for live logs.
+`tail_logs` returns a snapshot. Its `follow` argument is accepted for compatibility, but the MCP tool does not hold a live stream open. Use `log_stream_info` to get the HTTP SSE stream URL and event contract.
 
 ## Resources
 
@@ -114,33 +136,3 @@ relaybase://app/<id>/mcp/<resource-uri>
 Child MCP servers start with `start_app`, stop with `stop_app`, and are included in app state. Relaybase stops accepting new child calls before stop, waits for in-flight calls to drain, closes child transports, and reports structured drain results.
 
 Child server closures are logged. When a child closes unexpectedly, Relaybase schedules restart with exponential backoff from 1000 ms up to 30000 ms.
-
-## Client Config
-
-Local development:
-
-```json
-{
-  "mcpServers": {
-    "relaybase": {
-      "command": "npm.cmd",
-      "args": ["run", "relaybase", "--", "mcp"]
-    }
-  }
-}
-```
-
-Package use:
-
-```json
-{
-  "mcpServers": {
-    "relaybase": {
-      "command": "npx",
-      "args": ["@cameloo/relaybase", "mcp"]
-    }
-  }
-}
-```
-
-`relaybase configure --mcp-install` can also write `.relaybase/mcp.json` with the package-based config shape.

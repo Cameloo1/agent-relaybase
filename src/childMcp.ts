@@ -72,6 +72,11 @@ interface AppMcpRuntime {
 export class ChildMcpSupervisor {
   #apps = new Map<string, AppMcpRuntime>();
   #listeners = new Set<(event: ChildMcpEvent) => void>();
+  #sanitizeEnvironment: (environment: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
+
+  constructor(options: { sanitizeEnvironment?: (environment: NodeJS.ProcessEnv) => NodeJS.ProcessEnv } = {}) {
+    this.#sanitizeEnvironment = options.sanitizeEnvironment ?? ((environment) => ({ ...environment }));
+  }
 
   onEvent(listener: (event: ChildMcpEvent) => void): () => void {
     this.#listeners.add(listener);
@@ -247,9 +252,11 @@ export class ChildMcpSupervisor {
     child.lastStartedAt = new Date().toISOString();
     child.lastError = undefined;
     child.nextRestartAt = undefined;
+    let client: Client | undefined;
+    let transport: ChildTransport | undefined;
 
     try {
-      const client = new Client(
+      client = new Client(
         {
           name: `relaybase-${child.app.id}-${child.config.id}`,
           version: "0.1.0"
@@ -271,7 +278,7 @@ export class ChildMcpSupervisor {
           }
         }
       );
-      const transport = await this.#createTransport(child);
+      transport = await this.#createTransport(child);
       transport.onclose = () => void this.#handleChildClosed(child);
       transport.onerror = (error) => {
         child.lastError = error.message;
@@ -300,6 +307,17 @@ export class ChildMcpSupervisor {
       });
       this.#emitListChanged(child);
     } catch (error) {
+      if (client && child.client === client) {
+        child.client = undefined;
+      }
+      if (transport && child.transport === transport) {
+        child.transport = undefined;
+      }
+      try {
+        await client?.close();
+      } catch {
+        // The failed connect path is already reported below.
+      }
       child.status = "errored";
       child.acceptingCalls = false;
       child.lastError = error instanceof Error ? error.message : String(error);
@@ -321,12 +339,16 @@ export class ChildMcpSupervisor {
         command: config.command!,
         args: config.args,
         cwd: config.cwd,
-        env: {
-          ...process.env,
-          ...config.env,
-          RELAYBASE_APP_ID: child.app.id,
-          RELAYBASE_CHILD_MCP_ID: config.id
-        },
+        env: Object.fromEntries(
+          Object.entries(
+            this.#sanitizeEnvironment({
+              ...process.env,
+              ...config.env,
+              RELAYBASE_APP_ID: child.app.id,
+              RELAYBASE_CHILD_MCP_ID: config.id
+            })
+          ).filter((entry): entry is [string, string] => typeof entry[1] === "string")
+        ),
         stderr: "pipe"
       });
       transport.stderr?.on("data", (chunk) => {
@@ -491,6 +513,9 @@ export class ChildMcpSupervisor {
 
   #scheduleRestart(child: ChildRuntime): void {
     if (child.closing) {
+      return;
+    }
+    if (child.restartTimer) {
       return;
     }
 

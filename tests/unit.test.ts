@@ -1,14 +1,234 @@
 import assert from "node:assert/strict";
-import { promises as fs } from "node:fs";
+import { EventEmitter } from "node:events";
+import { existsSync, promises as fs } from "node:fs";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { aggregateComponentStatus, buildAppComponentState } from "../src/appComponents.ts";
 import { namespaceChildName, relaybaseChildResourceUri } from "../src/childMcp.ts";
+import { relaybaseErrorResponse } from "../src/apiErrors.ts";
+import { sanitizeAgentPayload } from "../src/agent/errors.ts";
 import { composeAppState } from "../src/appState.ts";
 import { dashboardHtml } from "../src/dashboard.ts";
+import { isRecognizedRelaybaseNpmPowerShellShim, removeRecognizedRelaybasePowerShellShim } from "../src/prefixShim.ts";
+import { checkAppHealth, waitForHealthy } from "../src/health.ts";
+import { LogStore } from "../src/logStore.ts";
+import { normalizeWindowsCommandShim, ProcessManager } from "../src/processManager.ts";
+import { redactDiagnosticText, redactSecretLikeValues, redactValueForExport } from "../src/redaction.ts";
 import { Registry } from "../src/registry.ts";
 import { appIdFromHost, resolveRoute } from "../src/router.ts";
+import {
+  formatTuiLaunchFailure,
+  formatMissingTuiBinaryDiagnostic,
+  checkDaemonReachable,
+  resolveTuiBinary,
+  runRelaybaseTui,
+  type DaemonReachability
+} from "../src/tuiBridge.ts";
+import type { DaemonEnsureResult } from "../src/daemonLauncher.ts";
+import type { DaemonRestartResult } from "../src/daemonRestartClient.ts";
+import { arrowSelectCursorRows } from "../src/cliPrompt.ts";
 import { normalizeManifest, validateAppId } from "../src/validation.ts";
+import { compileLaunchPlan } from "../src/launchPlan.ts";
+import {
+  evaluateStatus,
+  parseStatusLines,
+  renderCleanWorktreeResult,
+  runCleanWorktree
+} from "../scripts/check-worktree-clean.mjs";
+import { npmPackArguments, parseNpmPackJson } from "../scripts/npm-pack-json.mjs";
+import { containsCredentialFixtureLiteral } from "../scripts/package-check.mjs";
+import {
+  buildDoctorReport,
+  currentPlatformDevelopmentBinaryPath,
+  currentPlatformBinaryPath,
+  formatGoExecutionPolicyDiagnostic,
+  formatMissingGoDiagnostic,
+  formatMissingGoReleaserDiagnostic,
+  formatUnsupportedRaceDiagnostic,
+  goCommandEnv,
+  isApplicationControlOutput,
+  isUnsupportedRaceOutput,
+  raceUnsupportedExitCode,
+  repoLocalGoReleaserPath,
+  resolveGoReleaserBinary,
+  runCli,
+  targetForPlatform
+} from "../scripts/tui-go.mjs";
+import { runPackageCheck } from "../scripts/package-check.mjs";
+import {
+  artifactPaths,
+  evaluateSmokePrerequisites,
+  formatMissingTuiSmokeBinaryDiagnostic,
+  preferenceEvidenceContainsSecretValue,
+  preferenceEvidenceLooksComplete,
+  preferencesSurvived,
+  renderedTranscriptOutput,
+  smokeFixtureDefinition,
+  transcriptHasResponsiveBridgeLayout,
+  transcriptHasStyledOperatorShell,
+  transcriptProcessOutput
+} from "../scripts/tui-smoke.mjs";
+
+type TestTuiSpawnOptions = {
+  env: NodeJS.ProcessEnv;
+  shell: false;
+  stdio: "inherit" | ["ignore", "pipe", "pipe"];
+  cwd?: string;
+};
+
+test("structured launch validates controlled tokens and compiles argument boundaries without shell interpolation", () => {
+  const app = normalizeManifest(
+    {
+      schemaVersion: 1,
+      id: "computer-stats",
+      name: "Computer Stats",
+      cwd: ".",
+      protocol: "http",
+      healthUrl: "/api/ping",
+      launch: {
+        executable: ".\\Start Dashboard.ps1",
+        args: ["-HostName", "{relaybase.host}", "-Port", "{relaybase.port}", "value with spaces"],
+        environment: { DASHBOARD_URL: "{relaybase.baseUrl}" },
+        portBinding: "arguments"
+      }
+    },
+    { manifestPath: path.join("C:\\Projects\\Computer Stats", "relaybase.app.json"), now: new Date(0) }
+  );
+  const plan = compileLaunchPlan(app, { host: "127.0.0.1", port: 17042, hubPort: 7777 });
+  assert.equal(plan.adapterId, "structured-powershell");
+  assert.deepEqual(plan.args, ["-HostName", "127.0.0.1", "-Port", "17042", "value with spaces"]);
+  assert.equal(plan.port.ownership, "relaybase");
+  assert.equal(plan.port.strategy, "arguments");
+  assert.equal(plan.environment.DASHBOARD_URL, "http://computer-stats.localhost:7777");
+  assert.throws(
+    () => normalizeManifest({ id: "bad", name: "Bad", launch: { executable: "node", args: ["$PORT"] } }),
+    /shell interpolation/
+  );
+  assert.throws(
+    () => normalizeManifest({ id: "bad", name: "Bad", launch: { executable: "node", args: ["{relaybase.unknown}"] } }),
+    /unsupported Relaybase token/
+  );
+  assert.throws(
+    () => normalizeManifest({ id: "bad", name: "Bad", command: "node app.js", launch: { executable: "node" } }),
+    /cannot both be provided/
+  );
+});
+
+test("legacy launch plans expose the executable separately for verification preflight", () => {
+  const app = normalizeManifest(
+    {
+      schemaVersion: 1,
+      id: "legacy-vite",
+      name: "Legacy Vite",
+      command: "npm.cmd run dev",
+      cwd: "."
+    },
+    { manifestPath: path.join("C:\\Projects\\Legacy Vite", "relaybase.app.json"), now: new Date(0) }
+  );
+  const plan = compileLaunchPlan(app, { host: "127.0.0.1", port: 17042, hubPort: 7777 });
+  assert.equal(plan.source, "legacy");
+  assert.equal(plan.executable, "npm.cmd");
+  assert.deepEqual(plan.args, ["run", "dev"]);
+});
+
+test("Windows package-manager commands resolve to executable command shims", () => {
+  assert.equal(normalizeWindowsCommandShim("npm run serve", "win32"), "npm.cmd run serve");
+  assert.equal(normalizeWindowsCommandShim("corepack pnpm run dev", "win32"), "corepack.cmd pnpm run dev");
+  assert.equal(normalizeWindowsCommandShim("npm run serve", "linux"), "npm run serve");
+  assert.equal(normalizeWindowsCommandShim("C:\\tools\\npm run serve", "win32"), "C:\\tools\\npm run serve");
+});
+
+test("process manager passes assigned port and spaced arguments through structured launch with shell disabled", async () => {
+  const project = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-structured-process-"));
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-structured-process-state-"));
+  const scriptPath = path.join(project, "server.cjs");
+  const evidencePath = path.join(project, "args.json");
+  await fs.writeFile(
+    scriptPath,
+    `const fs=require("node:fs"),http=require("node:http");\nconst [port,value]=process.argv.slice(2);\nfs.writeFileSync(${JSON.stringify(evidencePath)},JSON.stringify({port,value}));\nhttp.createServer((_q,r)=>{r.statusCode=200;r.end("ok")}).listen(Number(port),"127.0.0.1");\n`,
+    "utf8"
+  );
+  const registry = new Registry(stateDir);
+  await registry.load();
+  await registry.upsertManifest({
+    schemaVersion: 1,
+    id: "structured-process",
+    name: "Structured Process",
+    cwd: project,
+    protocol: "http",
+    healthUrl: "/",
+    launch: {
+      executable: process.execPath,
+      args: [scriptPath, "{relaybase.port}", "value with spaces"],
+      environment: {},
+      portBinding: "arguments"
+    }
+  });
+  const manager = new ProcessManager(registry, { portRangeStart: 18100, portRangeEnd: 18199 });
+  const runtimeReasons: string[] = [];
+  const unsubscribeRuntime = manager.subscribeRuntimeChanges((event) => runtimeReasons.push(event.reason));
+  try {
+    const started = await manager.start("structured-process");
+    assert.equal(started.status, "running");
+    assert.equal(started.lastStartAttempt?.launchPlan?.adapterId, "structured-process");
+    assert.deepEqual(JSON.parse(await fs.readFile(evidencePath, "utf8")), {
+      port: String(started.assignedPort),
+      value: "value with spaces"
+    });
+  } finally {
+    const stopped = await manager.stop("structured-process");
+    assert.equal(stopped.status, "stopped");
+    assert.equal(stopped.stopVerification?.portClosureVerified, true);
+    unsubscribeRuntime();
+  }
+  assert.ok(runtimeReasons.includes("start_requested"));
+  assert.ok(runtimeReasons.includes("start_ready"));
+  assert.ok(runtimeReasons.includes("stop_requested"));
+  assert.ok(runtimeReasons.includes("stopped"));
+});
+
+test("shared external ports fail closed instead of marking every registered app running", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-shared-port-state-"));
+  const server = http.createServer((_request, response) => {
+    response.statusCode = 200;
+    response.end("ok");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  const registry = new Registry(stateDir);
+  await registry.load();
+  for (const id of ["shared-one", "shared-two"]) {
+    await registry.upsertManifest({
+      id,
+      name: id,
+      command: "external",
+      cwd: ".",
+      protocol: "http",
+      healthUrl: "/",
+      upstreamPort: port
+    });
+  }
+  const manager = new ProcessManager(registry);
+
+  try {
+    const statuses = await manager.listStatuses();
+    assert.deepEqual(
+      statuses.map((app) => app.runtime.status),
+      ["degraded", "degraded"]
+    );
+    assert.equal(
+      statuses.some((app) => app.runtime.status === "running"),
+      false
+    );
+    assert.ok(statuses.every((app) => app.runtime.blockingReason === "external_port_shared"));
+    assert.equal(await manager.getProxyTarget(statuses[0]!), undefined);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
 
 test("validates app ids", () => {
   assert.doesNotThrow(() => validateAppId("notes"));
@@ -16,6 +236,1664 @@ test("validates app ids", () => {
   assert.throws(() => validateAppId("Notes"));
   assert.throws(() => validateAppId("-notes"));
   assert.throws(() => validateAppId("notes.local"));
+});
+
+test("interactive arrow menus clear the title and every choice before repainting", () => {
+  assert.equal(arrowSelectCursorRows(4), 5);
+  assert.equal(arrowSelectCursorRows(0), 1);
+  assert.equal(arrowSelectCursorRows(-1), 1);
+});
+
+test("normalizes API errors and redacts secret-like details", () => {
+  const body = relaybaseErrorResponse({
+    code: "TEST_ERROR",
+    message: "Test error.",
+    retryable: true,
+    correlationId: "unit-correlation",
+    detail: {
+      token: "super-secret-token",
+      tokenPath: "C:\\relaybase\\session-token",
+      tokenPresent: true,
+      cookie: "cookie-secret",
+      session: "session-secret",
+      nested: {
+        password: "hunter2",
+        authToken: "auth-token-secret"
+      },
+      header: "Authorization: Bearer bearer-secret",
+      note: "api_key=key-secret cookie=cookie-inline session=session-inline auth_token=auth-inline"
+    }
+  });
+  const details = body.details as {
+    token: string;
+    tokenPath: string;
+    tokenPresent: boolean;
+    cookie: string;
+    session: string;
+    nested: { password: string };
+  };
+  const rendered = JSON.stringify(body);
+
+  assert.equal(body.error, "Test error.");
+  assert.equal(body.recoverable, true);
+  assert.equal(body.relaybaseError.retryable, true);
+  assert.equal(body.relaybaseError.correlationId, "unit-correlation");
+  assert.equal(details.token, "[redacted]");
+  assert.equal(details.tokenPath, "C:\\relaybase\\session-token");
+  assert.equal(details.tokenPresent, true);
+  assert.equal(details.cookie, "[redacted]");
+  assert.equal(details.session, "[redacted]");
+  assert.equal(details.nested.password, "[redacted]");
+  assert.doesNotMatch(
+    rendered,
+    /super-secret-token|hunter2|bearer-secret|key-secret|cookie-secret|session-secret|auth-token-secret|cookie-inline|session-inline|auth-inline/
+  );
+});
+
+test("agent payload sanitizer redacts cookie and session object keys", () => {
+  const sanitized = sanitizeAgentPayload({
+    session: "raw-session-value",
+    nested: {
+      cookie: "raw-cookie-value",
+      authToken: "raw-auth-token"
+    }
+  });
+
+  assert.deepEqual(sanitized, {
+    session: "[redacted]",
+    nested: {
+      cookie: "[redacted]",
+      authToken: "[redacted]"
+    }
+  });
+});
+
+test("redacts obvious secret-like log values", () => {
+  const result = redactSecretLikeValues(
+    "token=inline-token Authorization: Bearer bearer-token env secret is super-secret-value password=hunter2",
+    {
+      SECRET_TOKEN: "super-secret-value"
+    }
+  );
+
+  assert.equal(result.redacted, true);
+  assert.doesNotMatch(result.value, /inline-token|bearer-token|super-secret-value|hunter2/);
+  assert.match(result.value, /\[redacted\]/);
+});
+
+test("redacts diagnostic token text with the shared daemon pattern", () => {
+  const redacted = redactDiagnosticText(
+    "spawn failed token=relaybase-token password=hunter2 authorization=abcdefgh session-token=secret"
+  );
+
+  assert.match(redacted, /\[redacted\]/);
+  assert.doesNotMatch(redacted, /relaybase-token|hunter2|abcdefgh|secret/);
+});
+
+test("redaction reports counts without exposing secret values", () => {
+  const result = redactSecretLikeValues("API_KEY='inline-key' token=inline-token relay token is relaybase-secret", {
+    RELAYBASE_TOKEN: "relaybase-secret"
+  });
+
+  assert.equal(result.redacted, true);
+  assert.equal(result.report.replacements, 3);
+  assert.equal(result.report.categories.env_assignment, 2);
+  assert.equal(result.report.categories.environment_value, 1);
+  assert.doesNotMatch(JSON.stringify(result.report), /inline-key|inline-token|relaybase-secret/);
+});
+
+test("redacts bare env values for common password aliases", () => {
+  const result = redactSecretLikeValues("database password is db-pass-secret and pwd is db-pwd-secret", {
+    DB_PASS: "db-pass-secret",
+    DB_PWD: "db-pwd-secret"
+  });
+
+  assert.equal(result.redacted, true);
+  assert.equal(result.report.categories.environment_value, 2);
+  assert.doesNotMatch(result.value, /db-pass-secret|db-pwd-secret/);
+});
+
+test("redacts cookie and session object fields in export bundles", () => {
+  const result = redactValueForExport({
+    cookie: "raw-cookie-value",
+    nested: {
+      session: "raw-session-value",
+      visible: "safe"
+    }
+  });
+
+  assert.equal(result.redacted, true);
+  assert.deepEqual(result.value, {
+    cookie: "[redacted]",
+    nested: {
+      session: "[redacted]",
+      visible: "safe"
+    }
+  });
+  assert.equal(result.report.categories.sensitive_key, 2);
+  assert.doesNotMatch(JSON.stringify(result.value), /raw-cookie-value|raw-session-value/);
+});
+
+test("process restart returns blocked view when stop is already in progress", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-restart-dedupe-"));
+  const registry = new Registry(stateDir);
+  await registry.load();
+  await registry.upsertManifest({
+    id: "restart-race",
+    name: "Restart Race",
+    command: `${JSON.stringify(process.execPath)} -e "setTimeout(() => process.exit(0), 250)"`,
+    cwd: process.cwd(),
+    stopCommand: `${JSON.stringify(process.execPath)} -e "setTimeout(() => process.exit(0), 250)"`,
+    stopTimeoutMs: 1000
+  });
+  const processes = new ProcessManager(registry);
+
+  const stopPromise = processes.stop("restart-race");
+  const restartView = await processes.restart("restart-race");
+  const stopped = await stopPromise;
+
+  assert.equal(restartView.blockingReason, "stop_in_progress");
+  assert.notEqual(restartView.status, "running");
+  assert.equal(stopped.status, "stopped");
+});
+
+test("TUI bridge resolves RELAYBASE_TUI_BIN first", async () => {
+  const binaryPath = path.join(os.tmpdir(), "relaybase-tui-test.exe");
+  const resolution = await resolveTuiBinary(
+    {
+      env: { RELAYBASE_TUI_BIN: binaryPath },
+      packageRoot: path.join(os.tmpdir(), "relaybase-package"),
+      platform: "win32",
+      arch: "x64"
+    },
+    {
+      fileExists: async (filePath) => filePath === binaryPath
+    }
+  );
+
+  assert.equal(resolution.ok, true);
+  assert.equal(resolution.path, binaryPath);
+  assert.equal(resolution.source, "RELAYBASE_TUI_BIN");
+});
+
+test("TUI bridge resolves repo-local development binary before package asset", async () => {
+  const packageRoot = path.join(os.tmpdir(), "relaybase-dev-checkout");
+  const binaryPath = path.join(packageRoot, ".relaybase", "tui-dev-bin", "relaybase-tui-windows-amd64.exe");
+  const resolution = await resolveTuiBinary(
+    {
+      env: {},
+      packageRoot,
+      platform: "win32",
+      arch: "x64"
+    },
+    {
+      fileExists: async (filePath) => filePath === path.join(packageRoot, ".git") || filePath === binaryPath
+    }
+  );
+
+  assert.equal(resolution.ok, true);
+  assert.equal(resolution.path, binaryPath);
+  assert.equal(resolution.source, "development-build");
+});
+
+test("TUI bridge resolves packaged Windows exe path when dev checkout marker is absent", async () => {
+  const packageRoot = path.join(os.tmpdir(), "relaybase-package");
+  const binaryPath = path.join(packageRoot, "bin", "relaybase-tui", "relaybase-tui-windows-amd64.exe");
+  const resolution = await resolveTuiBinary(
+    {
+      env: {},
+      packageRoot,
+      platform: "win32",
+      arch: "x64"
+    },
+    {
+      fileExists: async (filePath) => filePath === binaryPath
+    }
+  );
+
+  assert.equal(resolution.ok, true);
+  assert.equal(resolution.path, binaryPath);
+  assert.equal(resolution.source, "package-assets");
+});
+
+test("TUI bridge resolves global relaybase-tui fallback without using a shell path string", async () => {
+  const globalBinary = path.join(os.tmpdir(), "relaybase-tui.exe");
+  const resolution = await resolveTuiBinary(
+    {
+      env: { Path: path.dirname(globalBinary) },
+      packageRoot: path.join(os.tmpdir(), "relaybase-package"),
+      platform: "win32",
+      arch: "x64"
+    },
+    {
+      fileExists: async () => false,
+      findExecutableOnPath: async (command, options) => {
+        assert.equal(command, "relaybase-tui.exe");
+        assert.equal(options.platform, "win32");
+        return globalBinary;
+      }
+    }
+  );
+
+  assert.equal(resolution.ok, true);
+  assert.equal(resolution.path, globalBinary);
+  assert.equal(resolution.source, "global-path");
+});
+
+test("TUI bridge explains missing binary resolution order", async () => {
+  const resolution = await resolveTuiBinary(
+    {
+      env: {},
+      packageRoot: path.join(os.tmpdir(), "relaybase-package"),
+      platform: "linux",
+      arch: "x64"
+    },
+    {
+      fileExists: async () => false
+    }
+  );
+  const diagnostic = formatMissingTuiBinaryDiagnostic(resolution);
+
+  assert.equal(resolution.ok, false);
+  assert.match(resolution.reason ?? "", /installed package is missing/i);
+  assert.match(diagnostic, /relaybase-tui binary was not found/);
+  assert.match(diagnostic, /RELAYBASE_TUI_BIN/);
+  assert.match(diagnostic, /repo-local/);
+  assert.match(diagnostic, /\.relaybase\/tui-dev-bin/);
+  assert.match(diagnostic, /inside this package/);
+  assert.match(diagnostic, /globally installed relaybase-tui/);
+  assert.match(diagnostic, /npm install --global @cameloo\/relaybase@latest/);
+  assert.match(diagnostic, /npm run doctor:tui && npm run tui:build/);
+  assert.match(diagnostic, /npm run doctor:tui/);
+  assert.match(diagnostic, /relaybase-tui-linux-amd64/);
+});
+
+test("TUI bridge forwards args and child exit code without shell spawn", async () => {
+  const packageRoot = path.join(os.tmpdir(), "relaybase-package");
+  const expectedBinary = path.join(packageRoot, "bin", "relaybase-tui", "relaybase-tui-windows-amd64.exe");
+  let spawned:
+    | {
+        command: string;
+        args: string[];
+        options: TestTuiSpawnOptions;
+      }
+    | undefined;
+
+  const exitCode = await runRelaybaseTui(
+    {
+      host: "127.0.0.1",
+      port: 7777,
+      stateDir: path.join(os.tmpdir(), "relaybase-state"),
+      cwd: path.join(os.tmpdir(), "relaybase-project"),
+      env: {},
+      packageRoot,
+      platform: "win32",
+      arch: "x64"
+    },
+    ["--theme", "dark", "--debug", "notes && unsafe"],
+    {
+      checkDaemon: async (): Promise<DaemonReachability> => ({
+        reachable: true,
+        statusCode: 200,
+        message: "OK"
+      }),
+      fileExists: async (filePath) => filePath === expectedBinary,
+      spawn: (command, args, options) => {
+        spawned = { command, args, options };
+        const child = new EventEmitter() as import("node:child_process").ChildProcess;
+        setTimeout(() => child.emit("exit", 7, null), 0);
+        return child;
+      }
+    }
+  );
+
+  assert.equal(exitCode, 7);
+  assert.equal(spawned?.command, expectedBinary);
+  assert.deepEqual(spawned?.args, [
+    "--base-url",
+    "http://127.0.0.1:7777",
+    "--state-dir",
+    path.join(os.tmpdir(), "relaybase-state"),
+    "--current-directory",
+    path.join(os.tmpdir(), "relaybase-project"),
+    "--theme",
+    "dark",
+    "--debug",
+    "notes && unsafe"
+  ]);
+  assert.equal(spawned?.options.shell, false);
+  assert.equal(spawned?.options.stdio, "inherit");
+  assert.equal(spawned?.options.env.RELAYBASE_URL, "http://127.0.0.1:7777");
+  assert.equal(spawned?.options.env.RELAYBASE_TUI_CURRENT_DIRECTORY, path.join(os.tmpdir(), "relaybase-project"));
+});
+
+test("TUI bridge restart flag completes daemon replacement before spawning the TUI", async () => {
+  const packageRoot = path.join(os.tmpdir(), "relaybase-package-restart");
+  const expectedBinary = path.join(packageRoot, "bin", "relaybase-tui", "relaybase-tui-linux-amd64");
+  const calls: string[] = [];
+  const exitCode = await runRelaybaseTui(
+    {
+      host: "127.0.0.1",
+      port: 7777,
+      stateDir: path.join(os.tmpdir(), "relaybase-restart-state"),
+      env: {},
+      packageRoot,
+      platform: "linux",
+      arch: "x64",
+      restartDaemonOnLaunch: true
+    },
+    ["--smoke-render"],
+    {
+      restartDaemon: async (): Promise<DaemonRestartResult> => {
+        calls.push("restart");
+        return {
+          reachable: true,
+          compatible: true,
+          authenticated: true,
+          started: true,
+          restarted: true,
+          code: "daemon_restarted",
+          userAction: "Relaybase restarted.",
+          requestId: "restart_test",
+          oldInstanceId: "old",
+          newInstanceId: "new"
+        };
+      },
+      checkDaemon: async () => {
+        calls.push("check");
+        return { reachable: true, statusCode: 200, message: "OK" };
+      },
+      fileExists: async (filePath) => filePath === expectedBinary,
+      spawn: () => {
+        calls.push("spawn");
+        const child = new EventEmitter() as import("node:child_process").ChildProcess;
+        setTimeout(() => child.emit("exit", 0, null), 0);
+        return child;
+      }
+    }
+  );
+
+  assert.equal(exitCode, 0);
+  assert.deepEqual(calls, ["restart", "check", "spawn"]);
+});
+
+test("TUI bridge restart flag blocks launch and emits recovery guidance when replacement fails", async () => {
+  const packageRoot = path.join(os.tmpdir(), "relaybase-package-restart-failed");
+  const expectedBinary = path.join(packageRoot, "bin", "relaybase-tui", "relaybase-tui-linux-amd64");
+  let spawned = false;
+  let stderr = "";
+  const exitCode = await runRelaybaseTui(
+    {
+      host: "127.0.0.1",
+      port: 7777,
+      stateDir: path.join(os.tmpdir(), "relaybase-restart-state-failed"),
+      env: {},
+      packageRoot,
+      platform: "linux",
+      arch: "x64",
+      restartDaemonOnLaunch: true
+    },
+    [],
+    {
+      restartDaemon: async (): Promise<DaemonRestartResult> => ({
+        reachable: true,
+        compatible: true,
+        authenticated: true,
+        started: false,
+        restarted: false,
+        code: "daemon_restart_blocked",
+        userAction: "Wait for active Agent work.",
+        requestId: "restart_blocked"
+      }),
+      fileExists: async (filePath) => filePath === expectedBinary,
+      spawn: () => {
+        spawned = true;
+        return new EventEmitter() as import("node:child_process").ChildProcess;
+      },
+      stderr: {
+        write: (chunk: string | Uint8Array) => {
+          stderr += String(chunk);
+          return true;
+        }
+      }
+    }
+  );
+
+  assert.equal(exitCode, 1);
+  assert.equal(spawned, false);
+  assert.match(stderr, /daemon_restart_blocked/);
+  assert.match(stderr, /Wait for active Agent work/);
+});
+
+test("TUI bridge starts Relaybase daemon before spawning when daemon is unavailable", async () => {
+  const packageRoot = path.join(os.tmpdir(), "relaybase-package");
+  const expectedBinary = path.join(packageRoot, "bin", "relaybase-tui", "relaybase-tui-linux-amd64");
+  let ensureCalled = false;
+  let spawned:
+    | {
+        command: string;
+        args: string[];
+        options: TestTuiSpawnOptions;
+      }
+    | undefined;
+
+  const exitCode = await runRelaybaseTui(
+    {
+      host: "127.0.0.1",
+      port: 7777,
+      stateDir: path.join(os.tmpdir(), "relaybase-state"),
+      env: {},
+      packageRoot,
+      platform: "linux",
+      arch: "x64"
+    },
+    [],
+    {
+      checkDaemon: async (): Promise<DaemonReachability> => ({
+        reachable: false,
+        statusCode: 0,
+        message: "connect ECONNREFUSED 127.0.0.1:7777"
+      }),
+      ensureDaemon: async (_options, allowStart): Promise<DaemonEnsureResult> => {
+        ensureCalled = true;
+        assert.equal(allowStart, true);
+        return {
+          reachable: true,
+          compatible: true,
+          authenticated: true,
+          started: true,
+          code: "daemon_started",
+          userAction: "Relaybase daemon started and is reachable."
+        };
+      },
+      fileExists: async (filePath) => filePath === expectedBinary,
+      spawn: (command, args, options) => {
+        spawned = { command, args, options };
+        const child = new EventEmitter() as import("node:child_process").ChildProcess;
+        setTimeout(() => child.emit("exit", 0, null), 0);
+        return child;
+      }
+    }
+  );
+
+  assert.equal(exitCode, 0);
+  assert.equal(ensureCalled, true);
+  assert.equal(spawned?.command, expectedBinary);
+  assert.match(spawned?.options.env.RELAYBASE_TUI_BOOTSTRAP_URL ?? "", /^http:\/\/127\.0\.0\.1:\d+$/);
+  assert.ok(spawned?.options.env.RELAYBASE_TUI_BOOTSTRAP_TOKEN);
+  assert.match(spawned?.options.env.RELAYBASE_TUI_BOOTSTRAP_REPORT ?? "", /daemon_started/);
+});
+
+test("TUI bridge can skip daemon start while still launching offline TUI", async () => {
+  const packageRoot = path.join(os.tmpdir(), "relaybase-package");
+  const expectedBinary = path.join(packageRoot, "bin", "relaybase-tui", "relaybase-tui-linux-amd64");
+  let ensureCalled = false;
+  let spawned:
+    | {
+        command: string;
+        args: string[];
+        options: TestTuiSpawnOptions;
+      }
+    | undefined;
+  let stderr = "";
+  const exitCode = await runRelaybaseTui(
+    {
+      host: "127.0.0.1",
+      port: 7777,
+      stateDir: path.join(os.tmpdir(), "relaybase-state"),
+      env: {},
+      packageRoot,
+      platform: "linux",
+      arch: "x64",
+      daemonStartPolicy: "never"
+    },
+    [],
+    {
+      checkDaemon: async (): Promise<DaemonReachability> => ({
+        reachable: false,
+        statusCode: 0,
+        message: "connect ECONNREFUSED 127.0.0.1:7777"
+      }),
+      ensureDaemon: async (): Promise<DaemonEnsureResult> => {
+        ensureCalled = true;
+        throw new Error("unexpected daemon start");
+      },
+      fileExists: async (filePath) => filePath === expectedBinary,
+      spawn: (command, args, options) => {
+        spawned = { command, args, options };
+        const child = new EventEmitter() as import("node:child_process").ChildProcess;
+        setTimeout(() => child.emit("exit", 0, null), 0);
+        return child;
+      },
+      stderr: {
+        write: (chunk: string | Uint8Array) => {
+          stderr += String(chunk);
+          return true;
+        }
+      }
+    }
+  );
+
+  assert.equal(exitCode, 0);
+  assert.equal(ensureCalled, false);
+  assert.equal(stderr, "");
+  assert.equal(spawned?.command, expectedBinary);
+  assert.match(spawned?.options.env.RELAYBASE_TUI_BOOTSTRAP_REPORT ?? "", /daemon_not_running/);
+});
+
+test("TUI bridge smoke-render launch skips interactive bootstrap channel", async () => {
+  const packageRoot = path.join(os.tmpdir(), "relaybase-package");
+  const expectedBinary = path.join(packageRoot, "bin", "relaybase-tui", "relaybase-tui-linux-amd64");
+  let spawned:
+    | {
+        command: string;
+        args: string[];
+        options: TestTuiSpawnOptions;
+      }
+    | undefined;
+
+  const exitCode = await runRelaybaseTui(
+    {
+      host: "127.0.0.1",
+      port: 7777,
+      stateDir: path.join(os.tmpdir(), "relaybase-state"),
+      env: {},
+      packageRoot,
+      platform: "linux",
+      arch: "x64",
+      daemonStartPolicy: "never"
+    },
+    ["--smoke-render"],
+    {
+      checkDaemon: async (): Promise<DaemonReachability> => ({
+        reachable: false,
+        statusCode: 0,
+        message: "connect ECONNREFUSED 127.0.0.1:7777"
+      }),
+      fileExists: async (filePath) => filePath === expectedBinary,
+      spawn: (command, args, options) => {
+        spawned = { command, args, options };
+        const child = new EventEmitter() as import("node:child_process").ChildProcess;
+        setTimeout(() => child.emit("exit", 0, null), 0);
+        return child;
+      }
+    }
+  );
+
+  assert.equal(exitCode, 0);
+  assert.equal(spawned?.command, expectedBinary);
+  assert.deepEqual(spawned?.options.stdio, ["ignore", "pipe", "pipe"]);
+  assert.equal(spawned?.options.env.RELAYBASE_STATE_DIR, undefined);
+  assert.equal(spawned?.options.env.RELAYBASE_TUI_BOOTSTRAP_URL, undefined);
+  assert.equal(spawned?.options.env.RELAYBASE_TUI_BOOTSTRAP_TOKEN, undefined);
+  assert.match(spawned?.options.env.RELAYBASE_TUI_BOOTSTRAP_REPORT ?? "", /daemon_not_running/);
+});
+
+test("TUI bridge reports spawn failures and closes bootstrap channel", async () => {
+  const packageRoot = path.join(os.tmpdir(), "relaybase-package");
+  const expectedBinary = path.join(packageRoot, "bin", "relaybase-tui", "relaybase-tui-windows-amd64.exe");
+  let stderr = "";
+
+  const exitCode = await runRelaybaseTui(
+    {
+      host: "127.0.0.1",
+      port: 7777,
+      stateDir: path.join(os.tmpdir(), "relaybase-state"),
+      env: {},
+      packageRoot,
+      platform: "win32",
+      arch: "x64",
+      daemonStartPolicy: "never"
+    },
+    [],
+    {
+      checkDaemon: async (): Promise<DaemonReachability> => ({
+        reachable: false,
+        statusCode: 0,
+        message: "connect ECONNREFUSED 127.0.0.1:7777"
+      }),
+      fileExists: async (filePath) => filePath === expectedBinary,
+      spawn: () => {
+        throw new Error("spawn UNKNOWN");
+      },
+      stderr: {
+        write: (chunk: string | Uint8Array) => {
+          stderr += String(chunk);
+          return true;
+        }
+      }
+    }
+  );
+
+  assert.equal(exitCode, 1);
+  assert.match(stderr, /could not launch/);
+  assert.match(stderr, /spawn UNKNOWN/);
+  assert.match(stderr, /Windows Application Control may have blocked/);
+  assert.match(stderr, /install the current signed Relaybase release/);
+  assert.match(stderr, /will not ask you to disable or weaken system policy/);
+});
+
+test("TUI launch failure guidance is Windows-specific", () => {
+  const diagnostic = formatTuiLaunchFailure("relaybase-tui", new Error("spawn UNKNOWN"), "linux");
+  assert.match(diagnostic, /spawn UNKNOWN/);
+  assert.doesNotMatch(diagnostic, /Application Control/);
+});
+
+test("TUI bridge launches Windows development build before go-run fallback", async () => {
+  const packageRoot = path.join(os.tmpdir(), "relaybase-dev-checkout");
+  const expectedBinary = path.join(packageRoot, ".relaybase", "tui-dev-bin", "relaybase-tui-windows-amd64.exe");
+  const calls: Array<{ command: string; args: string[]; options: { cwd?: string; env: NodeJS.ProcessEnv } }> = [];
+  let stderr = "";
+  await fs.mkdir(path.join(packageRoot, "tui"), { recursive: true });
+  await fs.writeFile(path.join(packageRoot, "tui", "go.mod"), "module github.com/cameloo/relaybase/tui\n", "utf8");
+
+  const exitCode = await runRelaybaseTui(
+    {
+      host: "127.0.0.1",
+      port: 7777,
+      stateDir: path.join(os.tmpdir(), "relaybase-state"),
+      env: {},
+      packageRoot,
+      platform: "win32",
+      arch: "x64",
+      daemonStartPolicy: "never"
+    },
+    ["--smoke-render"],
+    {
+      checkDaemon: async (): Promise<DaemonReachability> => ({
+        reachable: false,
+        statusCode: 0,
+        message: "connect ECONNREFUSED 127.0.0.1:7777"
+      }),
+      fileExists: async (filePath) => filePath === path.join(packageRoot, ".git") || filePath === expectedBinary,
+      spawn: (command, args, options) => {
+        calls.push({ command, args, options });
+        const child = new EventEmitter() as import("node:child_process").ChildProcess;
+        setTimeout(() => child.emit("exit", 0, null), 0);
+        return child;
+      },
+      stderr: {
+        write: (chunk: string | Uint8Array) => {
+          stderr += String(chunk);
+          return true;
+        }
+      }
+    }
+  );
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.command, expectedBinary);
+  assert.deepEqual(calls[0]?.args.slice(0, 4), [
+    "--base-url",
+    "http://127.0.0.1:7777",
+    "--state-dir",
+    path.join(os.tmpdir(), "relaybase-state")
+  ]);
+  assert.equal(stderr, "");
+});
+
+test("TUI bridge falls back to go run only after Windows development binary spawn failure", async () => {
+  const packageRoot = path.join(os.tmpdir(), "relaybase-dev-checkout-fallback");
+  const expectedBinary = path.join(packageRoot, ".relaybase", "tui-dev-bin", "relaybase-tui-windows-amd64.exe");
+  const calls: Array<{ command: string; args: string[]; options: { cwd?: string; env: NodeJS.ProcessEnv } }> = [];
+  let stderr = "";
+  await fs.mkdir(path.join(packageRoot, "tui"), { recursive: true });
+  await fs.writeFile(path.join(packageRoot, "tui", "go.mod"), "module github.com/cameloo/relaybase/tui\n", "utf8");
+
+  const exitCode = await runRelaybaseTui(
+    {
+      host: "127.0.0.1",
+      port: 7777,
+      stateDir: path.join(os.tmpdir(), "relaybase-state"),
+      env: {},
+      packageRoot,
+      platform: "win32",
+      arch: "x64",
+      daemonStartPolicy: "never"
+    },
+    ["--smoke-render"],
+    {
+      checkDaemon: async (): Promise<DaemonReachability> => ({
+        reachable: false,
+        statusCode: 0,
+        message: "connect ECONNREFUSED 127.0.0.1:7777"
+      }),
+      fileExists: async (filePath) => filePath === path.join(packageRoot, ".git") || filePath === expectedBinary,
+      spawn: (command, args, options) => {
+        calls.push({ command, args, options });
+        if (command === expectedBinary) {
+          throw new Error("blocked by app control");
+        }
+        const child = new EventEmitter() as import("node:child_process").ChildProcess;
+        setTimeout(() => child.emit("exit", 0, null), 0);
+        return child;
+      },
+      stderr: {
+        write: (chunk: string | Uint8Array) => {
+          stderr += String(chunk);
+          return true;
+        }
+      }
+    }
+  );
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0]?.command, expectedBinary);
+  assert.equal(calls[1]?.command, "go");
+  assert.deepEqual(calls[1]?.args.slice(0, 2), ["run", "./cmd/relaybase-tui"]);
+  assert.equal(calls[1]?.options.cwd, path.join(packageRoot, "tui"));
+  assert.match(calls[1]?.options.env.GOCACHE ?? "", /relaybase-go-build-cache$/);
+  assert.match(calls[1]?.options.env.GOTMPDIR ?? "", /relaybase-go-build-tmp$/);
+  assert.match(stderr, /falling back to `go run \.\/cmd\/relaybase-tui`/);
+});
+
+test("TUI bridge treats non-Relaybase 404 listeners as unreachable", async () => {
+  const server = http.createServer((_request, response) => {
+    response.statusCode = 404;
+    response.end("not relaybase");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address() as AddressInfo;
+
+  try {
+    const result = await checkDaemonReachable(`http://127.0.0.1:${address.port}`);
+
+    assert.equal(result.reachable, false);
+    assert.equal(result.statusCode, 404);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
+test("TUI Go wrapper explains missing Go with a retry command", () => {
+  const diagnostic = formatMissingGoDiagnostic({
+    requiredVersion: "1.25.0",
+    action: "test",
+    retryScript: "npm run tui:test"
+  });
+
+  assert.match(diagnostic, /Go 1\.25\.0 is required/);
+  assert.match(diagnostic, /go was not found on PATH/);
+  assert.match(diagnostic, /Failed toolchain probe: go version/);
+  assert.match(diagnostic, /https:\/\/go\.dev\/dl\//);
+  assert.match(diagnostic, /go version/);
+  assert.match(diagnostic, /go env GOVERSION GOOS GOARCH GOMOD GOMODCACHE/);
+  assert.match(diagnostic, /npm run tui:build/);
+  assert.match(diagnostic, /npm run tui:test/);
+  assert.match(diagnostic, /npm run tui:vet/);
+  assert.match(diagnostic, /npm run tui:race/);
+  assert.match(diagnostic, /npm run tui:snapshot/);
+});
+
+test("worktree hygiene parser classifies unexpected dirty paths", () => {
+  const entries = parseStatusLines(" M src/api.ts\n?? artifacts/ignored.txt\n?? reports/fix-planning/report.md\n");
+  const result = evaluateStatus(entries);
+
+  assert.equal(result.clean, false);
+  assert.deepEqual(
+    result.unexpected.map((entry) => entry.raw),
+    [" M src/api.ts", "?? artifacts/ignored.txt", "?? reports/fix-planning/report.md"]
+  );
+});
+
+test("worktree hygiene can explicitly allow report paths", () => {
+  const entries = parseStatusLines("?? reports/fix-planning/report.md\n");
+  const result = evaluateStatus(entries, { allowReports: true });
+
+  assert.equal(result.clean, true);
+  assert.equal(result.allowed[0]?.reason, "allowed report path");
+});
+
+test("worktree hygiene output lists dirty paths before failing", () => {
+  const rendered = renderCleanWorktreeResult({
+    clean: false,
+    stderr: "",
+    allowed: [],
+    unexpected: parseStatusLines(" M package.json\n?? .codex/config.toml\n")
+  });
+
+  assert.match(rendered, /Relaybase worktree hygiene: dirty/);
+  assert.match(rendered, /Unexpected dirty paths/);
+  assert.match(rendered, /M package\.json/);
+  assert.match(rendered, /\.codex\/config\.toml/);
+  assert.match(rendered, /clean\/disposable checkout/);
+});
+
+test("worktree hygiene runner invokes git status without a shell and fails closed", () => {
+  const calls: Array<{
+    command: string;
+    args: string[];
+    options: { shell: false; stdio: ["ignore", "pipe", "pipe"] };
+  }> = [];
+  const originalError = console.error;
+  let stderr = "";
+  console.error = (message?: unknown) => {
+    stderr += String(message);
+  };
+
+  try {
+    const status = runCleanWorktree([], {
+      cwd: os.tmpdir(),
+      spawn: (command: string, args: string[], options: { shell: false; stdio: ["ignore", "pipe", "pipe"] }) => {
+        calls.push({ command, args, options });
+        return { status: 0, stdout: "?? unexpected.txt\n", stderr: "" };
+      }
+    });
+
+    assert.equal(status, 1);
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.command, "git");
+  assert.deepEqual(calls[0]?.args, ["status", "--short", "--untracked-files=all"]);
+  assert.equal(calls[0]?.options.shell, false);
+  assert.deepEqual(calls[0]?.options.stdio, ["ignore", "pipe", "pipe"]);
+  assert.match(stderr, /unexpected\.txt/);
+});
+
+test("TUI release wrapper explains missing GoReleaser with a retry command", () => {
+  const diagnostic = formatMissingGoReleaserDiagnostic({
+    retryScript: "npm run release:dry-run"
+  });
+
+  assert.match(diagnostic, /GoReleaser is required/);
+  assert.match(diagnostic, /goreleaser was not found/);
+  assert.match(diagnostic, /Failed release-tool probe: goreleaser --version/);
+  assert.match(diagnostic, /GORELEASER_BIN/);
+  assert.match(diagnostic, /\.codex-tools\/bin/);
+  assert.match(diagnostic, /release archive\/checksum verification/);
+  assert.match(diagnostic, /npm run release:dry-run/);
+});
+
+test("TUI release check probes GoReleaser and runs config validation without a shell", () => {
+  const calls: Array<{
+    command: string;
+    args: string[];
+    options: { shell: false; stdio: "inherit" | ["ignore", "pipe", "pipe"] };
+  }> = [];
+
+  const status = runCli(["release-check"], {
+    exists: () => false,
+    spawn: (
+      command: string,
+      args: string[],
+      options: { shell: false; stdio: "inherit" | ["ignore", "pipe", "pipe"] }
+    ) => {
+      calls.push({ command, args, options });
+      if (args[0] === "--version") {
+        return { status: 0, stdout: "goreleaser version 2.0.0", stderr: "" };
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    }
+  });
+
+  assert.equal(status, 0);
+  assert.deepEqual(
+    calls.map((call) => ({ command: call.command, args: call.args })),
+    [
+      { command: "goreleaser", args: ["--version"] },
+      { command: "goreleaser", args: ["check"] }
+    ]
+  );
+  assert.equal(calls[1]?.options.shell, false);
+  assert.equal(calls[1]?.options.stdio, "inherit");
+});
+
+test("TUI release dry run uses snapshot clean arguments", () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+
+  const status = runCli(["release-dry-run"], {
+    exists: () => false,
+    prepareWindowsResources: () => ({ cleanup: () => undefined }),
+    spawn: (command: string, args: string[]) => {
+      calls.push({ command, args });
+      if (args[0] === "--version") {
+        return { status: 0, stdout: "goreleaser version 2.0.0", stderr: "" };
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    }
+  });
+
+  assert.equal(status, 0);
+  assert.deepEqual(calls[1], {
+    command: "goreleaser",
+    args: ["release", "--snapshot", "--clean"]
+  });
+});
+
+test("TUI release check fails closed when GoReleaser is missing", () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const missingToolResult = {
+    error: new Error("spawn ENOENT"),
+    status: null,
+    stdout: "",
+    stderr: ""
+  };
+
+  const status = runCli(["release-check"], {
+    exists: () => false,
+    spawn: (command: string, args: string[]) => {
+      calls.push({ command, args });
+      return missingToolResult;
+    }
+  });
+
+  assert.equal(status, 1);
+  assert.deepEqual(calls, [{ command: "goreleaser", args: ["--version"] }]);
+});
+
+test("TUI release check uses repo-local GoReleaser when available", () => {
+  const rootDir = path.join(os.tmpdir(), "relaybase-repo-local-goreleaser-test");
+  const repoLocal = repoLocalGoReleaserPath({ rootDir, platform: "win32" });
+  const calls: Array<{ command: string; args: string[] }> = [];
+
+  const status = runCli(["release-check"], {
+    rootDir,
+    platform: "win32",
+    env: {},
+    exists: (filePath: string) => filePath === repoLocal,
+    spawn: (command: string, args: string[]) => {
+      calls.push({ command, args });
+      if (command === repoLocal && args[0] === "--version") {
+        return { status: 0, stdout: "goreleaser version 2.16.0", stderr: "" };
+      }
+      if (command === repoLocal && args[0] === "check") {
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      return { status: 1, stdout: "", stderr: "unexpected command" };
+    }
+  });
+
+  assert.equal(status, 0);
+  assert.deepEqual(calls, [
+    { command: repoLocal, args: ["--version"] },
+    { command: repoLocal, args: ["check"] }
+  ]);
+});
+
+test("TUI GoReleaser resolver prefers GORELEASER_BIN before repo-local and PATH", () => {
+  const rootDir = path.join(os.tmpdir(), "relaybase-goreleaser-env-test");
+  const envBinary = path.join(rootDir, "tools", "goreleaser.exe");
+  const repoLocal = repoLocalGoReleaserPath({ rootDir, platform: "win32" });
+  const calls: Array<{ command: string; args: string[] }> = [];
+
+  const resolved = resolveGoReleaserBinary({
+    rootDir,
+    platform: "win32",
+    env: { GORELEASER_BIN: envBinary },
+    exists: (filePath: string) => filePath === repoLocal,
+    spawn: (command: string, args: string[]) => {
+      calls.push({ command, args });
+      return { status: 0, stdout: "goreleaser version 2.16.0", stderr: "" };
+    }
+  });
+
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.command, envBinary);
+  assert.equal(resolved.source, "GORELEASER_BIN");
+  assert.deepEqual(calls, [{ command: envBinary, args: ["--version"] }]);
+});
+
+test("TUI Go doctor reports missing Go without installing tools", () => {
+  const rootDir = path.join(os.tmpdir(), "relaybase-doctor-test");
+  const missingToolResult = {
+    error: new Error("spawn ENOENT"),
+    status: null,
+    stdout: "",
+    stderr: ""
+  };
+  const report = buildDoctorReport({
+    rootDir,
+    platform: "win32",
+    arch: "x64",
+    env: {
+      npm_config_user_agent: "npm/test"
+    },
+    exists: (filePath: string) => filePath.endsWith(path.join("tui", "go.mod")),
+    readFile: () => "module github.com/cameloo/relaybase/tui\n\ngo 1.25.0\n",
+    spawn: () => missingToolResult
+  });
+
+  assert.equal(report.ok, false);
+  assert.equal(report.requiredGoVersion, "1.25.0");
+  assert.equal(report.checks.find((check) => check.name === "go")?.status, "fail");
+  assert.equal(report.checks.find((check) => check.name === "go-env")?.status, "fail");
+  assert.equal(report.checks.find((check) => check.name === "tui/go.mod")?.status, "pass");
+  assert.equal(report.checks.find((check) => check.name === "tui/go.sum")?.status, "warn");
+  assert.equal(report.checks.find((check) => check.name === "goreleaser")?.status, "warn");
+});
+
+test("TUI Go wrapper maps Windows x64 to the packaged exe name", () => {
+  assert.equal(targetForPlatform("win32", "x64").binary, "relaybase-tui-windows-amd64.exe");
+});
+
+test("TUI Go wrapper exposes repo-local development launch binary path", () => {
+  assert.match(
+    currentPlatformDevelopmentBinaryPath({ rootDir: "repo", platform: "win32", arch: "x64" }),
+    /repo[\\/]\.relaybase[\\/]tui-dev-bin[\\/]relaybase-tui-windows-amd64\.exe$/
+  );
+});
+
+test("TUI Go wrapper defaults to OS temp build cache and execution dir", () => {
+  const env = goCommandEnv({}, {});
+
+  assert.match(env.GOCACHE, /relaybase-go-build-cache$/);
+  assert.match(env.GOTMPDIR, /relaybase-go-build-tmp$/);
+});
+
+test("TUI Go test wrapper can run normal go test on Windows when stable binary mode is disabled", () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const status = runCli(["test"], {
+    platform: "win32",
+    useStableWindowsTestBinary: false,
+    readFile: () => "module github.com/cameloo/relaybase/tui\n\ngo 1.25.0\n",
+    spawn: (command: string, args: string[]) => {
+      calls.push({ command, args });
+      if (args[0] === "version") {
+        return { status: 0, stdout: "go version go1.25.0 windows/amd64", stderr: "" };
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    }
+  });
+
+  assert.equal(status, 0);
+  assert.ok(calls.some((call) => call.command === "go" && call.args.join(" ") === "test ./..."));
+  assert.ok(!calls.some((call) => call.args.includes("-c")));
+});
+
+test("TUI Go test wrapper classifies Windows Application Control failures", () => {
+  const blocked =
+    "fork/exec C:\\Users\\wamin\\AppData\\Local\\Temp\\relaybase-go-build-tmp\\go-build123\\model.test.exe: An Application Control policy has blocked this file.";
+  assert.equal(isApplicationControlOutput(blocked), true);
+  assert.match(formatGoExecutionPolicyDiagnostic({ action: "test" }), /environment policy blocker/);
+
+  const originalError = console.error;
+  let stderr = "";
+  console.error = (message?: unknown) => {
+    stderr += String(message);
+  };
+  try {
+    const status = runCli(["test"], {
+      platform: "win32",
+      useStableWindowsTestBinary: false,
+      readFile: () => "module github.com/cameloo/relaybase/tui\n\ngo 1.25.0\n",
+      spawn: (_command: string, args: string[]) => {
+        if (args[0] === "version") {
+          return { status: 0, stdout: "go version go1.25.0 windows/amd64", stderr: "" };
+        }
+        return { status: 1, stdout: "", stderr: blocked };
+      }
+    });
+
+    assert.equal(status, 1);
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.match(stderr, /host blocked execution by application-control policy/);
+  assert.match(stderr, /Do not mark TUI build\/test\/vet verification as passing/);
+});
+
+test("TUI Go test wrapper uses stable binary path by default on Windows", () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const status = runCli(["test"], {
+    platform: "win32",
+    readFile: () => "module github.com/cameloo/relaybase/tui\n\ngo 1.25.0\n",
+    spawn: (command: string, args: string[]) => {
+      calls.push({ command, args });
+      if (args[0] === "version") {
+        return { status: 0, stdout: "go version go1.25.0 windows/amd64", stderr: "" };
+      }
+      if (args[0] === "list") {
+        return {
+          status: 0,
+          stdout: [
+            "github.com/cameloo/relaybase/tui/internal/config|1|0",
+            "github.com/cameloo/relaybase/tui/internal/tui/views|1|0"
+          ].join("\n"),
+          stderr: ""
+        };
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    }
+  });
+
+  assert.equal(status, 0);
+  const configCompile = calls.find(
+    (call) =>
+      call.command === "go" &&
+      call.args[0] === "test" &&
+      call.args.includes("-c") &&
+      call.args.includes("github.com/cameloo/relaybase/tui/internal/config")
+  );
+  assert.ok(configCompile);
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.command === "go" &&
+        call.args[0] === "test" &&
+        call.args.includes("-c") &&
+        call.args.includes("github.com/cameloo/relaybase/tui/internal/tui/views")
+    )
+  );
+  assert.ok(calls.some((call) => /internal_config\.exe$/.test(call.command)));
+  assert.ok(calls.some((call) => /internal_tui_views\.exe$/.test(call.command)));
+});
+
+test("TUI Go test wrapper can opt out of stable binary path on Windows", () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const status = runCli(["test"], {
+    platform: "win32",
+    useStableWindowsTestBinary: false,
+    readFile: () => "module github.com/cameloo/relaybase/tui\n\ngo 1.25.0\n",
+    spawn: (command: string, args: string[]) => {
+      calls.push({ command, args });
+      if (args[0] === "version") {
+        return { status: 0, stdout: "go version go1.25.0 windows/amd64", stderr: "" };
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    }
+  });
+
+  assert.equal(status, 0);
+  assert.ok(calls.some((call) => call.command === "go" && call.args.join(" ") === "test ./..."));
+  assert.ok(!calls.some((call) => call.args.includes("-c")));
+});
+
+test("TUI Go stable test wrapper falls back to package go test on execution-policy EACCES", () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const status = runCli(["test"], {
+    platform: "win32",
+    stableTestRunId: "fallback-test",
+    readFile: () => "module github.com/cameloo/relaybase/tui\n\ngo 1.25.0\n",
+    spawn: (command: string, args: string[]) => {
+      calls.push({ command, args });
+      if (args[0] === "version") {
+        return { status: 0, stdout: "go version go1.25.0 windows/amd64", stderr: "" };
+      }
+      if (args[0] === "list") {
+        return {
+          status: 0,
+          stdout: "github.com/cameloo/relaybase/tui/internal/tui/setupwizard|1|0",
+          stderr: ""
+        };
+      }
+      if (args[0] === "test" && args.includes("-c")) {
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      if (command.endsWith("internal_tui_setupwizard.exe")) {
+        return { status: null, error: new Error("spawn internal_tui_setupwizard.exe EACCES"), stdout: "", stderr: "" };
+      }
+      if (command === "go" && args.join(" ") === "test github.com/cameloo/relaybase/tui/internal/tui/setupwizard") {
+        return { status: 0, stdout: "ok setupwizard\n", stderr: "" };
+      }
+      return { status: 1, stdout: "", stderr: "unexpected call" };
+    }
+  });
+
+  assert.equal(status, 0);
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.command === "go" &&
+        call.args.join(" ") === "test github.com/cameloo/relaybase/tui/internal/tui/setupwizard"
+    )
+  );
+});
+
+test("TUI snapshot wrapper can opt into stable golden test binary on Windows", () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const status = runCli(["snapshot"], {
+    platform: "win32",
+    useStableWindowsTestBinary: true,
+    readFile: () => "module github.com/cameloo/relaybase/tui\n\ngo 1.25.0\n",
+    spawn: (command: string, args: string[]) => {
+      calls.push({ command, args });
+      if (args[0] === "version") {
+        return { status: 0, stdout: "go version go1.25.0 windows/amd64", stderr: "" };
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    }
+  });
+
+  assert.equal(status, 0);
+  assert.ok(calls.some((call) => call.command === "go" && call.args.includes("./internal/tui/views")));
+  const runCall = calls.find((call) => /internal_tui_views\.exe$/.test(call.command));
+  assert.deepEqual(runCall?.args, ["-test.run=TestGolden"]);
+});
+
+test("package check uses and removes a disposable OS-temp npm cache by default", () => {
+  const previousCache = process.env.npm_config_cache;
+  const previousPackageCheckCache = process.env.RELAYBASE_PACKAGE_NPM_CACHE;
+  process.env.npm_config_cache = "C:\\Users\\wamin\\AppData\\Local\\npm-cache";
+  delete process.env.RELAYBASE_PACKAGE_NPM_CACHE;
+  const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
+  let temporaryCachePath = "";
+  const originalLog = console.log;
+  let stdout = "";
+  console.log = (message?: unknown) => {
+    stdout += `${String(message)}\n`;
+  };
+  try {
+    const status = runPackageCheck([], {
+      platform: "win32",
+      arch: "x64",
+      exists: () => true,
+      spawn: (command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
+        calls.push({ command, args, env: options.env });
+        temporaryCachePath = options.env?.npm_config_cache ?? "";
+        assert.match(path.basename(temporaryCachePath), /^relaybase-package-check-/);
+        assert.equal(path.dirname(temporaryCachePath), os.tmpdir());
+        assert.equal(existsSync(temporaryCachePath), true);
+        return {
+          status: 0,
+          stdout: JSON.stringify([
+            {
+              filename: "cameloo-relaybase-0.1.0.tgz",
+              files: [
+                { path: "dist-runtime/cli.js" },
+                { path: "dist-runtime/daemonLauncher.js" },
+                { path: "dist-runtime/native/relaybase_windows-win32-x64.node" }
+              ]
+            }
+          ]),
+          stderr: ""
+        };
+      }
+    });
+
+    assert.equal(status, 0);
+    assert.match(stdout, /Prepared platform binary: present/);
+    assert.equal(calls[0]?.env?.npm_config_cache, temporaryCachePath);
+    assert.equal(existsSync(temporaryCachePath), false);
+    assert.doesNotMatch(temporaryCachePath, /artifacts[\\/]npm-cache/);
+  } finally {
+    console.log = originalLog;
+    if (previousCache === undefined) {
+      delete process.env.npm_config_cache;
+    } else {
+      process.env.npm_config_cache = previousCache;
+    }
+    if (previousPackageCheckCache === undefined) {
+      delete process.env.RELAYBASE_PACKAGE_NPM_CACHE;
+    } else {
+      process.env.RELAYBASE_PACKAGE_NPM_CACHE = previousPackageCheckCache;
+    }
+  }
+});
+
+test("npm pack JSON parsing tolerates native prepack lifecycle output", () => {
+  const payload = [
+    "Relaybase Windows native module: dist-runtime\\native\\relaybase_windows-win32-x64.node",
+    "gyp info ok",
+    JSON.stringify([{ filename: "cameloo-relaybase-0.1.0.tgz", files: [{ path: "dist-runtime/cli.js" }] }])
+  ].join("\n");
+  const parsed = parseNpmPackJson(payload);
+  assert.equal(parsed?.[0]?.filename, "cameloo-relaybase-0.1.0.tgz");
+  assert.equal(parsed?.[0]?.files?.[0]?.path, "dist-runtime/cli.js");
+});
+
+test("package verification packs prebuilt artifacts without rerunning lifecycle scripts", () => {
+  assert.deepEqual(npmPackArguments({ dryRun: true }), ["pack", "--dry-run", "--json", "--ignore-scripts"]);
+  assert.deepEqual(npmPackArguments({ destination: "C:\\release" }), [
+    "pack",
+    "--pack-destination",
+    "C:\\release",
+    "--json",
+    "--ignore-scripts"
+  ]);
+});
+
+test("package credential-fixture scan rejects literal secrets without rejecting redaction patterns", () => {
+  assert.equal(containsCredentialFixtureLiteral('const key = "sk-or-live-fixture-secret";'), true);
+  assert.equal(containsCredentialFixtureLiteral("const pattern = /sk-or-[A-Za-z0-9._-]+/g;"), false);
+  assert.equal(containsCredentialFixtureLiteral('const safe = "sk-or-[redacted]";'), false);
+});
+
+test("package check preserves a user-supplied npm cache override", async () => {
+  const previousPackageCheckCache = process.env.RELAYBASE_PACKAGE_NPM_CACHE;
+  const configuredCache = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-user-package-cache-"));
+  process.env.RELAYBASE_PACKAGE_NPM_CACHE = configuredCache;
+  const originalLog = console.log;
+  console.log = () => undefined;
+  try {
+    const status = runPackageCheck([], {
+      platform: "win32",
+      arch: "x64",
+      exists: () => true,
+      spawn: (_command: string, _args: string[], options: { env?: NodeJS.ProcessEnv }) => {
+        assert.equal(options.env?.npm_config_cache, configuredCache);
+        return {
+          status: 0,
+          stdout: JSON.stringify([
+            {
+              filename: "cameloo-relaybase-0.1.0.tgz",
+              files: [
+                { path: "dist-runtime/cli.js" },
+                { path: "dist-runtime/daemonLauncher.js" },
+                { path: "dist-runtime/native/relaybase_windows-win32-x64.node" }
+              ]
+            }
+          ]),
+          stderr: ""
+        };
+      }
+    });
+
+    assert.equal(status, 0);
+    assert.equal(existsSync(configuredCache), true);
+  } finally {
+    console.log = originalLog;
+    if (previousPackageCheckCache === undefined) {
+      delete process.env.RELAYBASE_PACKAGE_NPM_CACHE;
+    } else {
+      process.env.RELAYBASE_PACKAGE_NPM_CACHE = previousPackageCheckCache;
+    }
+    await fs.rm(configuredCache, { recursive: true, force: true });
+  }
+});
+
+test("explicit prefix repair preserves custom PowerShell shims and removes only recognized npm shims", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-prefix-shim-"));
+  const ps1Path = path.join(root, "relaybase.ps1");
+  const cmdPath = path.join(root, "relaybase.cmd");
+  await fs.writeFile(cmdPath, "@echo off\r\n", "utf8");
+
+  const custom = "Write-Host 'custom relaybase wrapper'\n";
+  await fs.writeFile(ps1Path, custom, "utf8");
+  assert.equal(isRecognizedRelaybaseNpmPowerShellShim(custom), false);
+  const preserved = removeRecognizedRelaybasePowerShellShim(ps1Path, cmdPath, { backupSuffix: "test-backup" });
+  assert.deepEqual(preserved, { removed: false, reason: "unrecognized" });
+  assert.equal(await fs.readFile(ps1Path, "utf8"), custom);
+
+  const generated = [
+    "#!/usr/bin/env pwsh",
+    "$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent",
+    '$exe=".exe"',
+    '& "node$exe" "$basedir/node_modules/@cameloo/relaybase/bin/relaybase.cjs" $args',
+    "$ret=$LASTEXITCODE",
+    "exit $ret",
+    ""
+  ].join("\n");
+  await fs.writeFile(ps1Path, generated, "utf8");
+  assert.equal(isRecognizedRelaybaseNpmPowerShellShim(generated), true);
+  const removed = removeRecognizedRelaybasePowerShellShim(ps1Path, cmdPath, { backupSuffix: "test-backup" });
+  assert.deepEqual(removed, { removed: true });
+  assert.equal(existsSync(ps1Path), false);
+  assert.equal(existsSync(`${ps1Path}.test-backup`), false);
+});
+
+test("TUI snapshot command fails closed when Go is missing", () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const missingToolResult = {
+    error: new Error("spawn ENOENT"),
+    status: null,
+    stdout: "",
+    stderr: ""
+  };
+
+  const status = runCli(["snapshot"], {
+    readFile: () => "module github.com/cameloo/relaybase/tui\n\ngo 1.25.0\n",
+    spawn: (command: string, args: string[]) => {
+      calls.push({ command, args });
+      return missingToolResult;
+    }
+  });
+
+  assert.equal(status, 1);
+  assert.deepEqual(calls[0], { command: "go", args: ["version"] });
+});
+
+test("TUI smoke artifacts use the release evidence paths", () => {
+  const rootPath = path.join(os.tmpdir(), "relaybase-tui-artifacts");
+  const paths = artifactPaths(rootPath);
+
+  assert.equal(paths.ptyTranscript, path.join(rootPath, "pty-transcript.txt"));
+  assert.equal(paths.tuiOutput, path.join(rootPath, "tui-output.txt"));
+  assert.equal(paths.stateBefore, path.join(rootPath, "state-before.json"));
+  assert.equal(paths.stateAfter, path.join(rootPath, "state-after.json"));
+  assert.equal(paths.preferencesBefore, path.join(rootPath, "preferences-before.json"));
+  assert.equal(paths.preferencesAfter, path.join(rootPath, "preferences-after.json"));
+  assert.equal(paths.groupedEightPanes, path.join(rootPath, "grouped-8pane-transcript.txt"));
+});
+
+test("TUI smoke 8-pane fixture defines four frontend/backend groups", () => {
+  const fixture = smokeFixtureDefinition("8pane");
+  const groups = new Set(fixture.apps.map((app) => app.groupId));
+  const rolesByGroup = new Map<string, Set<string>>();
+
+  for (const app of fixture.apps) {
+    const roles = rolesByGroup.get(app.groupId) ?? new Set<string>();
+    roles.add(app.role);
+    rolesByGroup.set(app.groupId, roles);
+  }
+
+  assert.equal(fixture.expectedPaneCount, 8);
+  assert.equal(fixture.apps.length, 8);
+  assert.deepEqual([...groups].sort(), ["admin", "blog", "notes", "shop"]);
+  for (const roles of rolesByGroup.values()) {
+    assert.deepEqual([...roles].sort(), ["backend", "frontend"]);
+  }
+});
+
+test("TUI smoke style evidence requires ANSI colors, complete panes, and no outer scroll", () => {
+  const fixture = smokeFixtureDefinition("default");
+  const styled = [
+    "STDOUT:",
+    "\x1b[38;2;47;33;24m\x1b[38;2;125;106;95m\x1b[48;2;248;244;236mApps 2 active / 2 registered\u2514 pane one \u2518\x1b[0m",
+    "\x1b[38;2;33;104;105m\x1b[38;2;40;122;61m\x1b[38;2;138;90;0m\x1b[38;2;155;28;49m\u2514 pane two \u2518\x1b[0m",
+    "Composer [Ctrl+G agent pane]",
+    `\x1b[38;2;109;76;61m\x1b[48;2;248;244;236m${"─".repeat(fixture.smokeWidth)}\x1b[0m`,
+    "",
+    "STDERR:",
+    ""
+  ].join("\n");
+  assert.equal(transcriptHasStyledOperatorShell(styled, fixture), true);
+  assert.equal(
+    transcriptHasStyledOperatorShell(styled.replace(new RegExp(String.raw`\x1B\[[0-9;]*m`, "g"), ""), fixture),
+    false
+  );
+  assert.equal(transcriptHasStyledOperatorShell(styled.replace("pane two", "scroll 0/6"), fixture), false);
+  assert.equal(transcriptHasStyledOperatorShell(styled.replace(/┘/g, ""), fixture), false);
+  assert.equal(transcriptHasStyledOperatorShell(styled.replace("Ctrl+G agent pane", "agent pane"), fixture), false);
+  assert.equal(transcriptHasStyledOperatorShell(styled.replaceAll("38;2;109;76;61", "38;2;1;2;3"), fixture), false);
+  assert.equal(transcriptHasStyledOperatorShell(styled.replaceAll("48;2;248;244;236", "48;2;1;2;3"), fixture), false);
+});
+
+test("TUI smoke bridge evidence requires responsive complete panes at 110x32", () => {
+  const fixture = smokeFixtureDefinition("8pane");
+  const visible = fixture.apps
+    .map((app) => `${app.displayName}: ${app.paneLabel}\n[stdout] ${app.id} smoke\n└─┘`)
+    .join("\n");
+  const transcript = ["STDOUT:", visible, "Composer [Ctrl+G agent pane]", "", "STDERR:", ""].join("\n");
+
+  assert.equal(transcriptHasResponsiveBridgeLayout(transcript, fixture), true);
+  assert.equal(transcriptHasResponsiveBridgeLayout(transcript.replace(/└/g, ""), fixture), false);
+  assert.equal(transcriptHasResponsiveBridgeLayout(transcript.replace(/┘/g, ""), fixture), false);
+  assert.equal(
+    transcriptHasResponsiveBridgeLayout(transcript.replace("Ctrl+G agent pane", "agent pane"), fixture),
+    false
+  );
+  assert.equal(
+    transcriptHasResponsiveBridgeLayout(
+      transcript.replace(`[stdout] ${fixture.apps[7].id}`, "[stdout] missing"),
+      fixture
+    ),
+    false
+  );
+});
+
+test("TUI smoke prerequisites fail closed when the binary is missing", () => {
+  const rootDir = path.join(os.tmpdir(), "relaybase-tui-smoke-missing");
+  const prerequisite = evaluateSmokePrerequisites({
+    rootDir,
+    platform: "win32",
+    arch: "x64",
+    requiredGoVersion: "1.25.0",
+    exists: () => false
+  });
+
+  assert.equal(prerequisite.ok, false);
+  assert.equal(prerequisite.binaryPath, currentPlatformBinaryPath({ rootDir, platform: "win32", arch: "x64" }));
+  assert.match(prerequisite.diagnostic, /relaybase-tui binary is required/);
+  assert.match(prerequisite.diagnostic, /npm run tui:build/);
+  assert.match(prerequisite.diagnostic, /Go 1\.25\.0 is required/);
+});
+
+test("TUI smoke prerequisites prefer repo-local development launch binary", () => {
+  const rootDir = path.join(os.tmpdir(), "relaybase-tui-smoke-dev");
+  const devBinary = currentPlatformDevelopmentBinaryPath({ rootDir, platform: "win32", arch: "x64" });
+  const packageBinary = currentPlatformBinaryPath({ rootDir, platform: "win32", arch: "x64" });
+  const prerequisite = evaluateSmokePrerequisites({
+    rootDir,
+    platform: "win32",
+    arch: "x64",
+    exists: (filePath: string) => filePath === devBinary || filePath === packageBinary
+  });
+
+  assert.equal(prerequisite.ok, true);
+  assert.equal(prerequisite.binaryPath, devBinary);
+});
+
+test("TUI smoke missing-binary diagnostic does not mark UX evidence as passing", () => {
+  const diagnostic = formatMissingTuiSmokeBinaryDiagnostic({
+    binaryPath: path.join(os.tmpdir(), "relaybase-tui.exe"),
+    requiredGoVersion: "1.25.0"
+  });
+
+  assert.match(diagnostic, /will not mark TUI launch/);
+  assert.match(diagnostic, /screenshots/);
+  assert.match(diagnostic, /confirmations/);
+  assert.match(diagnostic, /preference evidence/);
+});
+
+test("TUI smoke preference evidence requires full local UI preference surface", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-tui-pref-evidence-"));
+  const beforePath = path.join(dir, "before.json");
+  const afterPath = path.join(dir, "after.json");
+  const preferences = {
+    version: 1,
+    theme: "dark",
+    keymap: { contextMenu: ["ctrl+x", "ctrl+y"] },
+    panes: {
+      pinned: ["notes:notes-web:frontend:frontend"],
+      hidden: ["archived:archived-web:frontend:frontend"],
+      order: ["notes:notes-web:frontend:frontend", "notes:notes-api:backend:backend"],
+      colors: {
+        "notes:notes-web:frontend:frontend": "#216869",
+        "notes:notes-api:backend:backend": "#8a5a00"
+      }
+    },
+    assistant: {
+      barColor: "#216869",
+      historyRetentionDays: 30
+    },
+    layout: {
+      lastPage: 0,
+      density: "compact",
+      agentPaneCollapsed: false
+    }
+  };
+
+  await fs.writeFile(beforePath, JSON.stringify(preferences, null, 2), "utf8");
+  await fs.writeFile(afterPath, JSON.stringify(preferences, null, 2), "utf8");
+
+  assert.equal(preferenceEvidenceLooksComplete(preferences), true);
+  assert.equal(preferenceEvidenceContainsSecretValue(preferences), false);
+  assert.equal(await preferencesSurvived(beforePath, afterPath), "passed");
+});
+
+test("TUI smoke preference evidence rejects secret-like persisted values", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-tui-pref-secret-"));
+  const beforePath = path.join(dir, "before.json");
+  const afterPath = path.join(dir, "after.json");
+  const preferences = {
+    version: 1,
+    theme: "dark",
+    keymap: { contextMenu: ["ctrl+x", "ctrl+y"] },
+    panes: {
+      pinned: ["notes:notes-web:frontend:frontend"],
+      hidden: ["archived:archived-web:frontend:frontend"],
+      order: ["notes:notes-web:frontend:frontend", "notes:notes-api:backend:backend"],
+      colors: {
+        "notes:notes-web:frontend:frontend": "#216869",
+        "notes:notes-api:backend:backend": "#8a5a00"
+      }
+    },
+    assistant: {
+      barColor: "#216869",
+      historyRetentionDays: 30,
+      lastInput: "token=should-not-persist"
+    },
+    layout: {
+      lastPage: 0,
+      density: "compact"
+    }
+  };
+
+  await fs.writeFile(beforePath, JSON.stringify(preferences, null, 2), "utf8");
+  await fs.writeFile(afterPath, JSON.stringify(preferences, null, 2), "utf8");
+
+  assert.equal(preferenceEvidenceContainsSecretValue(preferences), true);
+  assert.equal(await preferencesSurvived(beforePath, afterPath), "failed");
+});
+
+test("TUI smoke evidence parser ignores transcript metadata", () => {
+  const transcript = [
+    "# slash stop confirmation",
+    "$ relaybase-tui --smoke-render",
+    "",
+    "STDOUT:",
+    "Relaybase TUI",
+    "daemon: connected",
+    "",
+    "STDERR:",
+    ""
+  ].join("\n");
+
+  const rendered = renderedTranscriptOutput(transcript);
+  assert.match(rendered, /Relaybase TUI/);
+  assert.doesNotMatch(rendered, /slash stop confirmation/);
+
+  const offlineTranscript = [
+    "# bridge daemon unavailable",
+    "$ relaybase tui --port 1",
+    "",
+    "STDOUT:",
+    "",
+    "STDERR:",
+    "relaybase tui: Relaybase daemon is not reachable at http://127.0.0.1:1."
+  ].join("\n");
+  const processOutput = transcriptProcessOutput(offlineTranscript);
+  assert.match(processOutput, /daemon is not reachable/);
+  assert.doesNotMatch(processOutput, /bridge daemon unavailable/);
+});
+
+test("TUI race wrapper reports unsupported race without claiming a pass", () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const status = runCli(["race"], {
+    readFile: () => "module github.com/cameloo/relaybase/tui\n\ngo 1.25.0\n",
+    spawn: (command: string, args: string[]) => {
+      calls.push({ command, args });
+      if (args[0] === "version") {
+        return { status: 0, stdout: "go version go1.25.0 windows/amd64", stderr: "" };
+      }
+      return { status: 1, stdout: "", stderr: "go: -race requires cgo" };
+    }
+  });
+
+  assert.equal(status, raceUnsupportedExitCode);
+  assert.deepEqual(calls[1], { command: "go", args: ["test", "-race", "./..."] });
+  assert.equal(isUnsupportedRaceOutput("go: -race requires cgo"), true);
+  assert.equal(isUnsupportedRaceOutput('cgo: C compiler "gcc" not found'), true);
+  assert.match(formatUnsupportedRaceDiagnostic(), /did not pass/);
+  assert.match(formatUnsupportedRaceDiagnostic(), /Documented unsupported-race exit code: 2/);
 });
 
 test("normalizes manifests with relative cwd and env", () => {
@@ -38,6 +1916,82 @@ test("normalizes manifests with relative cwd and env", () => {
   assert.equal(app.cwd, path.join(os.tmpdir(), "relaybase-manifest", "app"));
   assert.equal(app.env.NODE_ENV, "development");
   assert.equal(app.upstreamPort, 18001);
+});
+
+test("restricts absolute health URLs to localhost targets", () => {
+  const app = normalizeManifest({
+    id: "local-health",
+    name: "Local Health",
+    command: "node server.js",
+    healthUrl: "http://127.0.0.1:18001/health"
+  });
+
+  assert.equal(app.healthUrl, "http://127.0.0.1:18001/health");
+  assert.throws(
+    () =>
+      normalizeManifest({
+        id: "external-health",
+        name: "External Health",
+        command: "node server.js",
+        healthUrl: "http://169.254.169.254/latest/meta-data/"
+      }),
+    /healthUrl must target localhost/
+  );
+});
+
+test("waitForHealthy allows slow first health response within the manifest budget", async () => {
+  const server = http.createServer((_request, response) => {
+    setTimeout(() => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+    }, 1200);
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address() as AddressInfo;
+    const app = normalizeManifest({
+      id: "slow-health",
+      name: "Slow Health",
+      command: "node server.js",
+      healthUrl: "/health"
+    });
+
+    assert.equal(await waitForHealthy(app, address.port, "127.0.0.1", 4000), true);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
+test("HTTP health accepts only successful 2xx responses", async () => {
+  let statusCode = 404;
+  const server = http.createServer((_request, response) => {
+    response.writeHead(statusCode, { "content-type": "application/json" });
+    response.end(JSON.stringify({ statusCode }));
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address() as AddressInfo;
+    const app = normalizeManifest({
+      id: "strict-health",
+      name: "Strict Health",
+      command: "node server.js",
+      healthUrl: "/health"
+    });
+
+    assert.equal(await checkAppHealth(app, address.port, "127.0.0.1", 500), false);
+    statusCode = 204;
+    assert.equal(await checkAppHealth(app, address.port, "127.0.0.1", 500), true);
+    statusCode = 302;
+    assert.equal(await checkAppHealth(app, address.port, "127.0.0.1", 500), false);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
 });
 
 test("normalizes lifecycle hook fields and rejects invalid timeouts", () => {
@@ -69,6 +2023,54 @@ test("normalizes lifecycle hook fields and rejects invalid timeouts", () => {
       }),
     /stopTimeoutMs/
   );
+});
+
+test("normalizes relaybase component metadata without changing app command ownership", () => {
+  const app = normalizeManifest({
+    id: "notes-web",
+    name: "Notes Web",
+    command: "npm.cmd run dev",
+    protocol: "http",
+    relaybase: {
+      groupId: "notes",
+      componentRole: "frontend",
+      displayName: "Notes",
+      paneLabel: "frontend",
+      paneOrder: 10
+    }
+  });
+
+  assert.equal(app.schemaVersion, 1);
+  assert.equal(app.command, "npm.cmd run dev");
+  assert.deepEqual(app.relaybase, {
+    groupId: "notes",
+    componentRole: "frontend",
+    displayName: "Notes",
+    paneLabel: "frontend",
+    paneOrder: 10
+  });
+  assert.equal(app.manifestDiagnostics, undefined);
+});
+
+test("keeps malformed relaybase metadata valid and records diagnostics", () => {
+  const app = normalizeManifest({
+    id: "bad-meta",
+    name: "Bad Metadata",
+    command: "node server.js",
+    relaybase: {
+      groupId: "Bad.Group",
+      componentRole: "ui",
+      paneOrder: "first"
+    }
+  });
+
+  assert.equal(app.relaybase?.groupId, "bad-meta");
+  assert.equal(app.relaybase?.componentRole, "other");
+  assert.equal(app.relaybase?.paneLabel, "other");
+  assert.equal(app.relaybase?.paneOrder, 100);
+  assert.ok(app.manifestDiagnostics?.some((diagnostic) => diagnostic.field === "relaybase.groupId"));
+  assert.ok(app.manifestDiagnostics?.some((diagnostic) => diagnostic.field === "relaybase.componentRole"));
+  assert.ok(app.manifestDiagnostics?.some((diagnostic) => diagnostic.field === "relaybase.paneOrder"));
 });
 
 test("normalizes MCP child blocks with exact allowlists", () => {
@@ -146,6 +2148,8 @@ test("generates standard app state shape", () => {
   const state = composeAppState({
     id: "notes",
     name: "Notes",
+    cwd: "C:\\work\\notes",
+    manifestPath: "C:\\work\\notes\\relaybase.app.json",
     registered: true,
     runtime: {
       status: "running",
@@ -165,6 +2169,8 @@ test("generates standard app state shape", () => {
   });
 
   assert.equal(state.id, "notes");
+  assert.equal(state.cwd, "C:\\work\\notes");
+  assert.equal(state.manifestPath, "C:\\work\\notes\\relaybase.app.json");
   assert.equal(state.registered, true);
   assert.equal(state.runtime.status, "running");
   assert.equal(state.backendPortOpen, true);
@@ -176,6 +2182,312 @@ test("generates standard app state shape", () => {
   assert.match(state.logStreamUrl, /\/__hub\/api\/apps\/notes\/logs\/stream$/);
   assert.equal(state.readiness.state, "ready");
   assert.ok(state.readiness.checks.some((check) => check.name === "route-reachable" && check.ok));
+});
+
+test("builds grouped component read models from app states", () => {
+  const checkedAt = "2026-05-08T00:00:00.000Z";
+  const frontendState = composeAppState({
+    id: "notes-web",
+    name: "Notes Web",
+    registered: true,
+    runtime: {
+      status: "running",
+      health: "healthy",
+      pid: 101,
+      assignedPort: 18001,
+      logLines: 0
+    },
+    hubHost: "127.0.0.1",
+    hubPort: 7777,
+    backendPort: 18001,
+    backendPortOpen: true,
+    routeReachable: true,
+    recentLogs: [],
+    readinessCheckedAt: checkedAt
+  });
+  const backendState = composeAppState({
+    id: "notes-api",
+    name: "Notes API",
+    registered: true,
+    runtime: {
+      status: "stopped",
+      health: "unknown",
+      logLines: 0
+    },
+    hubHost: "127.0.0.1",
+    hubPort: 7777,
+    backendPortOpen: false,
+    routeReachable: false,
+    recentLogs: [],
+    readinessCheckedAt: checkedAt
+  });
+  const statusBase = {
+    command: "external",
+    cwd: ".",
+    protocol: "http" as const,
+    env: {},
+    createdAt: checkedAt,
+    updatedAt: checkedAt
+  };
+  const grouped = buildAppComponentState({
+    states: [frontendState, backendState],
+    statuses: [
+      {
+        ...statusBase,
+        id: "notes-web",
+        name: "Notes Web",
+        runtime: frontendState.runtime,
+        relaybase: {
+          groupId: "notes",
+          componentRole: "frontend",
+          displayName: "Notes",
+          paneLabel: "frontend",
+          paneOrder: 10
+        }
+      },
+      {
+        ...statusBase,
+        id: "notes-api",
+        name: "Notes API",
+        runtime: backendState.runtime,
+        relaybase: {
+          groupId: "notes",
+          componentRole: "backend",
+          displayName: "Notes API",
+          paneLabel: "backend",
+          paneOrder: 20
+        }
+      }
+    ],
+    generatedAt: checkedAt
+  });
+
+  assert.equal(grouped.components[0]?.appId, "notes-web");
+  assert.equal(grouped.components[0]?.role, "frontend");
+  assert.equal(grouped.components[0]?.port, 18001);
+  assert.equal(grouped.components[1]?.role, "backend");
+  assert.equal(grouped.groups.length, 1);
+  assert.equal(grouped.groups[0]?.groupId, "notes");
+  assert.equal(grouped.groups[0]?.displayName, "Notes");
+  assert.equal(grouped.groups[0]?.aggregateStatus, "degraded");
+});
+
+test("applies aggregate component status rules", () => {
+  const component = {
+    appId: "app",
+    groupId: "group",
+    role: "other" as const,
+    paneLabel: "app",
+    paneOrder: 100,
+    displayName: "App",
+    route: {
+      humanUrl: "http://app.localhost:7777",
+      agentUrl: "http://127.0.0.1:7777",
+      reachable: false
+    },
+    lastError: null
+  };
+
+  assert.equal(aggregateComponentStatus([{ ...component, status: "failed" }]), "failed");
+  assert.equal(
+    aggregateComponentStatus([
+      { ...component, appId: "a", status: "starting" },
+      { ...component, appId: "b", status: "running" }
+    ]),
+    "starting"
+  );
+  assert.equal(aggregateComponentStatus([{ ...component, status: "running" }]), "running");
+  assert.equal(aggregateComponentStatus([{ ...component, status: "stopped" }]), "stopped");
+  assert.equal(
+    aggregateComponentStatus([
+      { ...component, appId: "a", status: "running" },
+      { ...component, appId: "b", status: "stopped" }
+    ]),
+    "degraded"
+  );
+});
+
+test("durable log store appends, queries, pages, rotates, and reopens", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-log-store-"));
+  const store = await LogStore.open(stateDir, { maxEventsPerSegment: 2 });
+
+  await store.append({
+    appId: "notes-web",
+    groupId: "notes",
+    componentRole: "frontend",
+    stream: "stdout",
+    source: "start",
+    message: "first"
+  });
+  await store.append({
+    appId: "notes-web",
+    groupId: "notes",
+    componentRole: "frontend",
+    stream: "stdout",
+    source: "start",
+    message: "second"
+  });
+  await store.append({
+    appId: "notes-web",
+    groupId: "notes",
+    componentRole: "frontend",
+    stream: "stderr",
+    source: "start",
+    message: "third error"
+  });
+
+  const latest = await store.query({ appId: "notes-web", limit: 2 });
+  assert.deepEqual(
+    latest.events.map((event) => event.message),
+    ["second", "third error"]
+  );
+  assert.equal(latest.events[1]?.level, "error");
+  assert.equal(latest.page.hasMore, true);
+  assert.equal(latest.page.nextBefore, latest.events[0]?.sequence);
+
+  const before = await store.query({ appId: "notes-web", limit: 1, before: latest.events[1]?.sequence });
+  assert.equal(before.events[0]?.message, "second");
+
+  const bySequence = await store.getBySequence(latest.events[0]?.sequence ?? 0);
+  assert.equal(bySequence?.message, "second");
+
+  assert.equal(await countJsonlFiles(path.join(stateDir, "logs", "segments")), 2);
+  await store.rotate("notes-web");
+  await store.append({
+    appId: "notes-web",
+    groupId: "notes",
+    componentRole: "frontend",
+    stream: "stdout",
+    source: "start",
+    message: "after rotation"
+  });
+  assert.equal(await countJsonlFiles(path.join(stateDir, "logs", "segments")), 3);
+  await store.close();
+
+  const reopened = await LogStore.open(stateDir);
+  const recovered = await reopened.query({ groupId: "notes", componentRole: "frontend", limit: 10 });
+  assert.ok(recovered.events.some((event) => event.message === "after rotation"));
+  assert.equal(reopened.health().status, "healthy");
+  await reopened.close();
+});
+
+test("durable log store handles huge log payloads", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-log-huge-"));
+  const store = await LogStore.open(stateDir);
+  const hugeMessage = "huge-log-line ".repeat(40_000);
+
+  await store.append({
+    appId: "huge-app",
+    groupId: "huge",
+    componentRole: "backend",
+    stream: "stdout",
+    source: "start",
+    message: hugeMessage
+  });
+
+  const result = await store.query({ appId: "huge-app", limit: 1 });
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0]?.message.length, hugeMessage.length);
+  assert.equal(result.events[0]?.message, hugeMessage);
+  assert.equal(store.health().status, "healthy");
+  await store.close();
+});
+
+test("durable log store preserves typed lifecycle sources across reopen", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-log-lifecycle-sources-"));
+  const store = await LogStore.open(stateDir);
+  const sources = [
+    "lifecycle_starting",
+    "process",
+    "lifecycle_stopping",
+    "lifecycle_stopped",
+    "lifecycle_stop_failed"
+  ] as const;
+
+  for (const source of sources) {
+    await store.append({
+      appId: "lifecycle-app",
+      stream: source === "process" ? "stdout" : "system",
+      source,
+      message: source
+    });
+  }
+  await store.close();
+
+  const reopened = await LogStore.open(stateDir);
+  const recovered = await reopened.query({ appId: "lifecycle-app", limit: 20 });
+  assert.deepEqual(
+    recovered.events.map((event) => event.source),
+    sources
+  );
+  await reopened.close();
+});
+
+test("durable log store unavailable path degrades with diagnostics", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-log-unavailable-"));
+  await fs.writeFile(path.join(stateDir, "logs"), "not a directory", "utf8");
+
+  const store = await LogStore.open(stateDir);
+  const health = store.health();
+  assert.equal(health.status, "degraded");
+  assert.ok(health.diagnostics.some((diagnostic) => diagnostic.code === "LOG_STORE_UNAVAILABLE"));
+
+  const result = await store.query({ appId: "blocked", limit: 10 });
+  assert.equal(result.events.length, 0);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "LOG_STORE_UNAVAILABLE"));
+
+  await assert.rejects(
+    () =>
+      store.append({
+        appId: "blocked",
+        stream: "stdout",
+        message: "should not be durable"
+      }),
+    /unavailable/
+  );
+  await store.close();
+});
+
+test("durable log store reports corrupt index and segment diagnostics", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-log-corrupt-"));
+  const logRoot = path.join(stateDir, "logs");
+  const segmentDir = path.join(logRoot, "segments", "bad-app", "2026-06-01");
+  await fs.mkdir(segmentDir, { recursive: true });
+  await fs.writeFile(path.join(logRoot, "index.json"), "{ not-json", "utf8");
+  await fs.writeFile(
+    path.join(segmentDir, "bad.jsonl"),
+    '{"sequence":1,"appId":"bad-app","stream":"stdout","message":"ok"}\nnot-json\n',
+    "utf8"
+  );
+
+  const store = await LogStore.open(stateDir);
+  const result = await store.query({ appId: "bad-app", limit: 10 });
+
+  assert.equal(result.events.length, 1);
+  assert.ok(store.diagnostics().some((diagnostic) => diagnostic.code === "LOG_INDEX_CORRUPT"));
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "LOG_SEGMENT_CORRUPT"));
+  assert.equal(store.health().status, "degraded");
+  await store.close();
+});
+
+test("durable log store retention removes old segments", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "relaybase-log-retention-"));
+  const store = await LogStore.open(stateDir, { retentionDays: 1 });
+  await store.append({
+    appId: "old-app",
+    stream: "stdout",
+    source: "start",
+    timestamp: "2026-05-01T00:00:00.000Z",
+    message: "old"
+  });
+  await store.flush();
+  const files = await jsonlFiles(path.join(stateDir, "logs", "segments"));
+  assert.equal(files.length, 1);
+  const oldDate = new Date("2026-05-01T00:00:00.000Z");
+  await fs.utimes(files[0], oldDate, oldDate);
+  await store.cleanupRetention(new Date("2026-06-01T00:00:00.000Z"));
+  assert.equal(await countJsonlFiles(path.join(stateDir, "logs", "segments")), 0);
+  await store.close();
 });
 
 test("persists registry records", async () => {
@@ -197,7 +2509,6 @@ test("persists registry records", async () => {
 
 test("dashboard labels app backend ports explicitly", () => {
   const html = dashboardHtml({
-    token: "test-token",
     apps: [
       {
         id: "fixed-app",
@@ -212,13 +2523,20 @@ test("dashboard labels app backend ports explicitly", () => {
         runtime: {
           status: "stopped",
           health: "unknown",
-          logLines: 0
+          logLines: 0,
+          canStart: true,
+          canStop: false
         }
       }
     ]
   });
 
-  assert.match(html, /<th>Backend port<\/th>/);
+  assert.match(html, /<th scope="col">Backend port<\/th>/);
+  assert.match(html, /aria-live="polite"/);
+  assert.match(html, /aria-label="' \+ label \+ ' ' \+ escapeHtml\(id\)/);
+  assert.match(html, /actionButton\('inspect'/);
+  assert.doesNotMatch(html, /actionButton\('start'/);
+  assert.doesNotMatch(html, /actionButton\('stop'/);
   assert.doesNotMatch(html, /<th>Port<\/th>/);
   assert.match(html, /fixed :/);
   assert.match(html, /requested/);
@@ -241,3 +2559,27 @@ test("resolves hub and host routes", () => {
   assert.equal(appIdFromHost("notes.localhost:7777"), "notes");
   assert.equal(appIdFromHost("localhost:7777"), undefined);
 });
+
+async function countJsonlFiles(root: string): Promise<number> {
+  return (await jsonlFiles(root)).length;
+}
+
+async function jsonlFiles(root: string): Promise<string[]> {
+  const files: string[] = [];
+  try {
+    const entries = await fs.readdir(root, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(root, entry.name);
+      if (entry.isDirectory()) {
+        files.push(...(await jsonlFiles(fullPath)));
+      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        files.push(fullPath);
+      }
+    }
+  } catch (error) {
+    if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  return files.sort();
+}

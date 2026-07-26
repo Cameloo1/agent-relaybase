@@ -1,17 +1,32 @@
 import path from "node:path";
 import type {
   AppManifestInput,
+  AppLaunch,
+  AppLaunchPortBinding,
   AppMcpConfig,
   AppProtocol,
   AppRecord,
+  AppComponentRole,
+  AppManifestDiagnostic,
   ChildMcpConfig,
   ChildMcpTransport,
-  McpExposePolicy
+  McpExposePolicy,
+  RelaybaseManifestMetadata
 } from "./types.ts";
+import { RELAYBASE_LAUNCH_TOKENS } from "./launchPlan.ts";
 
 const APP_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const VALID_PROTOCOLS = new Set<AppProtocol>(["http", "http+ws", "tcp"]);
 const VALID_CHILD_MCP_TRANSPORTS = new Set<ChildMcpTransport>(["stdio", "streamable-http", "sse"]);
+const VALID_COMPONENT_ROLES = new Set<AppComponentRole>([
+  "frontend",
+  "backend",
+  "worker",
+  "database",
+  "service",
+  "other"
+]);
+const DEFAULT_PANE_ORDER = 100;
 
 export function validateAppId(id: string): void {
   if (!APP_ID_PATTERN.test(id)) {
@@ -33,7 +48,11 @@ export function normalizeManifest(
   const manifestDir = options.manifestPath ? path.dirname(path.resolve(options.manifestPath)) : process.cwd();
   const id = requiredString(input.id, "id").trim();
   const name = requiredString(input.name, "name").trim();
-  const command = requiredString(input.command, "command").trim();
+  const launch = normalizeLaunch(input.launch, input.upstreamPort);
+  if (input.command !== undefined && launch) {
+    throw new Error("Manifest fields command and launch cannot both be provided. Choose one launch contract.");
+  }
+  const command = launch ? launch.executable : requiredString(input.command, "command").trim();
   const protocol = optionalString(input.protocol, "protocol") ?? "http";
 
   validateAppId(id);
@@ -62,6 +81,7 @@ export function normalizeManifest(
   const startTimeoutMs = normalizeTimeout(input.startTimeoutMs, "startTimeoutMs");
   const stopTimeoutMs = normalizeTimeout(input.stopTimeoutMs, "stopTimeoutMs");
   const healthTimeoutMs = normalizeTimeout(input.healthTimeoutMs, "healthTimeoutMs");
+  const relaybase = normalizeRelaybaseMetadata(input.relaybase, id, name);
   const hasLifecycleFields = [
     preStartCommand,
     stopCommand,
@@ -71,7 +91,10 @@ export function normalizeManifest(
     stopTimeoutMs,
     healthTimeoutMs
   ].some((value) => value !== undefined);
-  const schemaVersion = normalizeSchemaVersion(input.schemaVersion, input.mcp !== undefined || hasLifecycleFields);
+  const schemaVersion = normalizeSchemaVersion(
+    input.schemaVersion,
+    input.mcp !== undefined || input.launch !== undefined || hasLifecycleFields || relaybase.seen
+  );
   const mcp = normalizeMcpConfig(input.mcp, cwd);
 
   return {
@@ -79,6 +102,7 @@ export function normalizeManifest(
     id,
     name,
     command,
+    ...(launch ? { launch } : {}),
     cwd,
     protocol: protocol as AppProtocol,
     ...(healthUrl ? { healthUrl } : {}),
@@ -92,10 +116,70 @@ export function normalizeManifest(
     ...(stopTimeoutMs !== undefined ? { stopTimeoutMs } : {}),
     ...(healthTimeoutMs !== undefined ? { healthTimeoutMs } : {}),
     ...(mcp ? { mcp } : {}),
+    ...(relaybase.metadata ? { relaybase: relaybase.metadata } : {}),
+    ...(relaybase.diagnostics.length ? { manifestDiagnostics: relaybase.diagnostics } : {}),
     ...(options.manifestPath ? { manifestPath: path.resolve(options.manifestPath) } : {}),
     createdAt: now,
     updatedAt: now
   };
+}
+
+function normalizeLaunch(value: unknown, upstreamPortValue: unknown): AppLaunch | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Manifest field launch must be an object.");
+  }
+  const raw = value as Record<string, unknown>;
+  const executable = requiredString(raw.executable, "launch.executable").trim();
+  if (!executable) {
+    throw new Error("Manifest field launch.executable cannot be empty.");
+  }
+  const args = normalizeLaunchArgs(raw.args);
+  const environment = normalizeLaunchEnvironment(raw.environment);
+  const portBinding = (optionalString(raw.portBinding, "launch.portBinding") ?? "environment") as AppLaunchPortBinding;
+  if (!["environment", "arguments", "fixed", "external"].includes(portBinding)) {
+    throw new Error("Manifest field launch.portBinding must be one of: environment, arguments, fixed, external.");
+  }
+  if ((portBinding === "fixed" || portBinding === "external") && normalizePort(upstreamPortValue) === undefined) {
+    throw new Error(`Manifest field upstreamPort is required when launch.portBinding is ${portBinding}.`);
+  }
+  for (const [field, entry] of [
+    ["launch.executable", executable],
+    ...args.map((entry, index) => [`launch.args[${index}]`, entry]),
+    ...Object.entries(environment).map(([key, entry]) => [`launch.environment.${key}`, entry])
+  ] as Array<[string, string]>) {
+    validateLaunchValue(entry, field);
+  }
+  return { executable, args, environment, portBinding };
+}
+
+function normalizeLaunchArgs(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new Error("Manifest field launch.args must be an array of strings.");
+  }
+  return [...value] as string[];
+}
+
+function normalizeLaunchEnvironment(value: unknown): Record<string, string> {
+  if (value === undefined || value === null) return {};
+  return normalizeEnv(value);
+}
+
+function validateLaunchValue(value: string, field: string): void {
+  const tokens = value.match(/\{relaybase\.[A-Za-z0-9]+\}/g) ?? [];
+  for (const token of tokens) {
+    if (!RELAYBASE_LAUNCH_TOKENS.has(token)) {
+      throw new Error(`Manifest field ${field} contains unsupported Relaybase token ${token}.`);
+    }
+  }
+  if (/\$(?:PORT|HOST)\b|%(?:PORT|HOST)%|\$\(|`[^`]*`/.test(value)) {
+    throw new Error(
+      `Manifest field ${field} contains shell interpolation. Use controlled {relaybase.*} tokens instead.`
+    );
+  }
 }
 
 export function mergeAppRecord(existing: AppRecord | undefined, incoming: AppRecord, now = new Date()): AppRecord {
@@ -169,8 +253,21 @@ function normalizeHealthUrl(value: unknown): string | undefined {
     return undefined;
   }
 
-  if (healthUrl.startsWith("/") || healthUrl.startsWith("http://") || healthUrl.startsWith("https://")) {
+  if (healthUrl.startsWith("/")) {
     return healthUrl;
+  }
+
+  if (healthUrl.startsWith("http://") || healthUrl.startsWith("https://")) {
+    try {
+      const parsed = new URL(healthUrl);
+      if (!isLocalhost(parsed.hostname)) {
+        throw new Error();
+      }
+
+      return parsed.toString();
+    } catch {
+      throw new Error("Manifest field healthUrl must target localhost for absolute http(s) URLs.");
+    }
   }
 
   throw new Error("Manifest field healthUrl must be an absolute http(s) URL or a path starting with '/'.");
@@ -207,6 +304,167 @@ function normalizeSchemaVersion(value: unknown, hasMcpBlock: boolean): 1 | undef
   }
 
   return 1;
+}
+
+function normalizeRelaybaseMetadata(
+  value: unknown,
+  appId: string,
+  appName: string
+): { seen: boolean; metadata?: RelaybaseManifestMetadata; diagnostics: AppManifestDiagnostic[] } {
+  if (value === undefined) {
+    return { seen: false, diagnostics: [] };
+  }
+
+  const diagnostics: AppManifestDiagnostic[] = [];
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    diagnostics.push(
+      relaybaseDiagnostic(
+        "RELAYBASE_METADATA_INVALID",
+        "Manifest field relaybase must be an object when provided.",
+        "relaybase",
+        {
+          expected: "object",
+          receivedType: valueType(value)
+        }
+      )
+    );
+    return { seen: true, diagnostics };
+  }
+
+  const raw = value as Record<string, unknown>;
+  const role = normalizeComponentRole(raw.componentRole, diagnostics);
+  const groupId = normalizeMetadataString(raw.groupId, "relaybase.groupId", appId, diagnostics, {
+    validate: isValidAppId,
+    expected: "a valid Relaybase app/group id"
+  });
+  const displayName = normalizeMetadataString(raw.displayName, "relaybase.displayName", appName, diagnostics);
+  const paneLabel = normalizeMetadataString(raw.paneLabel, "relaybase.paneLabel", role, diagnostics);
+  const paneOrder = normalizePaneOrder(raw.paneOrder, diagnostics);
+
+  return {
+    seen: true,
+    metadata: {
+      groupId,
+      componentRole: role,
+      displayName,
+      paneLabel,
+      paneOrder
+    },
+    diagnostics
+  };
+}
+
+function normalizeComponentRole(value: unknown, diagnostics: AppManifestDiagnostic[]): AppComponentRole {
+  if (value === undefined || value === null || value === "") {
+    return "other";
+  }
+
+  if (typeof value !== "string" || !VALID_COMPONENT_ROLES.has(value as AppComponentRole)) {
+    diagnostics.push(
+      relaybaseDiagnostic(
+        "RELAYBASE_COMPONENT_ROLE_INVALID",
+        "Manifest field relaybase.componentRole must be one of: frontend, backend, worker, database, service, other.",
+        "relaybase.componentRole",
+        {
+          expected: [...VALID_COMPONENT_ROLES],
+          receivedType: valueType(value)
+        }
+      )
+    );
+    return "other";
+  }
+
+  return value as AppComponentRole;
+}
+
+function normalizeMetadataString(
+  value: unknown,
+  field: string,
+  fallback: string,
+  diagnostics: AppManifestDiagnostic[],
+  options: { validate?: (value: string) => boolean; expected?: string } = {}
+): string {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  if (typeof value !== "string" || !value.trim()) {
+    diagnostics.push(
+      relaybaseDiagnostic(
+        "RELAYBASE_METADATA_FIELD_INVALID",
+        `Manifest field ${field} must be a non-empty string.`,
+        field,
+        {
+          expected: "non-empty string",
+          receivedType: valueType(value)
+        }
+      )
+    );
+    return fallback;
+  }
+
+  const normalized = value.trim();
+  if (options.validate && !options.validate(normalized)) {
+    diagnostics.push(
+      relaybaseDiagnostic(
+        "RELAYBASE_METADATA_FIELD_INVALID",
+        `Manifest field ${field} must be ${options.expected}.`,
+        field,
+        {
+          expected: options.expected,
+          receivedType: valueType(value)
+        }
+      )
+    );
+    return fallback;
+  }
+
+  return normalized;
+}
+
+function normalizePaneOrder(value: unknown, diagnostics: AppManifestDiagnostic[]): number {
+  if (value === undefined || value === null || value === "") {
+    return DEFAULT_PANE_ORDER;
+  }
+
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    diagnostics.push(
+      relaybaseDiagnostic(
+        "RELAYBASE_PANE_ORDER_INVALID",
+        "Manifest field relaybase.paneOrder must be an integer.",
+        "relaybase.paneOrder",
+        {
+          expected: "integer",
+          receivedType: valueType(value)
+        }
+      )
+    );
+    return DEFAULT_PANE_ORDER;
+  }
+
+  return value;
+}
+
+function relaybaseDiagnostic(code: string, message: string, field: string, detail?: unknown): AppManifestDiagnostic {
+  return {
+    code,
+    severity: "warning",
+    message,
+    field,
+    ...(detail ? { detail } : {})
+  };
+}
+
+function valueType(value: unknown): string {
+  if (value === null) {
+    return "null";
+  }
+
+  if (Array.isArray(value)) {
+    return "array";
+  }
+
+  return typeof value;
 }
 
 function normalizeMcpConfig(value: unknown, appCwd: string): AppMcpConfig | undefined {
@@ -365,4 +623,8 @@ function normalizeHttpUrl(value: unknown, field: string): string | undefined {
   } catch {
     throw new Error(`Manifest field ${field} must be an absolute http(s) URL.`);
   }
+}
+
+function isLocalhost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
 }

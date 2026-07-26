@@ -1,41 +1,36 @@
-# Relaybase Dev Skill
+# Using Relaybase with Codex
 
-The repo-local Relaybase Dev skill lives at:
+Relaybase gives Codex one reliable way to run local apps: configure the app once, open it through a stable route, inspect health and logs, and stop it cleanly.
+
+The primary repo-local Codex skill lives at:
+
+```text
+skills/relaybase/SKILL.md
+```
+
+The compatibility skill lives at:
 
 ```text
 skills/relaybase-dev/SKILL.md
 ```
 
-It mirrors the global Codex skill used on this machine, but is checked into the Relaybase repo so future contributors and Codex sessions can inspect the operating model without depending on local memory.
+Use it when a Codex session is starting, previewing, debugging, routing, or stopping a local app that should run through Relaybase.
 
-## Purpose
+## Codex Prompt
 
-Relaybase exists to make local app lifecycle a shared infrastructure layer instead of a pile of ad hoc terminal processes and random host ports. The skill turns that product intent into a repeatable Codex workflow:
-
-- Check Relaybase before starting local app runtimes.
-- Prefer manifests, lifecycle commands, stable routes, logs, routed health checks, and stop checks.
-- Use child MCP stdio for agent-facing tools instead of opening another port.
-- Treat direct ports as fallback, and require a clear reason when they are used.
-
-This helps because AI-driven development can create many short-lived apps, helper servers, and debugging processes. If every agent picks its own port and background command, the machine becomes hard to reason about. Relaybase gives Codex one default path for running, inspecting, routing, and stopping apps.
-
-The upgraded skill is meant to be an execution harness, not just an operator manual. It asks Codex to choose the owning surface before editing:
-
-- App repo: manifest, startup command, health route, and app bugs.
-- Relaybase repo: runtime/process/proxy/MCP/token/logging/lifecycle bugs.
-- Dashboard repo: panels, buttons, app list, Access App flow, logs UI, and state rendering.
-
-In the operations-dashboard pattern, a dashboard may start Relaybase and control apps through Relaybase. It should not direct-spawn apps unless it has explicitly entered fallback mode.
-
-## How Devs Should Use It
-
-When working in this repo or building an app that should run through Relaybase, point Codex at the repo-local skill:
+Point Codex at the skill when the app should use Relaybase:
 
 ```text
-Use $relaybase-dev at skills/relaybase-dev to run this app through Relaybase with direct ports only as fallback.
+Use $relaybase at skills/relaybase to run this app through Relaybase with direct ports only as fallback.
 ```
 
-For normal app setup, keep the public CLI path to three commands:
+This tells Codex to prefer manifests, daemon registration, stable routes, routed health checks, logs, and stop verification instead of choosing random localhost ports.
+
+Existing `$relaybase-dev` prompts remain supported for compatibility.
+
+## Normal Flow
+
+For most apps, Codex should keep the user-facing flow to:
 
 ```powershell
 relaybase configure
@@ -43,9 +38,27 @@ relaybase open
 relaybase health
 ```
 
-`configure` owns setup and repair, `open` owns daily launch and routed access, and `health` owns read-only diagnosis. Lower-level lifecycle actions remain available to dashboards, MCP tools, and the helper when precise proof is needed.
+`configure` owns setup and repair. `open` owns daily launch and routed access. `health` owns read-only diagnosis and `nextActions`.
 
-For manual lifecycle proof on Windows/Codex App, use the bundled `.cmd` helper wrapper. It avoids direct `.ps1` policy failures without changing system policy.
+`relaybase list` is the inventory view for registered apps.
+
+## Success Criteria
+
+A Relaybase launch is successful when:
+
+- the app is registered with the daemon
+- the app process starts or an existing upstream is reachable
+- the backend port is open when one is known
+- the human route works: `http://<app-id>.localhost:7777`
+- the agent route works: `http://127.0.0.1:7777` with `X-Relaybase-App: <app-id>`
+- logs are available through Relaybase
+- stop verification closes Relaybase-owned backend ports
+
+Route health can be `full`, `degraded`, or `failed`. `full` is the target for proof. `degraded` means one route path worked and the other needs attention.
+
+## Manual Proof Helper
+
+For manual checks on Windows or in Codex App, use the checked-in `.cmd` wrapper:
 
 ```powershell
 .\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action preflight
@@ -53,45 +66,53 @@ For manual lifecycle proof on Windows/Codex App, use the bundled `.cmd` helper w
 .\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action ensure-manifest -AppId notes -Name "Notes" -Command "npm.cmd run dev" -Cwd .
 .\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action register -ManifestPath .\relaybase.app.json
 .\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action start -AppId notes
-.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action url -AppId notes
 .\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action route-check -AppId notes
-.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action stream-logs -AppId notes
+.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action logs -AppId notes
 .\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action verify -AppId notes -ManifestPath .\relaybase.app.json
 ```
 
-## Decision Model
+The wrapper keeps PowerShell behavior process-local and does not require changing system policy.
 
-Use Relaybase when the task involves local app runtime, preview, routing, logs, health, or child MCP tools.
+## Fallback Rule
 
-Use direct ports only when Relaybase is unreachable, unsuitable for the app shape, explicitly bypassed by the user, or being debugged itself. When fallback happens, say why and how to return to Relaybase.
+Direct ports are fallback, not the default. Use them only when Relaybase is unreachable, unsuitable for the app shape, explicitly bypassed by the user, or being debugged itself.
 
-Success means the Relaybase route works, routed health works, logs are available, stop returns stopped, and the backend port is closed after stop when a port is known. A raw direct port listening is not Relaybase success.
+When fallback is used, Codex should say why and name the path back to Relaybase.
 
-For app-owned infrastructure such as Docker Compose, keep the boundary sharp: the app repo owns Compose files and wrapper scripts; Relaybase owns lifecycle state, hook execution, logs, readiness proof, and refusal to report `stopped` when cleanup or stop verification fails.
+## Ownership Boundaries
 
-The helper now includes Docker-aware diagnostics for Compose-backed apps:
+Relaybase owns lifecycle state, routing, assigned ports, logs, health proof, child MCP aggregation, and stop verification.
 
-```powershell
-.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action docker-preflight -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-detect -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-status -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-health -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-logs -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-cleanup -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action compose-verify-stop -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action docker-diagnose -ManifestPath .\relaybase.app.json
-.\skills\relaybase-dev\scripts\relaybase-dev.cmd -Action docker-prove -ManifestPath .\relaybase.app.json
+The app repo owns app code, start commands, health routes, environment values, Docker files, migrations, seeds, and app-specific hook behavior.
+
+Dashboards should call Relaybase APIs for app control. They should not spawn app processes directly unless they are explicitly in fallback mode.
+
+## Docker Compose Apps
+
+For Compose-backed apps, Codex should prefer the generated Docker profile:
+
+```text
+.relaybase/docker-profile.json
+.relaybase/docker-compose.relaybase.yml
+.relaybase/scripts/relaybase-prestart.ps1
+.relaybase/scripts/relaybase-start.ps1
+.relaybase/scripts/relaybase-stop.ps1
+.relaybase/scripts/relaybase-verify-stopped.ps1
 ```
 
-These actions read `.relaybase/docker-profile.json`; they are not separate user-facing setup commands.
+Relaybase runs these as generic lifecycle hooks. The app repo still owns Dockerfiles, Compose files, images, volumes, migrations, secrets, and registry auth.
 
-The exact Docker Compose behavior is documented in `docker-compose-lifecycle.md`.
+Use [docker-compose-lifecycle.md](docker-compose-lifecycle.md) for the exact Compose contract and current limits.
 
-## Troubleshooting Model
+## Troubleshooting Branches
 
-The skill now treats these as first-class branches:
+Common branches Codex should identify explicitly:
 
-- Token mismatch: discovery can be healthy while mutations return `401 Unauthorized`; use `diagnose-token` and compare state dirs.
-- Stale runtime: restart the dashboard when UI and edited dashboard files disagree; restart Relaybase when Relaybase behavior and edited Relaybase files disagree.
-- Windows lifecycle: prefer `npm.cmd`, use `relaybase-dev.cmd` for helper actions, never recommend `Set-ExecutionPolicy`, treat sandbox `spawn EPERM` as execution context first, and check stale Node processes before blaming product code.
-- Stop correctness: use `check-stop` with a known backend port, and treat an open backend port after stop as failure.
+- Token mismatch: discovery is healthy, but mutations return `401`.
+- Missing manifest: run `relaybase configure`.
+- Daemon unreachable: use `relaybase open` or start the daemon, then retry.
+- App command failure: fix the app-owned start command before blaming Relaybase.
+- Backend port failure: verify the expected port is open and owned by the app.
+- Route degradation: check both the `.localhost` route and the `X-Relaybase-App` header route.
+- Stale runtime: restart the edited dashboard or Relaybase process before assuming code changes failed.
+- Stop failure: treat an open Relaybase-owned backend port after stop as a failed stop.
